@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
 // Roles. A volunteer can upload cards; an admin can do that and manage the
@@ -32,9 +34,9 @@ const (
 const sessionCookie = "bs_session"
 
 // Register mounts the API routes on mux.
-func Register(mux *http.ServeMux, log *slog.Logger) {
+func Register(mux *http.ServeMux, database db.Store, log *slog.Logger) {
 	s := newStore()
-	h := &handlers{store: s, log: log}
+	h := &handlers{store: s, db: database, log: log}
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 
@@ -68,7 +70,11 @@ func Register(mux *http.ServeMux, log *slog.Logger) {
 }
 
 type handlers struct {
+	// store is the in-memory placeholder every handler still reads. Handlers
+	// move onto db one at a time as their APIs are fleshed out, and store.go
+	// is deleted when the last one has.
 	store *store
+	db    db.Store
 	log   *slog.Logger
 }
 

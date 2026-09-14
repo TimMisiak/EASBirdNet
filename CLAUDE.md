@@ -5,12 +5,16 @@ from local listening stations. One Go binary serves the JSON API *and* the
 static frontend, so the whole app is one container with no reverse proxy, no
 Node runtime, and no separate deploy for the UI.
 
+What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
+runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ```
 /
 ├── backend/            Go module: API + static file server
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
 │   └── internal/
 │       ├── api/        JSON handlers under /api/v1/
+│       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
@@ -26,6 +30,8 @@ Node runtime, and no separate deploy for the UI.
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
+├── SCHEMA.md           Stored documents: containers, fields, queries
+├── DEPLOYMENT.md       Azure resources and settings (Terraform source)
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
 └── docker-compose.yml
 ```
@@ -118,6 +124,21 @@ method-and-path patterns (`"GET /api/v1/health"`) handles routes, and
 `log/slog` handles logs. So we don't add a router, web framework, or logging
 library just out of habit.
 
+**One Store, two backends.** `internal/db` defines a `Store` interface with an
+entity-specific method per read or write the API needs (`ListUploads`,
+`UpdateDetection`, ...) and two implementations: Cosmos DB for NoSQL in Azure,
+and a single JSON file for local development. `BIRDSENSE_DB` picks one, and
+defaults to `cosmos` so a misconfigured deployment fails at startup instead of
+quietly writing to a file. Named methods rather than a query builder, because
+both backends must give identical answers, and filtering and sorting live once
+in `db.go`. Gotcha: the Go Cosmos SDK only runs cross-partition queries the
+gateway can serve, so queries are `SELECT * ... WHERE` and anything like
+`ORDER BY`, `COUNT` or `DISTINCT` happens in Go (details in SCHEMA.md). Updates
+take a mutate func (read, change, replace-if-unchanged), which is where rules
+like "progress only moves forward" become race-free.
+*Revisit when:* the JSON file gets slow (it rewrites everything on each write) —
+that means dev data has outgrown it, not that it needs indexing.
+
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
 styles itself with `var(--bs-*)`. That is the *only* styling channel across the
@@ -141,18 +162,25 @@ never reaches into a component.
   so a response can grow fields without breaking clients.
 - Go: handlers stay in `internal/api`, `internal/*` packages do not import
   `cmd/`. Tests sit beside the code (`api_test.go`).
+- A stored field changes in `internal/db/models.go` and SCHEMA.md together;
+  a container or partition key change also updates DEPLOYMENT.md.
 
 ## Running it
 
 Dev (two concerns, one process — Go serves the frontend from disk):
 
 ```sh
-cd backend && go run ./cmd/server     # http://localhost:8080
+cd backend && BIRDSENSE_DB=local go run ./cmd/server     # http://localhost:8080
 ```
 
 Frontend edits need only a browser reload; Go edits need a restart.
+`BIRDSENSE_DB=local` stores data in `backend/data/birdsense.json` (git-ignored;
+delete it to start empty, override with `BIRDSENSE_LOCAL_DB_PATH`). Without it
+the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
+`BIRDSENSE_COSMOS_DATABASE`) and exits if it isn't configured.
 
-Container:
+Container (compose sets `BIRDSENSE_DB=local` and keeps the file in a named
+volume):
 
 ```sh
 HOST_PORT=8080 docker compose up --build
@@ -166,7 +194,14 @@ cd backend && gofmt -l . && go vet ./... && go test ./...
 
 ## State of the code
 
-The API is wired end-to-end but `internal/api.sampleDetections()` returns
-hard-coded rows — there is no database and no BirdNET ingestion yet. The
-`Detection` shape is a first guess at what the UI needs; change it freely, but
-change `js/components/bs-detection-card.js` with it.
+The API is wired end to end, but every handler still reads the in-memory
+placeholder data in `internal/api/store.go`. The persistence layer
+(`internal/db`) and the data model (SCHEMA.md) exist, and the server opens the
+configured database at startup, but no handler reads or writes it yet.
+Handlers move onto `db.Store` one at a time as each API is fleshed out;
+`store.go` is deleted when the last one has. SCHEMA.md's *API mapping* section
+lists how today's JSON field names map onto the stored documents.
+
+The Cosmos DB backend compiles but has not been run against Azure or the
+emulator; the JSON-file backend and its tests define the behaviour it must
+match. There is no BirdNET ingestion and no blob storage yet.

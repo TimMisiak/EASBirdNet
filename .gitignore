@@ -6,3 +6,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Local development database (BIRDSENSE_DB=local)
+/backend/data/

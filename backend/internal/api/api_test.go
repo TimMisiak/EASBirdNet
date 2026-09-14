@@ -6,13 +6,22 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
-func newTestMux() *http.ServeMux {
+func newTestMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
 	mux := http.NewServeMux()
-	Register(mux, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	Register(mux, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return mux
 }
 
@@ -51,7 +60,7 @@ func do(t *testing.T, mux *http.ServeMux, method, path, body string, cookie *htt
 }
 
 func TestHealth(t *testing.T) {
-	rec := do(t, newTestMux(), http.MethodGet, "/api/v1/health", "", nil)
+	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/health", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -65,7 +74,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestPublicOverviewNeedsNoSession(t *testing.T) {
-	rec := do(t, newTestMux(), http.MethodGet, "/api/v1/public/overview?days=14", "", nil)
+	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/public/overview?days=14", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -89,7 +98,7 @@ func TestPublicOverviewNeedsNoSession(t *testing.T) {
 }
 
 func TestVolunteerRoutesNeedASession(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	for _, path := range []string{"/api/v1/uploads", "/api/v1/stations"} {
 		if rec := do(t, mux, http.MethodGet, path, "", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s anonymous = %d, want %d", path, rec.Code, http.StatusUnauthorized)
@@ -98,7 +107,7 @@ func TestVolunteerRoutesNeedASession(t *testing.T) {
 }
 
 func TestAdminRoutesRejectVolunteers(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	vol := signedIn(t, mux, RoleVolunteer)
 	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", vol); rec.Code != http.StatusForbidden {
 		t.Fatalf("volunteer GET /admin/people = %d, want %d", rec.Code, http.StatusForbidden)
@@ -110,7 +119,7 @@ func TestAdminRoutesRejectVolunteers(t *testing.T) {
 }
 
 func TestUploadsAreScopedToTheVolunteer(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	vol := signedIn(t, mux, RoleVolunteer)
 
 	rec := do(t, mux, http.MethodGet, "/api/v1/uploads", "", vol)
@@ -146,7 +155,7 @@ func TestUploadsAreScopedToTheVolunteer(t *testing.T) {
 }
 
 func TestCreateUploadThenReportProgress(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	vol := signedIn(t, mux, RoleVolunteer)
 
 	body := `{"stationId":"SW-03","pulledOn":"2026-09-14","notes":"clear night",
@@ -186,7 +195,7 @@ func TestCreateUploadThenReportProgress(t *testing.T) {
 }
 
 func TestProgressOnlyMovesForward(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	vol := signedIn(t, mux, RoleVolunteer)
 	const ref = "OWL-20260907-SR02" // seeded at 214 of 336 files
 
@@ -206,7 +215,7 @@ func TestProgressOnlyMovesForward(t *testing.T) {
 }
 
 func TestOneVolunteerCannotReadAnothersCard(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	vol := signedIn(t, mux, RoleVolunteer) // Jane
 	// OWL-20260821-SR03 belongs to Marcus Lee.
 	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260821-SR03", "", vol); rec.Code != http.StatusNotFound {
@@ -215,14 +224,14 @@ func TestOneVolunteerCannotReadAnothersCard(t *testing.T) {
 }
 
 func TestSignInRejectsAnAddressNotOnTheRoster(t *testing.T) {
-	rec := do(t, newTestMux(), http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil)
+	rec := do(t, newTestMux(t), http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
 
 func TestAddPersonRejectsADuplicate(t *testing.T) {
-	mux := newTestMux()
+	mux := newTestMux(t)
 	admin := signedIn(t, mux, RoleAdmin)
 	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
 		`{"name":"Jane Again","email":"jane@example.com","role":"volunteer"}`, admin)
@@ -232,7 +241,7 @@ func TestAddPersonRejectsADuplicate(t *testing.T) {
 }
 
 func TestUnknownAPIPathIsJSON404(t *testing.T) {
-	rec := do(t, newTestMux(), http.MethodGet, "/api/v1/nope", "", nil)
+	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/nope", "", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}

@@ -10,4 +10,13 @@ services:
     environment:
       BIRDSENSE_ADDR: ":8080"
       BIRDSENSE_STATIC_DIR: "/app/frontend"
+      # Local development uses the JSON file backend. Azure runs the default,
+      # Cosmos DB -- see DEPLOYMENT.md.
+      BIRDSENSE_DB: "local"
+      BIRDSENSE_LOCAL_DB_PATH: "/app/data/birdsense.json"
+    volumes:
+      - birdsense-data:/app/data
     restart: unless-stopped
+
+volumes:
+  birdsense-data:
