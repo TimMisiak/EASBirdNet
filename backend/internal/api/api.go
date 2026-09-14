@@ -64,6 +64,8 @@ func Register(mux *http.ServeMux, database db.Store, log *slog.Logger, dev bool)
 	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(RoleAdmin, h.updatePerson))
 	mux.HandleFunc("DELETE /api/v1/admin/people/{id}", h.requireRole(RoleAdmin, h.removePerson))
 	mux.HandleFunc("POST /api/v1/admin/stations", h.requireRole(RoleAdmin, h.addStation))
+	mux.HandleFunc("PUT /api/v1/admin/stations/{id}", h.requireRole(RoleAdmin, h.updateStation))
+	mux.HandleFunc("DELETE /api/v1/admin/stations/{id}", h.requireRole(RoleAdmin, h.removeStation))
 
 	// Development only: not registered at all otherwise, so a deployed server
 	// 404s instead of handing the roster to anyone who asks.
@@ -396,12 +398,8 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ Person) 
 		return
 	}
 	body.Name = strings.TrimSpace(body.Name)
-	if body.Name == "" {
-		h.json(w, http.StatusBadRequest, map[string]string{"error": "a station name is required"})
-		return
-	}
-	if body.Latitude == 0 && body.Longitude == 0 {
-		h.json(w, http.StatusBadRequest, map[string]string{"error": "place the recorder on the map first"})
+	if problem := stationProblem(body.Name, body.Latitude, body.Longitude); problem != "" {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": problem})
 		return
 	}
 	station, err := h.store.AddStation(strings.TrimSpace(body.ID), body.Name, body.Latitude, body.Longitude)
@@ -410,6 +408,53 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ Person) 
 		return
 	}
 	h.json(w, http.StatusCreated, map[string]any{"station": station})
+}
+
+// updateStation renames or moves a recorder. The id is printed on the unit, so
+// it is only in the path: a mistyped id is fixed by deleting and re-adding.
+func (h *handlers) updateStation(w http.ResponseWriter, r *http.Request, _ Person) {
+	var body struct {
+		Name      string  `json:"name"`
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+	if err := decode(r, &body); err != nil {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	if problem := stationProblem(body.Name, body.Latitude, body.Longitude); problem != "" {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": problem})
+		return
+	}
+	station, err := h.store.UpdateStation(r.PathValue("id"), body.Name, body.Latitude, body.Longitude)
+	if err != nil {
+		h.json(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	h.json(w, http.StatusOK, map[string]any{"station": station})
+}
+
+func (h *handlers) removeStation(w http.ResponseWriter, r *http.Request, _ Person) {
+	id := r.PathValue("id")
+	if err := h.store.RemoveStation(id); err != nil {
+		h.json(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	h.json(w, http.StatusOK, map[string]string{"removed": id})
+}
+
+// stationProblem is what's wrong with a recorder's name and position, or "".
+func stationProblem(name string, lat, lon float64) string {
+	switch {
+	case name == "":
+		return "a station name is required"
+	case lat == 0 && lon == 0:
+		return "place the recorder on the map first"
+	case lat < -90 || lat > 90 || lon < -180 || lon > 180:
+		return "those coordinates aren't on the map"
+	}
+	return ""
 }
 
 // --- plumbing ---

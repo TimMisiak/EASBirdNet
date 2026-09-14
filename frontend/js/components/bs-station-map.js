@@ -6,8 +6,10 @@ import { reset } from "../shared-styles.js";
  *
  * Clicking the map or dragging the draft pin raises `bs-place` with the
  * coordinates; the fields next to the map stay the authoritative way to type
- * them. Set `stations` (the recorders in the field) and `draft` (the one being
- * added, or null) as properties.
+ * them. Clicking a station's pin raises `bs-select` with its id. Set `stations`
+ * (the recorders in the field), `draft` (the pin being placed, or null) and
+ * `selected` (the id of a station being edited, whose own pin the draft
+ * stands in for) as properties.
  *
  * This extends HTMLElement rather than BaseElement: Leaflet owns the DOM inside
  * the map, so the shadow root is built once and pins are updated in place
@@ -45,6 +47,7 @@ const loadLeaflet = () =>
 class StationMap extends HTMLElement {
   #stations = [];
   #draft = null;
+  #selected = null;
 
   #L = null;
   #map = null;
@@ -130,6 +133,11 @@ class StationMap extends HTMLElement {
     this.#syncStations();
   }
 
+  set selected(value) {
+    this.#selected = value;
+    this.#syncStations();
+  }
+
   set draft(value) {
     this.#draft = value;
     this.#syncDraft();
@@ -188,12 +196,15 @@ class StationMap extends HTMLElement {
     const L = this.#L;
     this.#stationLayer.clearLayers();
     this.#stations.forEach((station, i) => {
+      // Skipped rather than filtered out, so the other pins keep their numbers.
+      if (station.id === this.#selected) return;
       L.marker([station.latitude, station.longitude], {
         icon: pinIcon(L, i + 1),
         keyboard: false,
       })
         // Tooltip strings are set as innerHTML.
         .bindTooltip(`${escapeHTML(station.name)} · ${escapeHTML(station.id)}`)
+        .on("click", () => this.dispatchEvent(new CustomEvent("bs-select", { detail: { id: station.id } })))
         .addTo(this.#stationLayer);
     });
 

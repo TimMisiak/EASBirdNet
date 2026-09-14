@@ -423,6 +423,103 @@ func TestReaddressingYourselfKeepsYouSignedIn(t *testing.T) {
 	}
 }
 
+func TestStationEditsAreAdminOnly(t *testing.T) {
+	mux := newTestMux(t)
+	vol := signedIn(t, mux, RoleVolunteer)
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/SW-02",
+		`{"name":"Marymoor","latitude":47.66,"longitude":-122.11}`, vol); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer PUT = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/stations/SW-02", "", vol); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestUpdateStation(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/SW-02",
+		`{"name":"  Marymoor Park – Dog Area ","latitude":47.661,"longitude":-122.115}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	var body struct {
+		Station Station `json:"station"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st := body.Station; st.ID != "SW-02" || st.Name != "Marymoor Park – Dog Area" || st.Latitude != 47.661 || st.Longitude != -122.115 {
+		t.Errorf("station = %+v", st)
+	}
+
+	// Cards already sent keep the name they were recorded under.
+	var all struct {
+		Uploads []Upload `json:"uploads"`
+	}
+	rec = do(t, mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)
+	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, u := range all.Uploads {
+		if u.StationID == "SW-02" && u.StationName != "Marymoor Park – Snag Row" {
+			t.Errorf("card %s now says %q; want the name it was sent under", u.Reference, u.StationName)
+		}
+	}
+}
+
+func TestUpdateStationRejectsBadInput(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	for _, tc := range []struct {
+		id, body string
+		want     int
+	}{
+		{"SW-02", `{"name":" ","latitude":47.6,"longitude":-122.1}`, http.StatusBadRequest},
+		{"SW-02", `{"name":"Marymoor","latitude":0,"longitude":0}`, http.StatusBadRequest},
+		{"SW-02", `{"name":"Marymoor","latitude":147.6,"longitude":-122.1}`, http.StatusBadRequest},
+		// The id is printed on the unit; it isn't something an edit can change.
+		{"SW-02", `{"id":"SW-09","name":"Marymoor","latitude":47.6,"longitude":-122.1}`, http.StatusBadRequest},
+		{"SW-99", `{"name":"Nowhere","latitude":47.6,"longitude":-122.1}`, http.StatusNotFound},
+	} {
+		if rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/"+tc.id, tc.body, admin); rec.Code != tc.want {
+			t.Errorf("PUT %s %s = %d, want %d", tc.id, tc.body, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestRemoveStation(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/stations/SW-05", "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/stations/SW-05", "", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	var list struct {
+		Stations []Station `json:"stations"`
+	}
+	rec := do(t, mux, http.MethodGet, "/api/v1/stations", "", admin)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, st := range list.Stations {
+		if st.ID == "SW-05" {
+			t.Error("removed recorder is still listed")
+		}
+	}
+
+	// And a new card can't be registered against it.
+	vol := signedIn(t, mux, RoleVolunteer)
+	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
+		`{"stationId":"SW-05","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`, vol)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("card for a removed recorder = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestUnknownAPIPathIsJSON404(t *testing.T) {
 	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/nope", "", nil)
 	if rec.Code != http.StatusNotFound {

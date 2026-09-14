@@ -71,3 +71,7 @@ export const updatePerson = (id, body) =>
 /** Take someone off the roster. Refused for yourself and for the last admin. */
 export const removePerson = (id) => request("DELETE", `/admin/people/${encodeURIComponent(id)}`);
 export const addStation = (body) => request("POST", "/admin/stations", body);
+/** Rename or move a recorder. Its id is printed on the unit and can't change. */
+export const updateStation = (id, body) =>
+  request("PUT", `/admin/stations/${encodeURIComponent(id)}`, body);
+export const removeStation = (id) => request("DELETE", `/admin/stations/${encodeURIComponent(id)}`);

@@ -101,6 +101,7 @@ GET    /api/v1/admin/uploads              every card, admin only
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
+PUT    DELETE /api/v1/admin/stations/{id} rename, move or remove a recorder
 GET    /api/v1/dev/people                 the roster, dev mode only
 ```
 

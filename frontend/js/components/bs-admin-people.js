@@ -209,15 +209,6 @@ class AdminPeople extends BaseElement {
         td.actions { text-align: right; white-space: nowrap; }
         td.actions .btn + .btn { margin-left: var(--bs-space-2); }
         .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
-        .btn--danger { color: var(--bs-chip-attention-text); }
-        .btn--danger:hover:not([disabled]):not([aria-disabled="true"]) { border-color: var(--bs-chip-attention-text); }
-        .btn--danger-solid {
-          background: var(--bs-chip-attention-text);
-          border-color: var(--bs-chip-attention-text);
-          color: var(--bs-surface);
-        }
-        .btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
-        .btn[aria-disabled="true"]:hover { border-color: var(--bs-border-strong); }
 
         tr.editing td { padding-top: 0.625rem; padding-bottom: 0.625rem; }
         .field--row { min-height: 2.25rem; font-size: 0.875rem; }
@@ -228,20 +219,6 @@ class AdminPeople extends BaseElement {
         tbody tr.sub { border-top: 0; }
         tr.sub td { padding-top: 0; }
         tr.sub .error { margin-bottom: 0; }
-        .confirm {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: var(--bs-space-3);
-          flex-wrap: wrap;
-          padding: var(--bs-space-3) var(--bs-space-4);
-          background: var(--bs-chip-attention-bg);
-          border: 1px solid var(--bs-chip-attention-border);
-          border-radius: var(--bs-radius);
-          color: var(--bs-chip-attention-text);
-          font-size: 0.875rem;
-        }
-        .confirm .row { gap: var(--bs-space-2); }
         @media (max-width: 860px) { .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); } }
       </style>
 

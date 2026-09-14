@@ -86,6 +86,18 @@ export const controls = sheet(`
   .btn--quiet:hover:not([disabled]) { border-color: var(--bs-forest); }
   .btn--small { padding: 0.6875rem 1.125rem; font-size: 0.875rem; }
   .btn--block { width: 100%; }
+
+  /* Destructive actions. Quiet until asked, solid inside the confirmation. */
+  .btn--danger { color: var(--bs-chip-attention-text); }
+  .btn--danger:hover:not([disabled]):not([aria-disabled="true"]) { border-color: var(--bs-chip-attention-text); }
+  .btn--danger-solid {
+    background: var(--bs-chip-attention-text);
+    border-color: var(--bs-chip-attention-text);
+    color: var(--bs-surface);
+  }
+  /* Looks disabled but still takes a click, so it can say why it is. */
+  .btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+  .btn[aria-disabled="true"]:hover { border-color: var(--bs-border-strong); }
 `);
 
 /** Text inputs, selects, textareas and their labels. */
@@ -205,4 +217,21 @@ export const panels = sheet(`
     border-top: 1px solid var(--bs-border);
   }
   .note { font-size: 0.8125rem; color: var(--bs-text-muted); line-height: 1.6; }
+
+  /* An inline "are you sure?" before something is deleted. */
+  .confirm {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--bs-space-3);
+    flex-wrap: wrap;
+    padding: var(--bs-space-3) var(--bs-space-4);
+    background: var(--bs-chip-attention-bg);
+    border: 1px solid var(--bs-chip-attention-border);
+    border-radius: var(--bs-radius);
+    color: var(--bs-chip-attention-text);
+    font-size: 0.875rem;
+  }
+  .confirm p { color: var(--bs-chip-attention-text); margin: 0; }
+  .confirm .row { gap: var(--bs-space-2); }
 `);

@@ -358,6 +358,38 @@ func (s *store) AddStation(id, name string, lat, lon float64) (Station, error) {
 	return st, nil
 }
 
+// ErrNoSuchStation means no recorder has the id asked for.
+var ErrNoSuchStation = errors.New("no recorder has that id")
+
+// UpdateStation renames or moves a recorder. The id is printed on the unit, so
+// it never changes, and cards already sent keep the name and place they were
+// recorded under.
+func (s *store) UpdateStation(id, name string, lat, lon float64) (Station, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.stations, func(st Station) bool { return st.ID == id })
+	if i < 0 {
+		return Station{}, ErrNoSuchStation
+	}
+	st := s.stations[i]
+	st.Name, st.Latitude, st.Longitude = name, lat, lon
+	s.stations[i] = st
+	return st, nil
+}
+
+// RemoveStation takes a recorder off the list. The stored version will set
+// retiredAt instead; either way, past cards keep their own copy of the name.
+func (s *store) RemoveStation(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.stations, func(st Station) bool { return st.ID == id })
+	if i < 0 {
+		return ErrNoSuchStation
+	}
+	s.stations = slices.Delete(s.stations, i, i+1)
+	return nil
+}
+
 func (s *store) AddPerson(name, email, role string) Person {
 	s.mu.Lock()
 	defer s.mu.Unlock()
