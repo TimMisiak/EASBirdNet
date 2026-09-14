@@ -194,7 +194,7 @@ environment forwards here.
 | identity | `UserAssigned`, the identity above | |
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
 | container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
-| cpu / memory | `0.25` / `0.5Gi` | A Go binary serving small JSON and static files. |
+| cpu / memory | `0.25` / `0.5Gi` | A Go binary serving small JSON and static files. The image also carries BirdNET (Python + models), but the server doesn't run it yet. Once it does in this app, a one-worker run peaks near 300 MB on top of the server, so raise memory to at least `1Gi` (and cpu with it, since Container Apps couples the two) or move analysis to a job; see *Open questions*. |
 | min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). **Keep max at 1** while `internal/api` still serves its in-memory placeholder data, or two replicas would disagree. Raise it once the handlers read from Cosmos. |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | liveness / readiness / startup probes | HTTP GET `/api/v1/health` on port `8080` | The same endpoint the Dockerfile `HEALTHCHECK` uses. |
@@ -210,6 +210,7 @@ environment forwards here.
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`). |
+| `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 
@@ -321,7 +322,10 @@ can't be changed in place.
   their own section here.
 - **BirdNET processing**: where analysis runs (a Container Apps job triggered
   by a queue is the natural fit). It will add a queue, a job, and the same
-  identity-based roles.
+  identity-based roles. The image already has what a job needs
+  (`/app/birdsense-analyze`, the Python venv, and the models), so a job can
+  start from the same image and split off later. The build downloads the models
+  from Zenodo, so `az acr build` needs outbound network.
 - **Email**: the upload flow promises "card received" and "results" emails,
   which needs Azure Communication Services or an external provider.
 
