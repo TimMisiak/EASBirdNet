@@ -116,17 +116,8 @@ class SignInPage extends BaseElement {
           gap: var(--bs-space-3);
         }
         .provider:hover:not([disabled]) { border-color: var(--bs-forest); }
-        .provider .glyph {
-          width: 20px; height: 20px;
-          border-radius: 50%;
-          background: var(--bs-bg-deep);
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          font-family: var(--bs-font-mono);
-          font-size: 0.6875rem;
-        }
-        .provider .glyph[data-square="true"] { border-radius: 0; }
+        /* The providers' own logo files, unaltered, as their brand rules require. */
+        .provider .logo { width: 20px; height: 20px; flex: none; }
         .help {
           border-top: 1px solid var(--bs-border);
           margin-top: 1.625rem;
@@ -157,15 +148,14 @@ class SignInPage extends BaseElement {
         <bs-brand-mark variant="inline" on="light" size="30"></bs-brand-mark>
         <h1>Sign in</h1>
         <p class="intro">
-          Use the email address your coordinator added to the roster. We don't keep a
-          password for you.
+          Use the email address your coordinator added to the roster.
         </p>
         <div class="providers">
           <button class="btn provider" data-action="provider" data-provider="Google" ${this.#busy ? "disabled" : ""}>
-            <span class="glyph" aria-hidden="true">G</span> Continue with Google
+            <img class="logo" src="/images/google-g.svg" alt="" width="20" height="20"> Continue with Google
           </button>
           <button class="btn provider" data-action="provider" data-provider="Microsoft" ${this.#busy ? "disabled" : ""}>
-            <span class="glyph" data-square="true" aria-hidden="true">M</span> Continue with Microsoft
+            <img class="logo" src="/images/microsoft-logo.svg" alt="" width="20" height="20"> Continue with Microsoft
           </button>
         </div>
         ${this.#error ? `<p class="error">${escapeHTML(this.#error.message)}</p>` : ""}
