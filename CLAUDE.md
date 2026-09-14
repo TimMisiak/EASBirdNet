@@ -41,7 +41,8 @@ virtual DOM, so a component re-renders by rewriting its own shadow root.
 ES modules (`<script type="module">`). No bundler, no transpiler, no
 `node_modules`, no `npm install` before you can see a change. This is the
 constraint that pays for itself in the Dockerfile and in onboarding — it holds
-until we actually need a dependency.
+until the frontend actually needs a third-party package. (This is a frontend
+rule only; Go dependencies are a separate call, see *Go dependencies* below.)
 *Revisit when:* we need an npm dependency, or asset fingerprinting for
 long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
@@ -106,10 +107,16 @@ that adopted it. Every shared sheet is therefore wrapped in
 `@layer bs-base { ... }`, because unlayered rules outrank every layer -- what a
 component writes for itself always wins.
 
-**Standard library only.** `net/http` with Go 1.22+ method-and-path patterns
-(`"GET /api/v1/health"`) covers routing; `log/slog` covers logging. No router,
-no web framework, no logging library. Keep it that way unless something
-concrete is missing.
+**Go dependencies are fine; the stdlib already covers HTTP.** The "no
+dependencies" rule is about the *frontend* (npm packages, see *No build step*).
+It does not apply to the Go module. Add a Go dependency when it does a real job
+the standard library doesn't: a database driver, migrations, password hashing
+(`golang.org/x/crypto`), BirdNET/audio parsing, and so on. A Go dependency costs
+one `go get` plus the cached `go mod download` layer already in the Dockerfile.
+Routing and logging are already covered: `net/http` with Go 1.22+
+method-and-path patterns (`"GET /api/v1/health"`) handles routes, and
+`log/slog` handles logs. So we don't add a router, web framework, or logging
+library just out of habit.
 
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
