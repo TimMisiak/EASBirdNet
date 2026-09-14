@@ -17,6 +17,24 @@ class AdminRecorders extends BaseElement {
   #formError = null;
   #busy = false;
 
+  // One map for the life of the page, moved into each fresh render: rebuilding
+  // it would reload the tiles and throw away wherever the coordinator had
+  // panned and zoomed to.
+  #map = document.createElement("bs-station-map");
+
+  constructor() {
+    super();
+    this.#map.addEventListener("bs-place", (event) => {
+      this.#draft.latitude = String(event.detail.latitude);
+      this.#draft.longitude = String(event.detail.longitude);
+      // Only the two coordinate fields change; re-rendering the form here would
+      // steal focus from the name field mid-typing.
+      this.$('[name="latitude"]').value = this.#draft.latitude;
+      this.$('[name="longitude"]').value = this.#draft.longitude;
+      this.#syncMap();
+    });
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this.#load().then(() => this.render());
@@ -72,8 +90,7 @@ class AdminRecorders extends BaseElement {
   }
 
   #syncMap() {
-    const map = this.$("bs-station-map");
-    if (map) map.draft = this.#draftPin();
+    this.#map.draft = this.#draftPin();
   }
 
   render() {
@@ -106,7 +123,7 @@ class AdminRecorders extends BaseElement {
 
       <div class="columns">
         <div>
-          <bs-station-map></bs-station-map>
+          <div class="map-slot"></div>
           <p class="note" style="margin-top: var(--bs-space-3);">
             Click anywhere on the map to drop a pin, or drag it to correct the position.
             Coordinates fill in beside it and can be typed instead.
@@ -165,18 +182,9 @@ class AdminRecorders extends BaseElement {
       </div>
     `;
 
-    const map = this.$("bs-station-map");
-    map.stations = stations;
-    map.draft = this.#draftPin();
-    map.addEventListener("bs-place", (event) => {
-      this.#draft.latitude = String(event.detail.latitude);
-      this.#draft.longitude = String(event.detail.longitude);
-      // Only the two coordinate fields change; re-rendering the form here would
-      // steal focus from the name field mid-typing.
-      this.$('[name="latitude"]').value = this.#draft.latitude;
-      this.$('[name="longitude"]').value = this.#draft.longitude;
-      this.#syncMap();
-    });
+    this.$(".map-slot").replaceWith(this.#map);
+    this.#map.stations = stations;
+    this.#syncMap();
   }
 }
 
