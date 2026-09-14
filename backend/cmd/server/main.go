@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +43,14 @@ func main() {
 	default:
 		log.Info("database ready", "backend", db.BackendCosmos,
 			"endpoint", cfg.DB.CosmosEndpoint, "database", cfg.DB.CosmosDatabase, "key_auth", cfg.DB.CosmosKey != "")
+	}
+
+	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
+	err = bootstrapRoster(bootCtx, cfg, store, log)
+	cancelBoot()
+	if err != nil {
+		log.Error("bootstrapping the roster", "err", err)
+		os.Exit(1)
 	}
 
 	srv := &http.Server{
@@ -94,6 +104,9 @@ type config struct {
 	// the roster. It follows BIRDSENSE_DB=local: the JSON file is only ever a
 	// development database, and Azure runs Cosmos, so it can't be on there.
 	Dev bool
+	// BootstrapAdmin, when set, is added as an admin if the roster is empty,
+	// so a fresh deployment has someone who can add everyone else.
+	BootstrapAdmin *mail.Address
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -120,7 +133,59 @@ func configFromEnv() (config, error) {
 	default:
 		return cfg, fmt.Errorf("BIRDSENSE_DB must be %q or %q, not %q", db.BackendCosmos, db.BackendLocal, cfg.DB.Backend)
 	}
+
+	if v := strings.TrimSpace(os.Getenv("BIRDSENSE_BOOTSTRAP_ADMIN")); v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil {
+			return cfg, fmt.Errorf(`BIRDSENSE_BOOTSTRAP_ADMIN must be "Name <email>" or an email, not %q: %w`, v, err)
+		}
+		// The placeholder roster is only for exercising the frontend. Dev mode
+		// may reuse it; anything else is a real database, where one of those
+		// people as admin would be a typo at best and a way in at worst.
+		if !cfg.Dev && (api.IsPlaceholderPerson(addr.Name, addr.Address) || reservedDomain(addr.Address)) {
+			return cfg, fmt.Errorf("BIRDSENSE_BOOTSTRAP_ADMIN %q is development placeholder data; name a real person for the %s database", v, cfg.DB.Backend)
+		}
+		cfg.BootstrapAdmin = addr
+	}
 	return cfg, nil
+}
+
+// reservedDomain reports whether an address is on a domain RFC 2606 sets aside
+// for documentation and testing, so it can never be a real mailbox.
+func reservedDomain(email string) bool {
+	domain := strings.ToLower(email[strings.LastIndex(email, "@")+1:])
+	for _, d := range []string{"example.com", "example.net", "example.org"} {
+		if domain == d || strings.HasSuffix(domain, "."+d) {
+			return true
+		}
+	}
+	for _, tld := range []string{".example", ".test", ".invalid", ".localhost"} {
+		if strings.HasSuffix(domain, tld) {
+			return true
+		}
+	}
+	return false
+}
+
+// bootstrapRoster adds the configured first admin to an empty roster. It is
+// the only roster write the server makes on its own, in any mode.
+func bootstrapRoster(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
+	if cfg.BootstrapAdmin == nil {
+		return nil
+	}
+	email := cfg.BootstrapAdmin.Address
+	u, created, err := db.BootstrapAdmin(ctx, store, cfg.BootstrapAdmin.Name, email)
+	switch {
+	case err != nil:
+		return err
+	case created:
+		log.Info("added the bootstrap admin to an empty roster", "email", u.Email, "id", u.ID)
+	case u.ID == "":
+		log.Warn("BIRDSENSE_BOOTSTRAP_ADMIN is not on the roster, and the roster is not empty, so it was not added", "email", email)
+	default:
+		log.Info("roster already bootstrapped", "email", u.Email, "role", u.Role)
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {

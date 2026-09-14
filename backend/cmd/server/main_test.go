@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
@@ -49,7 +51,7 @@ func TestRoutesCoexist(t *testing.T) {
 }
 
 func TestConfigFromEnvDatabase(t *testing.T) {
-	for _, key := range []string{"BIRDSENSE_DB", "BIRDSENSE_LOCAL_DB_PATH", "BIRDSENSE_COSMOS_ENDPOINT", "BIRDSENSE_COSMOS_DATABASE", "BIRDSENSE_COSMOS_KEY"} {
+	for _, key := range []string{"BIRDSENSE_DB", "BIRDSENSE_LOCAL_DB_PATH", "BIRDSENSE_COSMOS_ENDPOINT", "BIRDSENSE_COSMOS_DATABASE", "BIRDSENSE_COSMOS_KEY", "BIRDSENSE_BOOTSTRAP_ADMIN"} {
 		t.Setenv(key, "")
 	}
 
@@ -81,5 +83,90 @@ func TestConfigFromEnvDatabase(t *testing.T) {
 	t.Setenv("BIRDSENSE_DB", "sqlite")
 	if _, err := configFromEnv(); err == nil {
 		t.Error("an unknown BIRDSENSE_DB was accepted")
+	}
+}
+
+func TestConfigFromEnvBootstrapAdmin(t *testing.T) {
+	t.Setenv("BIRDSENSE_DB", "")
+	t.Setenv("BIRDSENSE_COSMOS_ENDPOINT", "https://birdsense.documents.azure.com:443/")
+
+	t.Setenv("BIRDSENSE_BOOTSTRAP_ADMIN", "")
+	if cfg, err := configFromEnv(); err != nil || cfg.BootstrapAdmin != nil {
+		t.Errorf("unset bootstrap admin = %v, %v; want none", cfg.BootstrapAdmin, err)
+	}
+
+	for _, v := range []string{"Ada Admin <ada@eastsideaudubon.org>", "ada@eastsideaudubon.org"} {
+		t.Setenv("BIRDSENSE_BOOTSTRAP_ADMIN", v)
+		cfg, err := configFromEnv()
+		if err != nil || cfg.BootstrapAdmin == nil || cfg.BootstrapAdmin.Address != "ada@eastsideaudubon.org" {
+			t.Errorf("bootstrap admin %q = %v, %v; want ada@eastsideaudubon.org", v, cfg.BootstrapAdmin, err)
+		}
+	}
+
+	t.Setenv("BIRDSENSE_BOOTSTRAP_ADMIN", "not an address")
+	if _, err := configFromEnv(); err == nil {
+		t.Error("a malformed bootstrap admin was accepted")
+	}
+
+	// Placeholder people are refused for a real database, by address or name.
+	placeholders := []string{
+		"Dana Coordinator <dana@eastsideaudubon.org>",
+		"DANA@eastsideaudubon.org",
+		"Ellen Park <ellen@eastsideaudubon.org>",
+		"Real Person <real@example.com>",
+		"Real Person <real@birdsense.test>",
+	}
+	for _, v := range placeholders {
+		t.Setenv("BIRDSENSE_BOOTSTRAP_ADMIN", v)
+		if _, err := configFromEnv(); err == nil {
+			t.Errorf("placeholder bootstrap admin %q was accepted for cosmos", v)
+		}
+	}
+
+	// Dev mode may reuse them.
+	t.Setenv("BIRDSENSE_DB", "local")
+	t.Setenv("BIRDSENSE_BOOTSTRAP_ADMIN", placeholders[0])
+	if _, err := configFromEnv(); err != nil {
+		t.Errorf("placeholder bootstrap admin in dev mode: %v", err)
+	}
+}
+
+// Nothing the production startup path does -- bootstrapping the roster, then
+// wiring the API -- may put a placeholder person into the database.
+func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
+	ctx := t.Context()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := config{
+		StaticDir:      t.TempDir(),
+		DB:             db.Config{Backend: db.BackendCosmos},
+		BootstrapAdmin: &mail.Address{Name: "Ada Admin", Address: "ada@eastsideaudubon.org"},
+	}
+	for range 2 { // a restart with the setting still in place
+		if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		mux := newMux(cfg, store, log)
+		for _, path := range []string{"/api/v1/health", "/api/v1/session", "/api/v1/public/overview"} {
+			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		}
+	}
+
+	users, err := store.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].Email != "ada@eastsideaudubon.org" || users[0].Role != db.RoleAdmin {
+		t.Errorf("roster after startup = %+v, want only the bootstrap admin", users)
+	}
+	for _, u := range users {
+		if api.IsPlaceholderPerson(u.Name, u.Email) {
+			t.Errorf("placeholder person %s <%s> was written to the database", u.Name, u.Email)
+		}
 	}
 }

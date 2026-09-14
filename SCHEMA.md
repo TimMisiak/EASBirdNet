@@ -56,7 +56,9 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
 ## `users`
 
 Someone on the roster. There is no password: the roster is the allow-list, and
-sign-in is delegated to Google or Microsoft.
+sign-in is delegated to Google or Microsoft. The first admin is added at startup
+from `BIRDSENSE_BOOTSTRAP_ADMIN`, but only when the roster is empty (see
+DEPLOYMENT.md). Admins add everyone after that.
 
 | Field          | Type      | Notes |
 |----------------|-----------|-------|

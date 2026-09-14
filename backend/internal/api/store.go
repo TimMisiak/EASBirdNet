@@ -128,6 +128,19 @@ func at(y int, m time.Month, d, hh, mm int) time.Time {
 	return time.Date(y, m, d, hh, mm, 0, 0, loc)
 }
 
+// IsPlaceholderPerson reports whether a name or address belongs to the
+// placeholder roster seeded below. Those people exist to exercise the
+// frontend, and the server refuses to put one into a production database.
+func IsPlaceholderPerson(name, email string) bool {
+	name, email = strings.TrimSpace(name), strings.TrimSpace(email)
+	for _, p := range newStore().People() {
+		if strings.EqualFold(p.Email, email) || (name != "" && strings.EqualFold(p.Name, name)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *store) seed() {
 	s.stations = []Station{
 		{"SW-01", "Lake Sammamish – Sunset Beach", 47.55600, -122.06400, day(2026, time.March, 14)},

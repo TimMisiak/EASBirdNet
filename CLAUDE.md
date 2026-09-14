@@ -183,6 +183,10 @@ Frontend edits need only a browser reload; Go edits need a restart.
 delete it to start empty, override with `BIRDSENSE_LOCAL_DB_PATH`). Without it
 the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
 `BIRDSENSE_COSMOS_DATABASE`) and exits if it isn't configured.
+`BIRDSENSE_BOOTSTRAP_ADMIN="Name <email>"` adds the first admin to an empty
+roster (required on a first deploy, see DEPLOYMENT.md). Outside dev mode it
+refuses anyone from the placeholder roster in `internal/api/store.go`, so dev
+people never reach Cosmos.
 
 Container (compose sets `BIRDSENSE_DB=local` and keeps the file in a named
 volume):

@@ -208,6 +208,7 @@ environment forwards here.
 | `BIRDSENSE_COSMOS_DATABASE` | `birdsense` | |
 | `AZURE_CLIENT_ID` | `azurerm_user_assigned_identity.this.client_id` | Tells the SDK *which* managed identity to use. Required for a user-assigned identity. |
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
+| `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`). |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
@@ -227,6 +228,28 @@ invisible to it:
 2. Role assignments take a minute or two to propagate. A first `apply` can
    still race them. If the first revision fails, re-apply or restart the
    revision; it is not a config error.
+
+## First deploy
+
+A new database has an empty `users` container, and only an admin can add
+people to the roster. So the **first deploy must set
+`BIRDSENSE_BOOTSTRAP_ADMIN`** to the coordinator who will run the program,
+as `Name <email>` or just the email. That address is the one they sign in with
+through Google or Microsoft. Make it a Terraform variable (`bootstrap_admin`)
+with no default, so a first `apply` can't go ahead without it.
+
+On startup the server adds that person as an admin **only if the roster is
+empty**, and logs `added the bootstrap admin to an empty roster`. Every other
+start does nothing, so the variable is safe to leave set: it can't make someone
+admin again after they've been demoted, removed or given a new address. If the
+roster isn't empty and the address isn't on it, the server logs a warning and
+carries on. A typo on the first deploy has to be fixed in the Cosmos Data
+Explorer, because the roster is no longer empty.
+
+Outside dev mode the server **refuses to start** if the bootstrap admin's name
+or address is someone from the development placeholder roster
+(`internal/api/store.go`), or if the address is on a reserved example domain
+(`example.com`, `*.test`, ...). Dev placeholder people never go into Cosmos.
 
 ## Deploying a new version
 
@@ -317,7 +340,7 @@ can't be changed in place.
 | 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` |
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` |
-| 12 | Container app (env vars, probes, 0–1 replicas, `depends_on` the role assignments) | `azurerm_container_app` |
+| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` from a required variable, probes, 0–1 replicas, `depends_on` the role assignments) | `azurerm_container_app` |
 
 **Outputs**: container app FQDN, Cosmos endpoint, ACR login server, identity
 client id.
