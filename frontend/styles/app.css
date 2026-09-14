@@ -1,0 +1,48 @@
+/* Document-level styles and design tokens.
+ *
+ * Custom properties pierce shadow DOM, so these tokens are how components stay
+ * visually consistent: every component styles itself with var(--bs-*) and never
+ * hard-codes a color or spacing value. Component-specific rules live inside the
+ * component's own <style>, not here. */
+
+:root {
+  color-scheme: light dark;
+
+  --bs-bg: #fbfaf7;
+  --bs-surface: #ffffff;
+  --bs-border: #e3ded3;
+  --bs-text: #1e1c18;
+  --bs-text-muted: #6b6558;
+  --bs-accent: #2f6b4f;
+  --bs-accent-soft: #e6f0e9;
+
+  --bs-space-1: 0.25rem;
+  --bs-space-2: 0.5rem;
+  --bs-space-3: 1rem;
+  --bs-space-4: 1.5rem;
+  --bs-space-5: 2.5rem;
+
+  --bs-radius: 10px;
+  --bs-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bs-measure: 62rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bs-bg: #14171a;
+    --bs-surface: #1c2024;
+    --bs-border: #2e343a;
+    --bs-text: #eceae5;
+    --bs-text-muted: #9aa2a8;
+    --bs-accent: #7cc9a0;
+    --bs-accent-soft: #223029;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bs-bg);
+  color: var(--bs-text);
+  font-family: var(--bs-font);
+  line-height: 1.5;
+}

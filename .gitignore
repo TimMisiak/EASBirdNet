@@ -1,0 +1,8 @@
+# Go build output
+/backend/birdsense
+/backend/bin/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

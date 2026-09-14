@@ -1,0 +1,13 @@
+services:
+  birdsense:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # The host port is assigned by the environment; the container always
+    # listens on 8080.
+    ports:
+      - "${HOST_PORT}:8080"
+    environment:
+      BIRDSENSE_ADDR: ":8080"
+      BIRDSENSE_STATIC_DIR: "/app/frontend"
+    restart: unless-stopped
