@@ -10,4 +10,84 @@ services:
     environment:
       BIRDSENSE_ADDR: ":8080"
       BIRDSENSE_STATIC_DIR: "/app/frontend"
+      # The emulator is only reachable on the compose network, over plain HTTP.
+      # The key below is the emulator's well-known one -- it is in Microsoft's
+      # documentation and inside the image, and it unlocks nothing but this
+      # container. A real account's key never lives in this file.
+      BIRDSENSE_COSMOS_ENDPOINT: "http://cosmos:8081"
+      BIRDSENSE_COSMOS_KEY: "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="
+      BIRDSENSE_COSMOS_DATABASE: "birdsense"
+
     restart: unless-stopped
+
+  # Azure Cosmos DB emulator, Linux "vnext" build: the local stand-in for the
+  # NoSQL account the app runs on in Azure. It speaks the same API over plain
+  # HTTP (PROTOCOL=http), which is why the app needs no certificate handling.
+  #
+  # Pinned to vnext-EN20251022 on purpose, even though it is a year old. Every
+  # later release makes Postgres load libQueryEngineCore.so at startup, and that
+  # library is compiled for AVX2 (x86-64-v3) throughout, with no CPU check. On a
+  # CPU without AVX2 -- this project's dev host is a Xeon E5-2667 v2 -- Postgres
+  # dies with SIGILL before logging a line, and the emulator never gets ready.
+  # EN20251022 is the newest tag that does not ship the library.
+  #
+  # On a machine with AVX2 (`grep -m1 -o -w avx2 /proc/cpuinfo`) newer tags work.
+  # Bump the volume name below with the tag. Tags:
+  #   curl -s https://mcr.microsoft.com/v2/cosmosdb/linux/azure-cosmos-emulator/tags/list
+  cosmos:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-EN20251022
+    # Gotcha: rootless container runtimes (the one this project runs under
+    # included) can unpack the image with every file owned by root, instead of
+    # by the cosmosdev user the image expects. The stock entrypoint runs as
+    # cosmosdev, so it cannot write its own home, /logs or /data, and Postgres
+    # never starts. Running the emulator as root is not an option either --
+    # Postgres refuses to run as root.
+    #
+    # So start as root only long enough to hand the emulator its directories,
+    # check that the handover actually took, then run the stock entrypoint as
+    # cosmosdev. GNU `chroot --userspec` onto / is the privilege drop: the image
+    # has no su, runuser, setpriv or gosu. On a runtime that kept the image's
+    # owners this is a harmless no-op. (Turning on the Data Explorer would add
+    # /root/cosmos-explorer to the list.)
+    user: root
+    entrypoint:
+      - bash
+      - -c
+      - |
+        paths="/home/cosmosdev /logs /socket /run/postgresql /scripts/certs /data"
+        chown -R cosmosdev:cosmosdev $$paths
+        for p in $$paths; do
+          owner=$$(stat -c %U "$$p")
+          if [ "$$owner" != cosmosdev ]; then
+            echo "cosmos: $$p is still owned by $$owner; this container runtime ignores chown, so the emulator cannot start" >&2
+            exit 1
+          fi
+        done
+        exec chroot --userspec=cosmosdev:cosmosdev --skip-chdir / \
+          env HOME=/home/cosmosdev USER=cosmosdev LOGNAME=cosmosdev \
+          /home/cosmosdev/docker_entrypoint.sh
+    environment:
+      PROTOCOL: http
+      # The Data Explorer would be served on 1234, but only one host port is
+      # assigned to this project and the app owns it -- so it would be
+      # unreachable, and it costs a Node process to run. To browse the data by
+      # hand, set this to "true" and add `ports: ["8082:1234"]` here for as
+      # long as you need it. `docker compose exec cosmos cosmoshell` needs
+      # neither.
+      ENABLE_EXPLORER: "false"
+      # No databases, no containers, no seed data: the emulator starts empty (this
+      # release has no init-script option), and whatever creates containers will
+      # do it from the app, so that it runs against Azure too.
+      LOG_LEVEL: info
+    volumes:
+      # Local data survives a restart. The volume is named for the emulator
+      # release because a data directory written by one release is not
+      # guaranteed to start under another: bumping the tag means bumping this
+      # name, and the new release starts on an empty volume.
+      # `docker compose down -v` wipes it.
+      - cosmos-en20251022:/data
+
+    restart: unless-stopped
+
+volumes:
+  cosmos-en20251022:

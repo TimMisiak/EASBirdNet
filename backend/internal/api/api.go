@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -31,10 +32,20 @@ const (
 // reachable from outside a demo.
 const sessionCookie = "bs_session"
 
+// Dependency is an external service the health endpoint reports on. The API
+// does not know what a Cosmos DB is -- cmd/server wires one in, and tests wire
+// in none.
+type Dependency interface {
+	// Name labels the dependency in the health response.
+	Name() string
+	// Check performs the cheapest read that proves the service answers.
+	Check(context.Context) error
+}
+
 // Register mounts the API routes on mux.
-func Register(mux *http.ServeMux, log *slog.Logger) {
+func Register(mux *http.ServeMux, log *slog.Logger, deps ...Dependency) {
 	s := newStore()
-	h := &handlers{store: s, log: log}
+	h := &handlers{store: s, log: log, deps: deps}
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 
@@ -70,11 +81,48 @@ func Register(mux *http.ServeMux, log *slog.Logger) {
 type handlers struct {
 	store *store
 	log   *slog.Logger
+	deps  []Dependency
 }
 
+// health is liveness, not readiness: it answers 200 whenever the process can
+// serve HTTP, because the frontend and the public page do not need a database.
+// A dependency that is down reports "degraded" in the body instead, so the
+// container healthcheck does not restart a server that is still useful.
+//
+// The failure text is in the response on purpose -- this is the endpoint you
+// curl when the database will not connect, and an SDK error naming a host is
+// not a secret. Nothing here echoes a credential.
 func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
-	h.json(w, http.StatusOK, map[string]string{"status": "ok"})
+	body := map[string]any{"status": "ok"}
+	if len(h.deps) == 0 {
+		h.json(w, http.StatusOK, body)
+		return
+	}
+
+	deps := make(map[string]any, len(h.deps))
+	for _, d := range h.deps {
+		ctx, cancel := context.WithTimeout(r.Context(), healthCheckTimeout)
+		start := time.Now()
+		err := d.Check(ctx)
+		cancel()
+
+		entry := map[string]any{"status": "ok", "latencyMs": time.Since(start).Milliseconds()}
+		if err != nil {
+			body["status"] = "degraded"
+			entry["status"] = "error"
+			entry["error"] = err.Error()
+			h.log.Warn("dependency check failed", "dependency", d.Name(), "err", err)
+		}
+		deps[d.Name()] = entry
+	}
+	body["dependencies"] = deps
+	h.json(w, http.StatusOK, body)
 }
+
+// healthCheckTimeout bounds one dependency check. Short enough that a hung
+// database cannot hold the health endpoint open, long enough that an emulator
+// under load still answers.
+const healthCheckTimeout = 3 * time.Second
 
 // --- public ---
 

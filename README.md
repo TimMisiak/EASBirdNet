@@ -12,11 +12,13 @@ whole app runs as one self-contained container.
 cd backend && go run ./cmd/server     # http://localhost:8080
 ```
 
-Or in Docker:
+Or in Docker, which also brings up the Azure Cosmos DB emulator the app will
+eventually store its data in:
 
 ```sh
 HOST_PORT=8080 docker compose up --build
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the architecture decisions, layout, and
-conventions.
+conventions, and [DATA-MODEL.md](DATA-MODEL.md) for the Cosmos DB containers,
+partition keys and item shapes.

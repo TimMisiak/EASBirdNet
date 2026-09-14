@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -238,5 +240,46 @@ func TestUnknownAPIPathIsJSON404(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
 		t.Errorf("content-type = %q, want JSON", got)
+	}
+}
+
+// stubDep is a Dependency whose check does whatever the test says.
+type stubDep struct {
+	name string
+	err  error
+}
+
+func (s stubDep) Name() string                { return s.name }
+func (s stubDep) Check(context.Context) error { return s.err }
+
+func TestHealthReportsDependencies(t *testing.T) {
+	mux := http.NewServeMux()
+	Register(mux, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		stubDep{name: "cosmos", err: errors.New("dial tcp: connection refused")})
+
+	rec := do(t, mux, http.MethodGet, "/api/v1/health", "", nil)
+	// A dependency being down must not look like the server being down: the
+	// frontend and the public page do not need one.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status       string `json:"status"`
+		Dependencies map[string]struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "degraded" {
+		t.Errorf("status = %q, want %q", body.Status, "degraded")
+	}
+	if got := body.Dependencies["cosmos"].Status; got != "error" {
+		t.Errorf("cosmos status = %q, want %q", got, "error")
+	}
+	if !strings.Contains(body.Dependencies["cosmos"].Error, "connection refused") {
+		t.Errorf("cosmos error = %q, want the underlying failure", body.Dependencies["cosmos"].Error)
 	}
 }

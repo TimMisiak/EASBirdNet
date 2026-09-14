@@ -11,6 +11,7 @@ Node runtime, and no separate deploy for the UI.
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
 │   └── internal/
 │       ├── api/        JSON handlers under /api/v1/
+│       ├── cosmos/     Cosmos DB connection + reachability check
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
@@ -26,8 +27,9 @@ Node runtime, and no separate deploy for the UI.
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
+├── DATA-MODEL.md       Cosmos containers, partition keys, item shapes
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
-└── docker-compose.yml
+└── docker-compose.yml  The app, plus the Cosmos DB emulator
 ```
 
 ## Decisions
@@ -41,7 +43,8 @@ virtual DOM, so a component re-renders by rewriting its own shadow root.
 ES modules (`<script type="module">`). No bundler, no transpiler, no
 `node_modules`, no `npm install` before you can see a change. This is the
 constraint that pays for itself in the Dockerfile and in onboarding — it holds
-until we actually need a dependency.
+until the frontend actually needs an npm package. (The "no dependencies" rule is
+about the frontend only; Go modules in `backend/` are fine — see below.)
 *Revisit when:* we need an npm dependency, or asset fingerprinting for
 long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
@@ -106,10 +109,52 @@ that adopted it. Every shared sheet is therefore wrapped in
 `@layer bs-base { ... }`, because unlayered rules outrank every layer -- what a
 component writes for itself always wins.
 
-**Standard library only.** `net/http` with Go 1.22+ method-and-path patterns
-(`"GET /api/v1/health"`) covers routing; `log/slog` covers logging. No router,
-no web framework, no logging library. Keep it that way unless something
-concrete is missing.
+**Go modules are fine; the standard library just happens to cover the web
+layer.** Unlike the frontend, the backend has no rule against dependencies —
+`go.mod` costs nothing at deploy time, since the Dockerfile already downloads
+modules in the build stage. Add one when it beats writing the code yourself.
+
+In practice `net/http` with Go 1.22+ method-and-path patterns
+(`"GET /api/v1/health"`) covers routing and `log/slog` covers logging, so there
+is no router, web framework or logging library: not on principle, but because
+nothing was missing.
+
+`azcosmos` (the Azure SDK for Cosmos DB) is the first module, bringing `azcore`
+and two `golang.org/x` modules with it. It requires Go 1.25, which is why
+`go.mod` and the builder image in the Dockerfile are on 1.25; keep the two in
+step when either moves.
+
+**Azure Cosmos DB for NoSQL, emulated locally.** The containers, partition keys
+and item shapes live in `DATA-MODEL.md`; `internal/cosmos` is only the
+connection and a read-only reachability check. Nothing is created yet and the
+API still answers from the in-memory placeholder store.
+
+The app does not require a database: with no `BIRDSENSE_COSMOS_ENDPOINT` it
+serves the frontend, the public page and the placeholder store exactly as
+before, so `go run ./cmd/server` stays a one-command dev loop. Compose sets the
+endpoint and the emulator's well-known key, and waits for the emulator to
+report healthy before starting the app.
+
+Gotcha: the `cosmos` service starts as root and hands its directories to
+`cosmosdev` before running the image's own entrypoint. Under a rootless
+container runtime the image can unpack with every file owned by root, so the
+stock entrypoint (which runs as `cosmosdev`) cannot write anything, and
+Postgres inside it refuses to run as root. Don't remove the wrapper because
+it looks redundant on a machine where the plain image works — see the
+comments in `docker-compose.yml`.
+
+Gotcha: the emulator is pinned to `vnext-EN20251022`, a year behind, because
+every later release loads a library into Postgres that is compiled for AVX2
+with no fallback, and the dev host's Xeon E5-2667 v2 has no AVX2. The symptom
+is Postgres exiting with SIGILL (exit 132) straight after its first log line,
+and an emulator that never reports ready. Check the CPU before bumping the tag,
+and rename the data volume with it.
+
+Gotcha: `/api/v1/health` is *liveness*, not readiness. It answers 200 whenever
+the process can serve HTTP — the frontend and the public page do not need a
+database — and reports a dependency that is down as `"status": "degraded"` with
+the failure text in the body. A container healthcheck must not restart a server
+that is still doing most of its job.
 
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
@@ -143,13 +188,35 @@ Dev (two concerns, one process — Go serves the frontend from disk):
 cd backend && go run ./cmd/server     # http://localhost:8080
 ```
 
-Frontend edits need only a browser reload; Go edits need a restart.
+Frontend edits need only a browser reload; Go edits need a restart. No database
+is involved unless you point one at it:
 
-Container:
+```sh
+BIRDSENSE_COSMOS_ENDPOINT=http://localhost:8081 \
+BIRDSENSE_COSMOS_KEY=<emulator key from docker-compose.yml> \
+go run ./cmd/server
+```
+
+Container (the app plus the Cosmos DB emulator):
 
 ```sh
 HOST_PORT=8080 docker compose up --build
 ```
+
+The first run pulls ~600 MB of emulator image, and the emulator takes the better
+part of a minute to come up before the app starts. Then:
+
+```sh
+curl -s localhost:8080/api/v1/health     # {"status":"ok","dependencies":{"cosmos":...}}
+docker compose logs birdsense | grep cosmos
+docker compose down -v                   # -v also wipes the emulator's data
+```
+
+The emulator is on the compose network only (`http://cosmos:8081`, plain HTTP,
+no certificate to trust) because the one assigned host port belongs to the app.
+`docker compose exec cosmos cosmoshell` gets you a shell against it; the Data
+Explorer needs `ENABLE_EXPLORER` and a published port — see the comments in
+`docker-compose.yml`.
 
 Checks before committing:
 
@@ -159,7 +226,14 @@ cd backend && gofmt -l . && go vet ./... && go test ./...
 
 ## State of the code
 
-The API is wired end-to-end but `internal/api.sampleDetections()` returns
-hard-coded rows — there is no database and no BirdNET ingestion yet. The
-`Detection` shape is a first guess at what the UI needs; change it freely, but
-change `js/components/bs-detection-card.js` with it.
+Cosmos DB is connected but unused: `internal/cosmos` dials the account and the
+health endpoint reports whether it answers, and that is all. No database, no
+containers, no queries — `DATA-MODEL.md` is the plan the first migration has to
+implement, and its *Open questions* are still open.
+
+The API is wired end-to-end but every answer comes from `internal/api/store.go`,
+which seeds one in-memory copy of the program at startup and forgets it on
+restart. There is no BirdNET ingestion, and no individual detections anywhere:
+the public page reads hard-coded per-species summaries (`Species`), and the
+per-detection shape exists only as a proposal in `DATA-MODEL.md`. Sign-in is
+equally fake -- nothing signs the session cookie.

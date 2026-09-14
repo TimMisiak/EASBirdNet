@@ -1,14 +1,12 @@
 # Two stages, one image: build the Go binary, then ship it next to the frontend
 # files so a single container serves both the API and the UI.
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 
 WORKDIR /src/backend
 
 # Copy the module files first so `go mod download` is cached until deps change.
-# (There are no third-party deps yet; this stays cheap and keeps working when
-# the first one arrives.)
-COPY backend/go.mod backend/go.sum* ./
+COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 
 COPY backend/ ./
