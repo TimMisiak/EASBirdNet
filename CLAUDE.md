@@ -19,6 +19,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
+│   ├── images/         Third-party logos (Google, Microsoft), official files
 │   └── js/
 │       ├── main.js         Imports every component so they self-register
 │       ├── api.js          fetch wrapper for /api/v1
