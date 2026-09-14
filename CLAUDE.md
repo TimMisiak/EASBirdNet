@@ -12,11 +12,15 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 /
 ├── backend/            Go module: API + static file server
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
+│   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server)
 │   └── internal/
 │       ├── api/        JSON handlers under /api/v1/
+│       ├── birdnet/    Runs analyzer/analyze.py, returns detections
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
+├── analyzer/           analyze.py + pinned requirements.txt: BirdNET in Python
+├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
@@ -159,6 +163,27 @@ like "progress only moves forward" become race-free.
 *Revisit when:* the JSON file gets slow (it rewrites everything on each write) —
 that means dev data has outgrown it, not that it needs indexing.
 
+**BirdNET runs as a Python subprocess.** BirdNET's maintained runtime is the
+`birdnet` Python package, so `internal/birdnet` runs `analyzer/analyze.py`
+with a batch of files and parses the one JSON object it prints, rather than
+binding a TFLite runtime into Go through cgo. The model loads once per batch, so
+hand it a night of files, not one at a time. The package uses BirdNET v2.4 on
+LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
+- The runtime image is Debian (`python:3.12-slim-bookworm`), not Alpine,
+  because the LiteRT and numpy wheels are glibc builds. The venv and the models
+  (~90 MB, acoustic plus the geo model for location filtering) are baked in at
+  build time, so analysis never needs the network. The image is now several
+  hundred MB rather than ~20.
+- Each inference worker is its own process with its own model copy (~285 MB
+  peak for the whole tree with one worker). Cancelling the context kills the
+  process group, so workers don't outlive a cancelled run.
+Perch v2 is available in the same package but is TensorFlow-only (another
+~600 MB). Add it as a second model in `analyze.py` if BirdNET's accuracy isn't
+enough, not before.
+*Revisit when:* analysis moves to its own Container Apps job (see
+DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
+the job's image.
+
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
 styles itself with `var(--bs-*)`. That is the *only* styling channel across the
@@ -206,6 +231,14 @@ roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
 the seed, so setting it starts you from a clean roster. Outside dev mode it
 refuses anyone from the placeholder roster, so dev people never reach Cosmos.
 
+BirdNET, for `internal/birdnet` and `cmd/analyze` (needs Python 3.12; models
+download to `$BIRDNET_APP_DATA`, default `~/.local/share/birdnet`, on first use):
+
+```sh
+python3.12 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python go run ./cmd/analyze "../test/2026-09-09 Osprey.wav"
+```
+
 Container (compose sets `BIRDSENSE_DB=local` and keeps the file in a named
 volume):
 
@@ -217,6 +250,17 @@ Checks before committing:
 
 ```sh
 cd backend && gofmt -l . && go vet ./... && go test ./...
+```
+
+`TestAnalyzeOsprey` runs the real model and is skipped unless
+`BIRDSENSE_BIRDNET_PYTHON` names a Python with `analyzer/requirements.txt`
+installed. Set it when changing `internal/birdnet`, `analyze.py`, or the pins.
+
+BirdNET in the image, on the test clip:
+
+```sh
+docker compose run --rm -v "$PWD/test:/test:ro" --entrypoint /app/birdsense-analyze \
+  birdsense "/test/2026-09-09 Osprey.wav"
 ```
 
 ## State of the code
@@ -234,4 +278,6 @@ Still placeholder: sign-in (the session cookie is an unsigned email address, and
 the upload transfer itself (the browser simulates it and reports progress).
 The Cosmos DB backend compiles but has not been run against Azure or the
 emulator; the JSON-file backend and its tests define the behaviour it must
-match. There is no BirdNET ingestion and no blob storage yet.
+match. There is no blob storage yet. `internal/birdnet` can analyze files on
+disk, but nothing in the server calls it: no ingestion, no job queue, and no
+detections written to the Store.

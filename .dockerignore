@@ -5,3 +5,5 @@ docker-compose.yml
 Dockerfile
 .dockerignore
 backend/data
+.venv
+test
