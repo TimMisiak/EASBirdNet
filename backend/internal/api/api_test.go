@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,45 +9,165 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
-func newTestMux(t *testing.T) *http.ServeMux {
+// testNow is the handlers' clock in every test: 11 a.m. Pacific.
+var testNow = time.Date(2026, time.September, 14, 18, 0, 0, 0, time.UTC)
+
+func newTestMux(t *testing.T) (*http.ServeMux, db.Store) {
 	t.Helper()
 	return newTestMuxMode(t, false)
 }
 
-func newTestMuxMode(t *testing.T, dev bool) *http.ServeMux {
+func newTestMuxMode(t *testing.T, dev bool) (*http.ServeMux, db.Store) {
 	t.Helper()
 	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
+	seedProgram(t, store)
+	return muxFor(store, dev), store
+}
+
+func muxFor(store db.Store, dev bool) *http.ServeMux {
 	mux := http.NewServeMux()
-	Register(mux, store, slog.New(slog.NewTextHandler(io.Discard, nil)), dev)
+	register(mux, &handlers{
+		store: store, log: slog.New(slog.NewTextHandler(io.Discard, nil)), dev: dev,
+		now: func() time.Time { return testNow },
+	})
 	return mux
 }
 
-// signedIn returns a mux plus the session cookie for the first person with the
-// given role, so a test can call the routes behind requireSession.
+// seedProgram is a small program the tests can reason about exactly. It is
+// deliberately not devseed's, which is dated relative to today.
+//
+// Sorted by name, the first admin is Dana and the first volunteer is Jane, so
+// those are who signedIn picks.
+func seedProgram(t *testing.T, s db.Store) {
+	t.Helper()
+	ctx := t.Context()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+	}
+
+	users := map[string]db.User{}
+	for _, u := range []db.User{
+		{Name: "Dana Coordinator", Email: "dana@eastsideaudubon.org", Role: db.RoleAdmin,
+			Identity: &db.Identity{Provider: "microsoft", Subject: "dana-sub"}},
+		{Name: "Ellen Park", Email: "ellen.park@example.com", Role: db.RoleAdmin},
+		{Name: "Jane Volunteer", Email: "jane@example.com", Role: db.RoleVolunteer},
+		{Name: "Marcus Lee", Email: "m.lee@example.com", Role: db.RoleVolunteer},
+	} {
+		created, err := s.CreateUser(ctx, u)
+		must(err)
+		users[u.Email] = created
+	}
+
+	retired := testNow.Add(-24 * time.Hour)
+	for _, r := range []db.Recorder{
+		{ID: "SW-02", Name: "Marymoor Park – Snag Row", Latitude: 47.66021, Longitude: -122.11384},
+		{ID: "SW-03", Name: "Bridle Trails – North", Latitude: 47.656, Longitude: -122.17},
+		// Renamed since its last card came in; see the card below.
+		{ID: "SW-05", Name: "Soaring Eagle – West Loop", Latitude: 47.63914, Longitude: -121.9964},
+		{ID: "SW-09", Name: "Pulled Out", Latitude: 47.6, Longitude: -122.0, RetiredAt: &retired},
+	} {
+		_, err := s.CreateRecorder(ctx, r)
+		must(err)
+	}
+
+	card := func(recorderID, stationName, email, pulledOn, status, firstNight string, nights, filesUploaded int) {
+		t.Helper()
+		first, err := time.Parse("2006-01-02", firstNight)
+		must(err)
+		u := db.Upload{
+			ID: db.UploadID(pulledOn, recorderID), RecorderID: recorderID,
+			Recorder: db.RecorderSnapshot{Name: stationName},
+			UserID:   users[email].ID, UserName: users[email].Name,
+			PulledOn: pulledOn, Status: status, StartedAt: testNow.AddDate(0, 0, -30),
+		}
+		for i := range nights {
+			u.Nights = append(u.Nights, db.Night{Date: first.AddDate(0, 0, i).Format("2006-01-02"), Files: 24, Bytes: 2400})
+		}
+		u.FileCount, u.TotalBytes = 24*nights, int64(2400*nights)
+		u.FilesUploaded, u.BytesUploaded = filesUploaded, int64(100*filesUploaded)
+		_, err = s.CreateUpload(ctx, u)
+		must(err)
+	}
+	card("SW-02", "Marymoor Park – Snag Row", "jane@example.com", "2026-09-07", db.StatusInterrupted, "2026-08-24", 14, 214)
+	card("SW-02", "Marymoor Park – Snag Row", "jane@example.com", "2026-01-01", db.StatusResultsSent, "2025-12-30", 2, 48)
+	card("SW-03", "Bridle Trails – North", "m.lee@example.com", "2026-08-21", db.StatusResultsSent, "2026-08-07", 14, 336)
+	card("SW-05", "Soaring Eagle – East Loop", "m.lee@example.com", "2026-09-13", db.StatusNeedsAttention, "2026-09-10", 3, 72)
+
+	review := &db.Review{UserID: users["dana@eastsideaudubon.org"].ID, UserName: "Dana Coordinator", At: testNow}
+	det := func(night, at, scientific, common, status string) db.Detection {
+		t.Helper()
+		when, err := time.Parse(time.RFC3339, at)
+		must(err)
+		d := db.Detection{
+			AudioFileID: "af_" + at, DetectedAt: when, Night: night,
+			ScientificName: scientific, CommonName: common, Confidence: 0.9, ReviewStatus: status,
+		}
+		if status != db.ReviewUnreviewed {
+			r := *review
+			d.Review = &r
+		}
+		return d
+	}
+	corrected := det("2026-09-10", "2026-09-11T08:00:00Z", "Bubo virginianus", "Great Horned Owl", db.ReviewConfirmed)
+	corrected.Review.CorrectedScientificName, corrected.Review.CorrectedCommonName = "Strix varia", "Barred Owl"
+	must(s.UpsertDetections(ctx, "OWL-20260913-SR05", []db.Detection{
+		det("2026-09-12", "2026-09-13T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
+		det("2026-09-11", "2026-09-12T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
+		corrected,
+		det("2026-09-12", "2026-09-13T11:00:00Z", "Strix varia", "Barred Owl", db.ReviewRejected),
+		det("2026-09-12", "2026-09-13T12:00:00Z", "Megascops kennicottii", "Western Screech-Owl", db.ReviewUnreviewed),
+	}))
+	must(s.UpsertDetections(ctx, "OWL-20260821-SR03", []db.Detection{
+		det("2026-08-19", "2026-08-20T09:00:00Z", "Aegolius acadicus", "Northern Saw-whet Owl", db.ReviewConfirmed),
+	}))
+}
+
+// signedIn returns the session cookie for the first person with the given
+// role, so a test can call the routes behind requireSession.
 func signedIn(t *testing.T, mux *http.ServeMux, role string) *http.Cookie {
 	t.Helper()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"role":"`+role+`"}`))
-	mux.ServeHTTP(rec, req)
+	return signIn(t, mux, `{"role":"`+role+`"}`)
+}
+
+func signInAs(t *testing.T, mux *http.ServeMux, email string) *http.Cookie {
+	t.Helper()
+	return signIn(t, mux, `{"email":"`+email+`"}`)
+}
+
+func signIn(t *testing.T, mux *http.ServeMux, body string) *http.Cookie {
+	t.Helper()
+	rec := do(t, mux, http.MethodPost, "/api/v1/session", body, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("sign in as %s = %d, want 200 (%s)", role, rec.Code, rec.Body)
+		t.Fatalf("sign in %s = %d, want 200 (%s)", body, rec.Code, rec.Body)
 	}
+	c := sessionFrom(rec)
+	if c == nil {
+		t.Fatalf("sign in %s set no session cookie", body)
+	}
+	return c
+}
+
+func sessionFrom(rec *httptest.ResponseRecorder) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == sessionCookie {
 			return c
 		}
 	}
-	t.Fatalf("sign in as %s set no session cookie", role)
 	return nil
 }
 
@@ -65,16 +186,52 @@ func do(t *testing.T, mux *http.ServeMux, method, path, body string, cookie *htt
 	return rec
 }
 
+// decodeInto unmarshals a response body, failing the test if it can't.
+func decodeInto[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode %s: %v", rec.Body, err)
+	}
+	return v
+}
+
+func userByEmail(t *testing.T, s db.Store, email string) db.User {
+	t.Helper()
+	u, err := s.GetUserByEmail(t.Context(), email)
+	if err != nil {
+		t.Fatalf("look up %s: %v", email, err)
+	}
+	return u
+}
+
+type uploadsBody struct {
+	Uploads []Upload `json:"uploads"`
+}
+
+type uploadBody struct {
+	Upload Upload `json:"upload"`
+}
+
+type personBody struct {
+	Person Person `json:"person"`
+}
+
+type peopleBody struct {
+	People []Person `json:"people"`
+}
+
+type stationsBody struct {
+	Stations []Station `json:"stations"`
+}
+
 func TestHealth(t *testing.T) {
-	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/health", "", nil)
+	mux, _ := newTestMux(t)
+	rec := do(t, mux, http.MethodGet, "/api/v1/health", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["status"] != "ok" {
+	if body := decodeInto[map[string]string](t, rec); body["status"] != "ok" {
 		t.Errorf("status = %q, want %q", body["status"], "ok")
 	}
 }
@@ -83,7 +240,7 @@ func TestHealth(t *testing.T) {
 // route must not exist and the session must not advertise it.
 func TestDevPeopleOnlyInDevMode(t *testing.T) {
 	for _, dev := range []bool{false, true} {
-		mux := newTestMuxMode(t, dev)
+		mux, _ := newTestMuxMode(t, dev)
 
 		rec := do(t, mux, http.MethodGet, "/api/v1/dev/people", "", nil)
 		want := http.StatusNotFound
@@ -94,46 +251,90 @@ func TestDevPeopleOnlyInDevMode(t *testing.T) {
 			t.Errorf("dev=%v: GET /dev/people = %d, want %d", dev, rec.Code, want)
 		}
 		if dev {
-			var body struct{ People []Person }
-			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.People) == 0 {
-				t.Errorf("dev people = %s, %v; want the roster", rec.Body, err)
+			if body := decodeInto[peopleBody](t, rec); len(body.People) != 4 {
+				t.Errorf("dev people = %s; want the roster of 4", rec.Body)
 			}
 		}
 
-		var session struct{ Dev bool }
 		rec = do(t, mux, http.MethodGet, "/api/v1/session", "", nil)
-		if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil || session.Dev != dev {
-			t.Errorf("dev=%v: GET /session = %s, %v", dev, rec.Body, err)
+		if session := decodeInto[struct{ Dev bool }](t, rec); session.Dev != dev {
+			t.Errorf("dev=%v: GET /session = %s", dev, rec.Body)
 		}
 	}
 }
 
-func TestPublicOverviewNeedsNoSession(t *testing.T) {
-	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/public/overview?days=14", "", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	var body struct {
+func TestPublicOverview(t *testing.T) {
+	mux, _ := newTestMux(t)
+	type overviewBody struct {
 		WindowDays int          `json:"windowDays"`
 		Program    ProgramStats `json:"program"`
 		Species    []Species    `json:"species"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
+
+	// No session needed.
+	rec := do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	if body.WindowDays != 14 {
-		t.Errorf("windowDays = %d, want 14", body.WindowDays)
+	body := decodeInto[overviewBody](t, rec)
+	if body.WindowDays != 7 {
+		t.Errorf("windowDays = %d, want 7", body.WindowDays)
 	}
-	if len(body.Species) == 0 || body.Species[0].CommonName == "" {
-		t.Error("want at least one named species")
+	// Three recorders in the field (SW-09 is retired); 2026's recorder-nights
+	// are 14 + 14 + 3, the December nights being last year; four confirmed
+	// detections this year, the rejected and unreviewed ones not counted.
+	if want := (ProgramStats{Recorders: 3, NightsRecorded: 31, ConfirmedDetections: 4}); body.Program != want {
+		t.Errorf("program = %+v, want %+v", body.Program, want)
 	}
-	if body.Program.Recorders == 0 {
-		t.Error("want the program stats filled in")
+	// The corrected Great Horned Owl counts as the Barred Owl it was confirmed
+	// as, and the station is the name on the card, not the renamed recorder.
+	want := Species{
+		CommonName: "Barred Owl", ScientificName: "Strix varia", Detections: 3, Nights: 3,
+		Stations:       []string{"Soaring Eagle – East Loop"},
+		LastDetectedAt: time.Date(2026, time.September, 13, 10, 0, 0, 0, time.UTC),
+	}
+	if len(body.Species) != 1 || !sameSpecies(body.Species[0], want) {
+		t.Errorf("7-day species = %+v, want only %+v", body.Species, want)
+	}
+
+	rec = do(t, mux, http.MethodGet, "/api/v1/public/overview?days=30", "", nil)
+	body = decodeInto[overviewBody](t, rec)
+	var names []string
+	for _, s := range body.Species {
+		names = append(names, s.CommonName)
+	}
+	if body.WindowDays != 30 || !slices.Equal(names, []string{"Barred Owl", "Northern Saw-whet Owl"}) {
+		t.Errorf("30-day window = %d days, species %v; want Barred Owl then Northern Saw-whet Owl", body.WindowDays, names)
+	}
+}
+
+func sameSpecies(a, b Species) bool {
+	return a.CommonName == b.CommonName && a.ScientificName == b.ScientificName &&
+		a.Detections == b.Detections && a.Nights == b.Nights &&
+		slices.Equal(a.Stations, b.Stations) && a.LastDetectedAt.Equal(b.LastDetectedAt)
+}
+
+// brokenStore is a database that has gone away.
+type brokenStore struct{ db.Store }
+
+func (brokenStore) ListRecorders(context.Context) ([]db.Recorder, error) {
+	return nil, errors.New("cosmos: connection refused")
+}
+
+func TestADatabaseFailureIsA500WithoutTheDetail(t *testing.T) {
+	_, store := newTestMux(t)
+	mux := muxFor(brokenStore{store}, false)
+	rec := do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(rec.Body.String(), "cosmos") {
+		t.Errorf("body = %s; the database error leaked to the client", rec.Body)
 	}
 }
 
 func TestVolunteerRoutesNeedASession(t *testing.T) {
-	mux := newTestMux(t)
+	mux, _ := newTestMux(t)
 	for _, path := range []string{"/api/v1/uploads", "/api/v1/stations"} {
 		if rec := do(t, mux, http.MethodGet, path, "", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s anonymous = %d, want %d", path, rec.Code, http.StatusUnauthorized)
@@ -142,76 +343,99 @@ func TestVolunteerRoutesNeedASession(t *testing.T) {
 }
 
 func TestAdminRoutesRejectVolunteers(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
 	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", vol); rec.Code != http.StatusForbidden {
 		t.Fatalf("volunteer GET /admin/people = %d, want %d", rec.Code, http.StatusForbidden)
 	}
-	admin := signedIn(t, mux, RoleAdmin)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin); rec.Code != http.StatusOK {
 		t.Fatalf("admin GET /admin/people = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
+func TestSignIn(t *testing.T) {
+	mux, store := newTestMux(t)
+
+	if rec := do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("stranger = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	// Addresses match case-insensitively, and a sign-in is recorded.
+	jane := signInAs(t, mux, "Jane@Example.com")
+	if u := userByEmail(t, store, "jane@example.com"); u.LastSignInAt == nil || !u.LastSignInAt.Equal(testNow) {
+		t.Errorf("lastSignInAt = %v, want %v", u.LastSignInAt, testNow)
+	}
+	rec := do(t, mux, http.MethodGet, "/api/v1/session", "", jane)
+	if session := decodeInto[struct{ User *Person }](t, rec); session.User == nil || session.User.Name != "Jane Volunteer" {
+		t.Errorf("session = %s, want Jane", rec.Body)
+	}
+	// Dana has signed in with Microsoft; Jane never has with a provider.
+	admin := signedIn(t, mux, db.RoleAdmin)
+	rec = do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin)
+	for _, p := range decodeInto[peopleBody](t, rec).People {
+		if want := map[string]string{"Dana Coordinator": "Microsoft", "Jane Volunteer": "—"}[p.Name]; want != "" && p.Provider != want {
+			t.Errorf("%s's provider = %q, want %q", p.Name, p.Provider, want)
+		}
+	}
+
+	// Once Jane is removed, she can't sign in, and her open session ends.
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/"+userByEmail(t, store, "jane@example.com").ID, "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("remove Jane = %d (%s)", rec.Code, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"jane@example.com"}`, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("removed person signs in = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads", "", jane); rec.Code != http.StatusUnauthorized {
+		t.Errorf("removed person's session = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestUploadsAreScopedToTheVolunteer(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
 
 	rec := do(t, mux, http.MethodGet, "/api/v1/uploads", "", vol)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	var mine struct {
-		Uploads []Upload `json:"uploads"`
+	mine := decodeInto[uploadsBody](t, rec).Uploads
+	if len(mine) != 2 {
+		t.Fatalf("Jane sees %d cards, want her 2", len(mine))
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &mine); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(mine.Uploads) == 0 {
-		t.Fatal("want the signed-in volunteer to have cards")
-	}
-	for _, u := range mine.Uploads {
+	for _, u := range mine {
 		if u.VolunteerName != "Jane Volunteer" {
 			t.Errorf("volunteer sees %q's card %s", u.VolunteerName, u.Reference)
 		}
 	}
+	if mine[0].Reference != "OWL-20260907-SR02" || len(mine[0].Nights) != 14 {
+		t.Errorf("newest card = %+v, want OWL-20260907-SR02 with its 14 nights", mine[0])
+	}
 
-	admin := signedIn(t, mux, RoleAdmin)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	rec = do(t, mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)
-	var all struct {
-		Uploads []Upload `json:"uploads"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(all.Uploads) <= len(mine.Uploads) {
-		t.Errorf("admin sees %d cards, volunteer sees %d; want more", len(all.Uploads), len(mine.Uploads))
+	if all := decodeInto[uploadsBody](t, rec).Uploads; len(all) != 4 {
+		t.Errorf("admin sees %d cards, want all 4", len(all))
 	}
 }
 
 func TestCreateUploadThenReportProgress(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
+	mux, store := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
 
-	body := `{"stationId":"SW-03","pulledOn":"2026-09-14","notes":"clear night",
+	body := `{"stationId":"SW-03","pulledOn":"2026-09-14","notes":" clear night ",
 	          "nights":[{"date":"2026-09-12","files":24,"bytes":100},
 	                    {"date":"2026-09-13","files":6,"bytes":50,"flag":"partial"}]}`
 	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
 	}
-	var created struct {
-		Upload Upload `json:"upload"`
+	u := decodeInto[uploadBody](t, rec).Upload
+	if u.Reference != "OWL-20260914-SR03" || u.StationName != "Bridle Trails – North" || u.Notes != "clear night" {
+		t.Errorf("upload = %+v", u)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	u := created.Upload
-	if u.Reference != "OWL-20260914-SR03" {
-		t.Errorf("reference = %q, want OWL-20260914-SR03", u.Reference)
-	}
-	if u.FileCount != 30 || u.TotalBytes != 150 {
-		t.Errorf("totals = %d files / %d bytes, want 30 / 150", u.FileCount, u.TotalBytes)
+	if u.FileCount != 30 || u.TotalBytes != 150 || u.Status != db.StatusInProgress {
+		t.Errorf("totals = %d files / %d bytes, %s; want 30 / 150, in_progress", u.FileCount, u.TotalBytes, u.Status)
 	}
 
 	rec = do(t, mux, http.MethodPost, "/api/v1/uploads/"+u.Reference+"/progress",
@@ -219,119 +443,160 @@ func TestCreateUploadThenReportProgress(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("progress = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	// A fully received card moves itself on to processing; the client never
 	// gets to declare a card done.
-	if created.Upload.Status != StatusProcessing {
-		t.Errorf("status = %q, want %q", created.Upload.Status, StatusProcessing)
+	if got := decodeInto[uploadBody](t, rec).Upload; got.Status != db.StatusProcessing {
+		t.Errorf("status = %q, want %q", got.Status, db.StatusProcessing)
+	}
+
+	stored, err := store.GetUpload(t.Context(), u.Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jane := userByEmail(t, store, "jane@example.com")
+	if stored.UserID != jane.ID || stored.Recorder.Latitude != 47.656 || stored.ReceivedAt == nil || !stored.ReceivedAt.Equal(testNow) {
+		t.Errorf("stored card = %+v; want Jane's, with the recorder copied and receivedAt set", stored)
+	}
+}
+
+func TestCreateUploadRejectsBadInput(t *testing.T) {
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	for _, body := range []string{
+		`{"stationId":"SW-99","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
+		`{"stationId":"SW-09","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
+		`{"stationId":"SW-03","pulledOn":"14/09/2026","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":-1,"bytes":100}]}`,
+	} {
+		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s = %d, want %d", body, rec.Code, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestReRegisteringACardResumesIt(t *testing.T) {
+	mux, _ := newTestMux(t)
+	jane := signedIn(t, mux, db.RoleVolunteer)
+	nights := `[` + strings.TrimSuffix(strings.Repeat(`{"date":"2026-08-24","files":24,"bytes":2400},`, 14), ",") + `]`
+
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads",
+		`{"stationId":"SW-02","pulledOn":"2026-09-07","notes":"second try","nights":`+nights+`}`, jane)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("re-register = %d (%s)", rec.Code, rec.Body)
+	}
+	u := decodeInto[uploadBody](t, rec).Upload
+	if u.Reference != "OWL-20260907-SR02" || u.FilesUploaded != 214 || u.Status != db.StatusInProgress || u.Notes != "second try" {
+		t.Errorf("resumed card = %+v; want 214 files kept, in_progress, the new notes", u)
+	}
+
+	// A finished card stays finished.
+	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
+		`{"stationId":"SW-02","pulledOn":"2026-01-01","nights":[{"date":"2025-12-30","files":24,"bytes":2400}]}`, jane)
+	if u := decodeInto[uploadBody](t, rec).Upload; rec.Code != http.StatusCreated || u.Status != db.StatusResultsSent {
+		t.Errorf("re-register a sent card = %d, %+v; want it left results_sent", rec.Code, u)
+	}
+
+	// Someone else's card isn't theirs to take over.
+	marcus := signInAs(t, mux, "m.lee@example.com")
+	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
+		`{"stationId":"SW-02","pulledOn":"2026-09-07","nights":`+nights+`}`, marcus)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("another volunteer registers Jane's card = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
 func TestProgressOnlyMovesForward(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
 	const ref = "OWL-20260907-SR02" // seeded at 214 of 336 files
 
-	rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"filesUploaded":9}`, vol)
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"filesUploaded":9,"status":"in_progress"}`, vol)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	var body struct {
-		Upload Upload `json:"upload"`
+	if u := decodeInto[uploadBody](t, rec).Upload; u.FilesUploaded != 214 || u.Status != db.StatusInProgress {
+		t.Errorf("upload = %d files, %s; want 214 files, in_progress", u.FilesUploaded, u.Status)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Upload.FilesUploaded != 214 {
-		t.Errorf("filesUploaded = %d, want it left at 214", body.Upload.FilesUploaded)
+	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"status":"processing"}`, vol); rec.Code != http.StatusBadRequest {
+		t.Errorf("client declares processing = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
-func TestOneVolunteerCannotReadAnothersCard(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer) // Jane
+func TestProgressDoesNotReopenAFinishedCard(t *testing.T) {
+	mux, _ := newTestMux(t)
+	marcus := signInAs(t, mux, "m.lee@example.com")
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads/OWL-20260821-SR03/progress", `{"status":"interrupted"}`, marcus)
+	if u := decodeInto[uploadBody](t, rec).Upload; rec.Code != http.StatusOK || u.Status != db.StatusResultsSent {
+		t.Errorf("progress on a sent card = %d, %+v; want it left results_sent", rec.Code, u)
+	}
+}
+
+func TestOneVolunteerCannotReachAnothersCard(t *testing.T) {
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer) // Jane
 	// OWL-20260821-SR03 belongs to Marcus Lee.
 	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260821-SR03", "", vol); rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		t.Errorf("GET = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-}
-
-func TestSignInRejectsAnAddressNotOnTheRoster(t *testing.T) {
-	rec := do(t, newTestMux(t), http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/OWL-20260821-SR03/progress", `{"filesUploaded":1}`, vol); rec.Code != http.StatusNotFound {
+		t.Errorf("progress = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	admin := signedIn(t, mux, db.RoleAdmin)
+	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260821-SR03", "", admin); rec.Code != http.StatusOK {
+		t.Errorf("admin GET = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
 func TestAddPersonRejectsADuplicate(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
-		`{"name":"Jane Again","email":"jane@example.com","role":"volunteer"}`, admin)
+		`{"name":"Jane Again","email":"JANE@example.com","role":"volunteer"}`, admin)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
-func sessionFrom(rec *httptest.ResponseRecorder) *http.Cookie {
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookie {
-			return c
-		}
-	}
-	return nil
-}
-
 func TestRosterEditsAreAdminOnly(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
-	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p3",
-		`{"name":"Tomas","email":"tomas.reyes@example.com","role":"admin"}`, vol); rec.Code != http.StatusForbidden {
+	mux, store := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	path := "/api/v1/admin/people/" + userByEmail(t, store, "m.lee@example.com").ID
+	if rec := do(t, mux, http.MethodPut, path, `{"name":"Marcus","email":"m.lee@example.com","role":"admin"}`, vol); rec.Code != http.StatusForbidden {
 		t.Errorf("volunteer PUT = %d, want %d", rec.Code, http.StatusForbidden)
 	}
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p3", "", vol); rec.Code != http.StatusForbidden {
+	if rec := do(t, mux, http.MethodDelete, path, "", vol); rec.Code != http.StatusForbidden {
 		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
 
 func TestUpdatePerson(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
-	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p2",
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	id := userByEmail(t, store, "jane@example.com").ID
+	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+id,
 		`{"name":"Jane Birder","email":"jane.birder@example.com","role":"admin"}`, admin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	var body struct {
-		Person Person `json:"person"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if p := body.Person; p.ID != "p2" || p.Name != "Jane Birder" || p.Email != "jane.birder@example.com" || p.Role != RoleAdmin {
+	if p := decodeInto[personBody](t, rec).Person; p.ID != id || p.Name != "Jane Birder" || p.Email != "jane.birder@example.com" || p.Role != db.RoleAdmin {
 		t.Errorf("person = %+v", p)
 	}
 
-	// Her cards follow her to the new name and address.
-	rec = do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"jane.birder@example.com"}`, nil)
-	jane := sessionFrom(rec)
-	if rec.Code != http.StatusOK || jane == nil {
-		t.Fatalf("sign in with the new address = %d (%s)", rec.Code, rec.Body)
-	}
-	var mine struct {
-		Uploads []Upload `json:"uploads"`
-	}
+	// Her cards follow her to the new address, and keep the name they were
+	// registered under.
+	jane := signInAs(t, mux, "jane.birder@example.com")
 	rec = do(t, mux, http.MethodGet, "/api/v1/uploads", "", jane)
-	if err := json.Unmarshal(rec.Body.Bytes(), &mine); err != nil || len(mine.Uploads) == 0 {
-		t.Errorf("renamed volunteer's cards = %s, %v; want them kept", rec.Body, err)
+	mine := decodeInto[uploadsBody](t, rec).Uploads
+	if len(mine) != 2 || mine[0].VolunteerName != "Jane Volunteer" {
+		t.Errorf("renamed volunteer's cards = %s; want her 2, under her old name", rec.Body)
 	}
 }
 
 func TestUpdatePersonRejectsBadInput(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	path := "/api/v1/admin/people/" + userByEmail(t, store, "jane@example.com").ID
 	for _, tc := range []struct {
 		body string
 		want int
@@ -340,72 +605,93 @@ func TestUpdatePersonRejectsBadInput(t *testing.T) {
 		{`{"name":"Jane","email":"jane@example.com","role":"owner"}`, http.StatusBadRequest},
 		{`{"name":"Jane","email":"not an address","role":"volunteer"}`, http.StatusBadRequest},
 	} {
-		if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p2", tc.body, admin); rec.Code != tc.want {
+		if rec := do(t, mux, http.MethodPut, path, tc.body, admin); rec.Code != tc.want {
 			t.Errorf("PUT %s = %d, want %d", tc.body, rec.Code, tc.want)
 		}
 	}
-	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p99",
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/usr_0000000000000000",
 		`{"name":"Nobody","email":"nobody@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusNotFound {
 		t.Errorf("PUT unknown id = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// A removed person still holds their address, and the error says so.
+	do(t, mux, http.MethodDelete, "/api/v1/admin/people/"+userByEmail(t, store, "m.lee@example.com").ID, "", admin)
+	rec := do(t, mux, http.MethodPut, path, `{"name":"Jane","email":"m.lee@example.com","role":"volunteer"}`, admin)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "removed") {
+		t.Errorf("take a removed person's address = %d %s; want 409 saying they were removed", rec.Code, rec.Body)
 	}
 }
 
 func TestRemovePerson(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p6", "", admin); rec.Code != http.StatusOK {
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	marcus := userByEmail(t, store, "m.lee@example.com")
+	path := "/api/v1/admin/people/" + marcus.ID
+
+	if rec := do(t, mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusOK {
 		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p6", "", admin); rec.Code != http.StatusNotFound {
+	if rec := do(t, mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusNotFound {
 		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-
-	// The next person added doesn't inherit the removed person's id.
-	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
-		`{"name":"Alex Rivera","email":"alex@example.com","role":"volunteer"}`, admin)
-	var added struct {
-		Person Person `json:"person"`
+	if rec := do(t, mux, http.MethodPut, path, `{"name":"Marcus","email":"m.lee@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT a removed person = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &added); err != nil || added.Person.ID != "p7" {
-		t.Errorf("added = %s, %v; want id p7", rec.Body, err)
+	rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin)
+	for _, p := range decodeInto[peopleBody](t, rec).People {
+		if p.ID == marcus.ID {
+			t.Error("removed person is still on the roster")
+		}
+	}
+
+	// Nothing is hard-deleted: the document stays, and so do his cards.
+	if u := userByEmail(t, store, "m.lee@example.com"); u.RemovedAt == nil || !u.RemovedAt.Equal(testNow) {
+		t.Errorf("stored removedAt = %v, want %v", u.RemovedAt, testNow)
+	}
+	rec = do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260821-SR03", "", admin)
+	if rec.Code != http.StatusOK {
+		t.Errorf("removed person's card = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	// Adding the address again brings the same person back.
+	rec = do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"name":"Marcus A. Lee","email":"m.lee@example.com","role":"volunteer"}`, admin)
+	if p := decodeInto[personBody](t, rec).Person; rec.Code != http.StatusCreated || p.ID != marcus.ID || p.Name != "Marcus A. Lee" {
+		t.Errorf("re-add = %d %s; want 201 with id %s", rec.Code, rec.Body, marcus.ID)
+	}
+	if rec := do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"email":"m.lee@example.com"}`, admin); rec.Code != http.StatusConflict {
+		t.Errorf("re-add twice = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
 func TestAnAdminCannotRemoveThemselves(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin) // Dana, p1
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p1", "", admin); rec.Code != http.StatusConflict {
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin) // Dana
+	path := "/api/v1/admin/people/" + userByEmail(t, store, "dana@eastsideaudubon.org").ID
+	if rec := do(t, mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusConflict {
 		t.Errorf("DELETE self = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
 func TestTheRosterKeepsAnAdmin(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin) // Dana, p1; Ellen, p5, is the other admin
-	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p5",
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin) // Dana; Ellen is the other admin
+	ellen := userByEmail(t, store, "ellen.park@example.com").ID
+	dana := userByEmail(t, store, "dana@eastsideaudubon.org").ID
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+ellen,
 		`{"name":"Ellen Park","email":"ellen.park@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusOK {
 		t.Fatalf("demote Ellen = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p1",
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+dana,
 		`{"name":"Dana Coordinator","email":"dana@eastsideaudubon.org","role":"volunteer"}`, admin); rec.Code != http.StatusConflict {
 		t.Errorf("demote the last admin = %d, want %d", rec.Code, http.StatusConflict)
-	}
-
-	// Removal can only reach the last admin through a race: two admins removing
-	// each other at once. Whoever is second must lose.
-	s := newStore()
-	if err := s.RemovePerson("p5", "p1"); err != nil {
-		t.Fatalf("Dana removes Ellen: %v", err)
-	}
-	if err := s.RemovePerson("p1", "p5"); !errors.Is(err, ErrLastAdmin) {
-		t.Errorf("Ellen (already removed) removes Dana: err = %v, want ErrLastAdmin", err)
 	}
 }
 
 func TestReaddressingYourselfKeepsYouSignedIn(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
-	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p1",
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	dana := userByEmail(t, store, "dana@eastsideaudubon.org").ID
+	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+dana,
 		`{"name":"Dana Coordinator","email":"dana.c@eastsideaudubon.org","role":"admin"}`, admin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
@@ -414,18 +700,15 @@ func TestReaddressingYourselfKeepsYouSignedIn(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("editing your own address issued no new session cookie")
 	}
-	var session struct {
-		User *Person `json:"user"`
-	}
 	rec = do(t, mux, http.MethodGet, "/api/v1/session", "", fresh)
-	if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil || session.User == nil || session.User.ID != "p1" {
-		t.Errorf("session with the new cookie = %s, %v", rec.Body, err)
+	if session := decodeInto[struct{ User *Person }](t, rec); session.User == nil || session.User.ID != dana {
+		t.Errorf("session with the new cookie = %s", rec.Body)
 	}
 }
 
 func TestStationEditsAreAdminOnly(t *testing.T) {
-	mux := newTestMux(t)
-	vol := signedIn(t, mux, RoleVolunteer)
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
 	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/SW-02",
 		`{"name":"Marymoor","latitude":47.66,"longitude":-122.11}`, vol); rec.Code != http.StatusForbidden {
 		t.Errorf("volunteer PUT = %d, want %d", rec.Code, http.StatusForbidden)
@@ -435,33 +718,52 @@ func TestStationEditsAreAdminOnly(t *testing.T) {
 	}
 }
 
+func TestListStations(t *testing.T) {
+	mux, _ := newTestMux(t)
+	rec := do(t, mux, http.MethodGet, "/api/v1/stations", "", signedIn(t, mux, db.RoleVolunteer))
+	var ids []string
+	for _, st := range decodeInto[stationsBody](t, rec).Stations {
+		ids = append(ids, st.ID)
+		if st.AddedOn != dateOf(time.Now()) {
+			t.Errorf("%s addedOn = %q, want today (Pacific)", st.ID, st.AddedOn)
+		}
+	}
+	if !slices.Equal(ids, []string{"SW-02", "SW-03", "SW-05"}) {
+		t.Errorf("stations = %v, want the three in the field", ids)
+	}
+}
+
+func TestAddStation(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	rec := do(t, mux, http.MethodPost, "/api/v1/admin/stations",
+		`{"id":"SW-06","name":" Mercer Slough ","latitude":47.59,"longitude":-122.18}`, admin)
+	if st := decodeInto[struct{ Station Station }](t, rec).Station; rec.Code != http.StatusCreated || st.ID != "SW-06" || st.Name != "Mercer Slough" {
+		t.Errorf("add = %d %s", rec.Code, rec.Body)
+	}
+	// The unit labelled SW-02 is in the field whatever case it's typed in.
+	rec = do(t, mux, http.MethodPost, "/api/v1/admin/stations",
+		`{"id":"sw-02","name":"Marymoor","latitude":47.66,"longitude":-122.11}`, admin)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "SW-02") {
+		t.Errorf("add sw-02 = %d %s; want 409 naming SW-02", rec.Code, rec.Body)
+	}
+}
+
 func TestUpdateStation(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/SW-02",
 		`{"name":"  Marymoor Park – Dog Area ","latitude":47.661,"longitude":-122.115}`, admin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
-	var body struct {
-		Station Station `json:"station"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if st := body.Station; st.ID != "SW-02" || st.Name != "Marymoor Park – Dog Area" || st.Latitude != 47.661 || st.Longitude != -122.115 {
+	if st := decodeInto[struct{ Station Station }](t, rec).Station; st.ID != "SW-02" || st.Name != "Marymoor Park – Dog Area" || st.Latitude != 47.661 || st.Longitude != -122.115 {
 		t.Errorf("station = %+v", st)
 	}
 
 	// Cards already sent keep the name they were recorded under.
-	var all struct {
-		Uploads []Upload `json:"uploads"`
-	}
 	rec = do(t, mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)
-	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	for _, u := range all.Uploads {
+	for _, u := range decodeInto[uploadsBody](t, rec).Uploads {
 		if u.StationID == "SW-02" && u.StationName != "Marymoor Park – Snag Row" {
 			t.Errorf("card %s now says %q; want the name it was sent under", u.Reference, u.StationName)
 		}
@@ -469,8 +771,8 @@ func TestUpdateStation(t *testing.T) {
 }
 
 func TestUpdateStationRejectsBadInput(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	for _, tc := range []struct {
 		id, body string
 		want     int
@@ -481,6 +783,7 @@ func TestUpdateStationRejectsBadInput(t *testing.T) {
 		// The id is printed on the unit; it isn't something an edit can change.
 		{"SW-02", `{"id":"SW-09","name":"Marymoor","latitude":47.6,"longitude":-122.1}`, http.StatusBadRequest},
 		{"SW-99", `{"name":"Nowhere","latitude":47.6,"longitude":-122.1}`, http.StatusNotFound},
+		{"SW-09", `{"name":"Retired","latitude":47.6,"longitude":-122.1}`, http.StatusNotFound},
 	} {
 		if rec := do(t, mux, http.MethodPut, "/api/v1/admin/stations/"+tc.id, tc.body, admin); rec.Code != tc.want {
 			t.Errorf("PUT %s %s = %d, want %d", tc.id, tc.body, rec.Code, tc.want)
@@ -489,8 +792,8 @@ func TestUpdateStationRejectsBadInput(t *testing.T) {
 }
 
 func TestRemoveStation(t *testing.T) {
-	mux := newTestMux(t)
-	admin := signedIn(t, mux, RoleAdmin)
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
 	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/stations/SW-05", "", admin); rec.Code != http.StatusOK {
 		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
@@ -498,30 +801,36 @@ func TestRemoveStation(t *testing.T) {
 		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 
-	var list struct {
-		Stations []Station `json:"stations"`
-	}
 	rec := do(t, mux, http.MethodGet, "/api/v1/stations", "", admin)
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	for _, st := range list.Stations {
+	for _, st := range decodeInto[stationsBody](t, rec).Stations {
 		if st.ID == "SW-05" {
 			t.Error("removed recorder is still listed")
 		}
 	}
+	// It is retired, not deleted.
+	if r, err := store.GetRecorder(t.Context(), "SW-05"); err != nil || r.RetiredAt == nil {
+		t.Errorf("stored recorder = %+v, %v; want retiredAt set", r, err)
+	}
 
-	// And a new card can't be registered against it.
-	vol := signedIn(t, mux, RoleVolunteer)
+	// A new card can't be registered against it.
+	vol := signedIn(t, mux, db.RoleVolunteer)
 	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
 		`{"stationId":"SW-05","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`, vol)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("card for a removed recorder = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
+
+	// Putting the unit back out brings the same recorder back.
+	rec = do(t, mux, http.MethodPost, "/api/v1/admin/stations",
+		`{"id":"sw-05","name":"Soaring Eagle – North","latitude":47.64,"longitude":-121.99}`, admin)
+	if st := decodeInto[struct{ Station Station }](t, rec).Station; rec.Code != http.StatusCreated || st.ID != "SW-05" || st.Name != "Soaring Eagle – North" {
+		t.Errorf("re-add = %d %s; want SW-05 back at its new name", rec.Code, rec.Body)
+	}
 }
 
 func TestUnknownAPIPathIsJSON404(t *testing.T) {
-	rec := do(t, newTestMux(t), http.MethodGet, "/api/v1/nope", "", nil)
+	mux, _ := newTestMux(t)
+	rec := do(t, mux, http.MethodGet, "/api/v1/nope", "", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}

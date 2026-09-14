@@ -232,6 +232,14 @@ func NewID(prefix string) string {
 	return prefix + "_" + hex.EncodeToString(b[:])
 }
 
+// UploadID is a card's reference, the one a volunteer quotes in email: the day
+// it was pulled and the recorder it came from. Recorder "SW-02" pulled on
+// "2026-09-07" is "OWL-20260907-SR02". Registering the same card again yields
+// the same id, which is how a resume finds what already landed.
+func UploadID(pulledOn, recorderID string) string {
+	return "OWL-" + strings.ReplaceAll(pulledOn, "-", "") + "-SR" + strings.TrimPrefix(recorderID, "SW-")
+}
+
 // CardPath normalizes a path on a card: forward slashes, no leading slash.
 func CardPath(p string) string {
 	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))

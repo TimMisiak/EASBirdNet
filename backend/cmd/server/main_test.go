@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 )
 
 // The API and the frontend register overlapping patterns on one mux, and a bad
@@ -148,8 +148,8 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		BootstrapAdmin: &mail.Address{Name: "Ada Admin", Address: "ada@eastsideaudubon.org"},
 	}
 	for range 2 { // a restart with the setting still in place
-		if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
-			t.Fatalf("bootstrap: %v", err)
+		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
+			t.Fatalf("prepare: %v", err)
 		}
 		mux := newMux(cfg, store, log)
 		for _, path := range []string{"/api/v1/health", "/api/v1/session", "/api/v1/public/overview"} {
@@ -157,6 +157,9 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		}
 	}
 
+	if recorders, _ := store.ListRecorders(ctx); len(recorders) != 0 {
+		t.Errorf("production startup wrote %d recorders", len(recorders))
+	}
 	users, err := store.ListUsers(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -165,8 +168,68 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		t.Errorf("roster after startup = %+v, want only the bootstrap admin", users)
 	}
 	for _, u := range users {
-		if api.IsPlaceholderPerson(u.Name, u.Email) {
+		if devseed.IsPlaceholderPerson(u.Name, u.Email) {
 			t.Errorf("placeholder person %s <%s> was written to the database", u.Name, u.Email)
 		}
+	}
+}
+
+// A fresh dev database is seeded, so the sign-in picker, the volunteer's cards
+// and the landing page all have something on them -- unless a bootstrap admin
+// got there first, which is how to start dev from a clean roster.
+func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
+	ctx := t.Context()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	open := func() db.Store {
+		store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() })
+		return store
+	}
+	cfg := config{StaticDir: t.TempDir(), DB: db.Config{Backend: db.BackendLocal}, Dev: true}
+
+	store := open()
+	for range 2 {
+		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+	}
+	mux := newMux(cfg, store, log)
+	get := func(path string, cookie *http.Cookie) string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d (%s)", path, rec.Code, rec.Body)
+		}
+		return rec.Body.String()
+	}
+	if body := get("/api/v1/public/overview", nil); !strings.Contains(body, `"scientificName"`) {
+		t.Errorf("overview after seeding = %s; want confirmed species", body)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"role":"volunteer"}`)))
+	if rec.Code != http.StatusOK || len(rec.Result().Cookies()) == 0 {
+		t.Fatalf("sign in as a volunteer = %d (%s)", rec.Code, rec.Body)
+	}
+	if body := get("/api/v1/uploads", rec.Result().Cookies()[0]); !strings.Contains(body, `"reference"`) {
+		t.Errorf("volunteer's cards = %s; want some", body)
+	}
+	if users, _ := store.ListUsers(ctx); len(users) != 6 {
+		t.Errorf("starting twice left %d people, want the 6 seeded once", len(users))
+	}
+
+	store = open()
+	cfg.BootstrapAdmin = &mail.Address{Name: "Ada Admin", Address: "ada@eastsideaudubon.org"}
+	if err := prepareDatabase(ctx, cfg, store, log); err != nil {
+		t.Fatalf("prepare with a bootstrap admin: %v", err)
+	}
+	if users, _ := store.ListUsers(ctx); len(users) != 1 {
+		t.Errorf("dev with a bootstrap admin has %d people, want only the admin", len(users))
 	}
 }

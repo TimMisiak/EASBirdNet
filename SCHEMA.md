@@ -367,6 +367,12 @@ query before creating or re-addressing a user. Two admins adding the same
 address in the same instant could both succeed. On a small, admin-only roster
 that race is accepted.
 
+The same goes for "the roster always keeps an admin". The API counts admins
+before a demotion or removal, but the count and the write touch different
+documents, and Cosmos has no transaction across partitions. Two admins demoting
+each other in the same instant could leave none. The fix for that would be
+editing a document in Cosmos Data Explorer, as with a bootstrap typo.
+
 Recorder, upload, audio-file and detection ids are unique by construction: the
 id is the partition key, or derived deterministically within one.
 
@@ -393,8 +399,9 @@ clean-up can act on one card at a time.
 ## API mapping
 
 The API's JSON shapes (what the frontend is built against) came first, so a few
-names differ from storage. Until handlers are moved onto the store, these are
-the rules to follow when they are:
+names differ from storage. The handlers map between the two in
+`internal/api/shapes.go` (field by field) and `internal/api/overview.go` (the
+public summary), following these rules:
 
 | API field | Stored as |
 |-----------|-----------|
@@ -402,12 +409,27 @@ the rules to follow when they are:
 | `station.addedOn` (date) | `recorders.createdAt`, formatted as a date in America/Los_Angeles |
 | `person.addedOn` (date) | `users.createdAt`, same |
 | `person.provider` | `users.identity.provider`, title-cased; `—` before first sign-in |
-| `upload.reference` | `uploads.id` |
+| `upload.reference` | `uploads.id`, built by `db.UploadID(pulledOn, recorderId)` |
 | `upload.stationName` | `uploads.recorder.name` (the copy, not the live recorder) |
 | `upload.volunteerName` | `uploads.userName` |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
-| `species[]` on the public overview | `detections` where `reviewStatus = confirmed`, grouped in Go by `Species()`; `nights` = distinct `night`, `stations` = distinct recorder names |
+| `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `nights` = distinct `night`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
 | `program.recorders` | recorders with no `retiredAt` |
+| `program.nightsRecorded` | distinct (`recorderId`, `nights[].date`) across all uploads, dated this calendar year (Pacific) |
+| `program.confirmedDetections` | `detections` where `reviewStatus = confirmed`, heard this calendar year (Pacific) |
+
+What the write routes do to documents:
+
+| Route | Effect |
+|-------|--------|
+| `GET /stations`, `GET /admin/people`, `GET /dev/people` | Leave out retired recorders and removed users. |
+| `POST /session` | Sets `lastSignInAt`. A removed user can't sign in, and their open session stops working. |
+| `POST /uploads` | Creates the upload. If that id exists and is the caller's, it is a resume: `notes`, `nights` and the totals are replaced, the uploaded counts and the `recorder`/`userName` copies are kept, and `status` goes back to `in_progress` only if the card was still transferring. Someone else's card is a 409. |
+| `POST /uploads/{ref}/progress` | Counts only increase, capped at the totals. The client's `status` applies only while the card is `in_progress` or `interrupted`; the last file sets `processing` and `receivedAt`. |
+| `DELETE /admin/people/{id}` | Sets `removedAt`. |
+| `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
+| `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
+| `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. |
 
 ## Local JSON file
 
@@ -428,6 +450,10 @@ by id:
 
 The file is read once at startup, held in memory and rewritten in full,
 atomically, after every change. It's fine to hand-edit it while the server
-is stopped. Delete it to start empty. A file with a different `version` is
+is stopped. Delete it to start over. On startup, a database with no users,
+recorders or uploads is filled by `internal/devseed` with a placeholder program
+(six people, five recorders, nine cards, a few weeks of reviewed detections),
+dated relative to that day. Setting `BIRDSENSE_BOOTSTRAP_ADMIN` in dev skips
+that, because the roster is no longer empty. A file with a different `version` is
 refused rather than guessed at. It is sized for development: a season of real
 detections would make every write slow.

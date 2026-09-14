@@ -195,7 +195,7 @@ environment forwards here.
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
 | container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
 | cpu / memory | `0.25` / `0.5Gi` | A Go binary serving small JSON and static files. |
-| min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). **Keep max at 1** while `internal/api` still serves its in-memory placeholder data, or two replicas would disagree. Raise it once the handlers read from Cosmos. |
+| min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). Every handler reads and writes Cosmos, so more replicas would agree with each other; one is plenty for the traffic. |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | liveness / readiness / startup probes | HTTP GET `/api/v1/health` on port `8080` | The same endpoint the Dockerfile `HEALTHCHECK` uses. |
 
@@ -248,8 +248,9 @@ Explorer, because the roster is no longer empty.
 
 Outside dev mode the server **refuses to start** if the bootstrap admin's name
 or address is someone from the development placeholder roster
-(`internal/api/store.go`), or if the address is on a reserved example domain
-(`example.com`, `*.test`, ...). Dev placeholder people never go into Cosmos.
+(`internal/devseed`), or if the address is on a reserved example domain
+(`example.com`, `*.test`, ...). Dev placeholder people never go into Cosmos:
+the seed that writes them only runs in dev mode, against the JSON file.
 
 ## Deploying a new version
 

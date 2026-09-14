@@ -17,6 +17,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
 )
 
@@ -46,10 +47,10 @@ func main() {
 	}
 
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
-	err = bootstrapRoster(bootCtx, cfg, store, log)
+	err = prepareDatabase(bootCtx, cfg, store, log)
 	cancelBoot()
 	if err != nil {
-		log.Error("bootstrapping the roster", "err", err)
+		log.Error("preparing the database", "err", err)
 		os.Exit(1)
 	}
 
@@ -142,7 +143,7 @@ func configFromEnv() (config, error) {
 		// The placeholder roster is only for exercising the frontend. Dev mode
 		// may reuse it; anything else is a real database, where one of those
 		// people as admin would be a typo at best and a way in at worst.
-		if !cfg.Dev && (api.IsPlaceholderPerson(addr.Name, addr.Address) || reservedDomain(addr.Address)) {
+		if !cfg.Dev && (devseed.IsPlaceholderPerson(addr.Name, addr.Address) || reservedDomain(addr.Address)) {
 			return cfg, fmt.Errorf("BIRDSENSE_BOOTSTRAP_ADMIN %q is development placeholder data; name a real person for the %s database", v, cfg.DB.Backend)
 		}
 		cfg.BootstrapAdmin = addr
@@ -167,8 +168,28 @@ func reservedDomain(email string) bool {
 	return false
 }
 
-// bootstrapRoster adds the configured first admin to an empty roster. It is
-// the only roster write the server makes on its own, in any mode.
+// prepareDatabase is everything the server writes on its own before it serves:
+// the bootstrap admin, and in dev mode the placeholder program if the database
+// is still empty after that. Outside dev mode the bootstrap admin is the only
+// write the server ever makes unasked.
+func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
+	if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
+		return fmt.Errorf("bootstrapping the roster: %w", err)
+	}
+	if !cfg.Dev {
+		return nil
+	}
+	seeded, err := devseed.Seed(ctx, store, time.Now())
+	if err != nil {
+		return fmt.Errorf("seeding the dev database: %w", err)
+	}
+	if seeded {
+		log.Info("seeded an empty dev database with placeholder people, recorders and cards", "path", cfg.DB.LocalPath)
+	}
+	return nil
+}
+
+// bootstrapRoster adds the configured first admin to an empty roster.
 func bootstrapRoster(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
 	if cfg.BootstrapAdmin == nil {
 		return nil

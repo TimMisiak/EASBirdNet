@@ -15,6 +15,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │   └── internal/
 │       ├── api/        JSON handlers under /api/v1/
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
+│       ├── devseed/    Placeholder program written into an empty dev database
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
@@ -193,14 +194,17 @@ cd backend && BIRDSENSE_DB=local go run ./cmd/server     # http://localhost:8080
 ```
 
 Frontend edits need only a browser reload; Go edits need a restart.
-`BIRDSENSE_DB=local` stores data in `backend/data/birdsense.json` (git-ignored;
-delete it to start empty, override with `BIRDSENSE_LOCAL_DB_PATH`). Without it
-the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
+`BIRDSENSE_DB=local` stores data in `backend/data/birdsense.json` (git-ignored,
+override with `BIRDSENSE_LOCAL_DB_PATH`). When that file is empty, startup fills
+it with the placeholder program from `internal/devseed`: people to sign in as,
+recorders, cards in every state, recent detections. Dates are relative to the
+day it was seeded, so delete the file to re-seed once it has gone stale. Without
+`BIRDSENSE_DB=local` the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
 `BIRDSENSE_COSMOS_DATABASE`) and exits if it isn't configured.
 `BIRDSENSE_BOOTSTRAP_ADMIN="Name <email>"` adds the first admin to an empty
-roster (required on a first deploy, see DEPLOYMENT.md). Outside dev mode it
-refuses anyone from the placeholder roster in `internal/api/store.go`, so dev
-people never reach Cosmos.
+roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
+the seed, so setting it starts you from a clean roster. Outside dev mode it
+refuses anyone from the placeholder roster, so dev people never reach Cosmos.
 
 Container (compose sets `BIRDSENSE_DB=local` and keeps the file in a named
 volume):
@@ -217,14 +221,17 @@ cd backend && gofmt -l . && go vet ./... && go test ./...
 
 ## State of the code
 
-The API is wired end to end, but every handler still reads the in-memory
-placeholder data in `internal/api/store.go`. The persistence layer
-(`internal/db`) and the data model (SCHEMA.md) exist, and the server opens the
-configured database at startup, but no handler reads or writes it yet.
-Handlers move onto `db.Store` one at a time as each API is fleshed out;
-`store.go` is deleted when the last one has. SCHEMA.md's *API mapping* section
-lists how today's JSON field names map onto the stored documents.
+Every handler reads and writes through `db.Store`; there is no in-memory data
+left in `internal/api`. The API's JSON shapes live in `internal/api/shapes.go`
+and differ from the stored documents in a few names. SCHEMA.md's *API mapping*
+section is the rulebook for both the fields and what each write route does
+(DELETE sets `removedAt`/`retiredAt`; nothing is hard-deleted).
+`internal/api` tests build their own small fixed-date program in the JSON
+backend, deliberately not the dev seed.
 
+Still placeholder: sign-in (the session cookie is an unsigned email address, and
+`POST /session {"role": ...}` signs in as the first person with that role) and
+the upload transfer itself (the browser simulates it and reports progress).
 The Cosmos DB backend compiles but has not been run against Azure or the
 emulator; the JSON-file backend and its tests define the behaviour it must
 match. There is no BirdNET ingestion and no blob storage yet.
