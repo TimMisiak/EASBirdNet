@@ -5,18 +5,21 @@ import * as api from "./api.js";
 
 let current = null;
 let loaded = false;
+let dev = false;
 const listeners = new Set();
 
 /** The signed-in person, or null. Synchronous: call load() once at startup. */
 export const user = () => current;
 export const isSignedIn = () => current !== null;
 export const isAdmin = () => current?.role === "admin";
+/** True when the server runs in development mode (see BIRDSENSE_DB=local). */
+export const isDev = () => dev;
 /** False until the first load() resolves, so the shell can hold off routing. */
 export const isLoaded = () => loaded;
 
 export async function load() {
   try {
-    ({ user: current } = await api.fetchSession());
+    ({ user: current, dev = false } = await api.fetchSession());
   } catch {
     // A failed session check means anonymous; the public page still works.
     current = null;

@@ -36,7 +36,7 @@ const get = (path) => request("GET", path);
 export const fetchOverview = (days) =>
   get(`/public/overview${days ? `?days=${days}` : ""}`);
 
-/** @returns {Promise<{user: object|null}>} */
+/** @returns {Promise<{user: object|null, dev: boolean}>} */
 export const fetchSession = () => get("/session");
 
 /**
@@ -45,6 +45,9 @@ export const fetchSession = () => get("/session");
  */
 export const createSession = (body) => request("POST", "/session", body);
 export const deleteSession = () => request("DELETE", "/session");
+
+/** Everyone on the roster, for the sign-in picker. Only exists in dev mode. */
+export const fetchDevPeople = () => get("/dev/people");
 
 export const fetchStations = () => get("/stations");
 

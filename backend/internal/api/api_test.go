@@ -15,13 +15,18 @@ import (
 
 func newTestMux(t *testing.T) *http.ServeMux {
 	t.Helper()
+	return newTestMuxMode(t, false)
+}
+
+func newTestMuxMode(t *testing.T, dev bool) *http.ServeMux {
+	t.Helper()
 	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 	mux := http.NewServeMux()
-	Register(mux, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	Register(mux, store, slog.New(slog.NewTextHandler(io.Discard, nil)), dev)
 	return mux
 }
 
@@ -70,6 +75,35 @@ func TestHealth(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Errorf("status = %q, want %q", body["status"], "ok")
+	}
+}
+
+// The sign-in picker lists every address on the roster, so outside dev mode the
+// route must not exist and the session must not advertise it.
+func TestDevPeopleOnlyInDevMode(t *testing.T) {
+	for _, dev := range []bool{false, true} {
+		mux := newTestMuxMode(t, dev)
+
+		rec := do(t, mux, http.MethodGet, "/api/v1/dev/people", "", nil)
+		want := http.StatusNotFound
+		if dev {
+			want = http.StatusOK
+		}
+		if rec.Code != want {
+			t.Errorf("dev=%v: GET /dev/people = %d, want %d", dev, rec.Code, want)
+		}
+		if dev {
+			var body struct{ People []Person }
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.People) == 0 {
+				t.Errorf("dev people = %s, %v; want the roster", rec.Body, err)
+			}
+		}
+
+		var session struct{ Dev bool }
+		rec = do(t, mux, http.MethodGet, "/api/v1/session", "", nil)
+		if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil || session.Dev != dev {
+			t.Errorf("dev=%v: GET /session = %s, %v", dev, rec.Body, err)
+		}
 	}
 }
 

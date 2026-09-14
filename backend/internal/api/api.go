@@ -33,10 +33,11 @@ const (
 // reachable from outside a demo.
 const sessionCookie = "bs_session"
 
-// Register mounts the API routes on mux.
-func Register(mux *http.ServeMux, database db.Store, log *slog.Logger) {
+// Register mounts the API routes on mux. dev turns on the development-only
+// routes -- today, the roster the sign-in page lets you pick an account from.
+func Register(mux *http.ServeMux, database db.Store, log *slog.Logger, dev bool) {
 	s := newStore()
-	h := &handlers{store: s, db: database, log: log}
+	h := &handlers{store: s, db: database, log: log, dev: dev}
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 
@@ -62,6 +63,12 @@ func Register(mux *http.ServeMux, database db.Store, log *slog.Logger) {
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(RoleAdmin, h.addPerson))
 	mux.HandleFunc("POST /api/v1/admin/stations", h.requireRole(RoleAdmin, h.addStation))
 
+	// Development only: not registered at all otherwise, so a deployed server
+	// 404s instead of handing the roster to anyone who asks.
+	if dev {
+		mux.HandleFunc("GET /api/v1/dev/people", h.listDevPeople)
+	}
+
 	// Anything else under /api/ is a 404 as JSON, not as the frontend's
 	// index.html -- a mistyped API path should look like an API error.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +83,8 @@ type handlers struct {
 	store *store
 	db    db.Store
 	log   *slog.Logger
+	// dev is set for local development; see Register.
+	dev bool
 }
 
 func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
@@ -102,12 +111,12 @@ func (h *handlers) publicOverview(w http.ResponseWriter, r *http.Request) {
 // --- session ---
 
 func (h *handlers) getSession(w http.ResponseWriter, r *http.Request) {
-	p, ok := h.person(r)
-	if !ok {
-		h.json(w, http.StatusOK, map[string]any{"user": nil})
-		return
+	// dev tells the sign-in page whether to offer the account picker.
+	var user any
+	if p, ok := h.person(r); ok {
+		user = p
 	}
-	h.json(w, http.StatusOK, map[string]any{"user": p})
+	h.json(w, http.StatusOK, map[string]any{"user": user, "dev": h.dev})
 }
 
 func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
@@ -115,9 +124,6 @@ func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Role     string `json:"role"`
 		Provider string `json:"provider"`
-		// Remember keeps the session across browser restarts; volunteers are
-		// asked once and then left alone for the season.
-		Remember bool `json:"remember"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.json(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -143,15 +149,18 @@ func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxAge := 0 // a session cookie: gone when the browser closes
-	if body.Remember {
-		maxAge = 90 * 24 * 3600
-	}
+	// Volunteers sign in once and are left alone for the season.
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: p.Email, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 90 * 24 * 3600,
 	})
 	h.json(w, http.StatusOK, map[string]any{"user": p})
+}
+
+// listDevPeople is the whole roster, for the development sign-in picker. It is
+// deliberately unauthenticated: you pick from it before you have a session.
+func (h *handlers) listDevPeople(w http.ResponseWriter, r *http.Request) {
+	h.json(w, http.StatusOK, map[string]any{"people": h.store.People()})
 }
 
 func (h *handlers) deleteSession(w http.ResponseWriter, r *http.Request) {

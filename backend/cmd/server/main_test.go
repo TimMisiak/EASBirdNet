@@ -65,11 +65,17 @@ func TestConfigFromEnvDatabase(t *testing.T) {
 	if cfg.DB.Backend != db.BackendCosmos || cfg.DB.CosmosDatabase != "birdsense" {
 		t.Errorf("db config = %+v, want cosmos with the birdsense database", cfg.DB)
 	}
+	if cfg.Dev {
+		t.Error("dev mode is on with the cosmos database")
+	}
 
 	t.Setenv("BIRDSENSE_DB", "local")
 	t.Setenv("BIRDSENSE_LOCAL_DB_PATH", "/tmp/dev.json")
 	if cfg, err = configFromEnv(); err != nil || cfg.DB.Backend != db.BackendLocal || cfg.DB.LocalPath != "/tmp/dev.json" {
 		t.Errorf("local config = %+v, %v; want local at /tmp/dev.json", cfg.DB, err)
+	}
+	if !cfg.Dev {
+		t.Error("dev mode is off with the local database")
 	}
 
 	t.Setenv("BIRDSENSE_DB", "sqlite")

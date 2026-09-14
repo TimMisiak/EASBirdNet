@@ -25,7 +25,7 @@ class AppHeader extends BaseElement {
         await session.signOut();
         navigate("/");
       },
-      home: () => navigate("/app"),
+      home: () => navigate("/"),
     };
   }
 

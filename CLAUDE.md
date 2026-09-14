@@ -89,7 +89,12 @@ POST   /api/v1/uploads/{reference}/progress
 GET    /api/v1/admin/uploads              every card, admin only
 GET    POST /api/v1/admin/people          the roster
 POST   /api/v1/admin/stations
+GET    /api/v1/dev/people                 the roster, dev mode only
 ```
+
+Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
+there). It registers the `/dev/*` routes, and `GET /session` reports it as
+`dev`, so the sign-in page offers a picker of everyone on the roster.
 
 A card belongs to a volunteer: `/uploads/{ref}` 404s for anyone else, and the
 `/admin/*` routes 403 for a volunteer. Card counts only ever move forward in

@@ -1,6 +1,7 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, typography } from "../shared-styles.js";
 import { navigate } from "../router.js";
+import * as api from "../api.js";
 import * as session from "../session.js";
 import "./bs-brand-mark.js";
 
@@ -9,24 +10,36 @@ import "./bs-brand-mark.js";
  * anyone whose address a coordinator hasn't added gets told so plainly.
  *
  * The identity providers aren't wired up yet, so the provider buttons sign in
- * against the roster directly and the boxed picker at the bottom -- which the
- * design carries as an explicit prototype affordance -- chooses which role to
- * land in. Both go away with the first real OIDC callback.
+ * as the first volunteer on the roster. In dev mode a boxed picker at the
+ * bottom lists everyone on the roster to sign in as; the server only offers
+ * that roster in dev mode, and the page only asks for it there.
  */
 class SignInPage extends BaseElement {
   static styles = [typography, controls, forms];
 
   #busy = false;
   #error = null;
-  #remember = true;
+  /** The roster for the dev picker: null until loaded, and never outside dev. */
+  #people = null;
+
+  connectedCallback() {
+    super.connectedCallback();
+    if (session.isDev()) this.#loadPeople();
+  }
+
+  async #loadPeople() {
+    try {
+      ({ people: this.#people } = await api.fetchDevPeople());
+    } catch (error) {
+      this.#error = error;
+    }
+    this.render();
+  }
 
   get actions() {
     return {
       provider: (el) => this.#signIn({ role: "volunteer", provider: el.dataset.provider }),
-      role: (el) => this.#signIn({ role: el.dataset.role }),
-      remember: (el) => {
-        this.#remember = el.checked;
-      },
+      dev: (form) => this.#signIn({ email: form.elements.email.value }),
     };
   }
 
@@ -36,13 +49,40 @@ class SignInPage extends BaseElement {
     this.#error = null;
     this.render();
     try {
-      const user = await session.signIn({ ...body, remember: this.#remember });
+      const user = await session.signIn(body);
       navigate(user.role === "admin" ? "/admin/people" : "/app");
     } catch (error) {
       this.#busy = false;
       this.#error = error;
       this.render();
     }
+  }
+
+  #devPicker() {
+    if (!session.isDev() || !this.#people) return "";
+    const group = (label, role) => {
+      const people = this.#people.filter((p) => p.role === role);
+      if (!people.length) return "";
+      return `
+        <optgroup label="${label}">
+          ${people
+            .map((p) => `<option value="${escapeHTML(p.email)}">${escapeHTML(p.name)}</option>`)
+            .join("")}
+        </optgroup>
+      `;
+    };
+    return `
+      <form class="prototype" data-submit="dev">
+        <label class="eyebrow" for="dev-person">Dev mode — sign in as</label>
+        <span class="row">
+          <select class="field" id="dev-person" name="email" ${this.#busy ? "disabled" : ""}>
+            ${group("Admins", "admin")}
+            ${group("Volunteers", "volunteer")}
+          </select>
+          <button class="btn btn--forest" type="submit" ${this.#busy ? "disabled" : ""}>Sign in</button>
+        </span>
+      </form>
+    `;
   }
 
   render() {
@@ -87,16 +127,6 @@ class SignInPage extends BaseElement {
           font-size: 0.6875rem;
         }
         .provider .glyph[data-square="true"] { border-radius: 0; }
-        .remember {
-          display: flex;
-          align-items: center;
-          gap: 0.625rem;
-          margin-top: 1.375rem;
-          font-size: 0.875rem;
-          color: var(--bs-text-body);
-          cursor: pointer;
-        }
-        .remember input { width: 16px; height: 16px; accent-color: var(--bs-forest); }
         .help {
           border-top: 1px solid var(--bs-border);
           margin-top: 1.625rem;
@@ -114,13 +144,12 @@ class SignInPage extends BaseElement {
           font-size: 0.78125rem;
           color: var(--bs-amber-edge);
           display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: var(--bs-space-3);
-          flex-wrap: wrap;
+          flex-direction: column;
+          gap: var(--bs-space-2);
         }
         .prototype .eyebrow { color: inherit; letter-spacing: 0.08em; }
-        .prototype .row { gap: var(--bs-space-2); }
+        .prototype .row { display: flex; gap: var(--bs-space-2); }
+        .prototype select { flex: 1; min-width: 0; font-size: 0.8125rem; color: var(--bs-text); }
         .prototype button { padding: 0.4375rem 0.75rem; font-size: 0.75rem; }
         @media (max-width: 480px) { .card { padding: 1.75rem 1.5rem; } }
       </style>
@@ -139,23 +168,13 @@ class SignInPage extends BaseElement {
             <span class="glyph" data-square="true" aria-hidden="true">M</span> Continue with Microsoft
           </button>
         </div>
-        <label class="remember">
-          <input type="checkbox" data-change="remember" ${this.#remember ? "checked" : ""} />
-          Remember this computer for 90 days
-        </label>
         ${this.#error ? `<p class="error">${escapeHTML(this.#error.message)}</p>` : ""}
         <div class="help">
           If we don't recognize your address, email
           <a href="mailto:owls@eastsideaudubon.org">owls@eastsideaudubon.org</a>
           and a coordinator will add you.
         </div>
-        <div class="prototype">
-          <span class="eyebrow">Prototype — pick a role</span>
-          <span class="row">
-            <button class="btn btn--forest" data-action="role" data-role="volunteer" ${this.#busy ? "disabled" : ""}>Volunteer</button>
-            <button class="btn btn--quiet" data-action="role" data-role="admin" ${this.#busy ? "disabled" : ""}>Admin</button>
-          </span>
-        </div>
+        ${this.#devPicker()}
       </div>
     `;
   }

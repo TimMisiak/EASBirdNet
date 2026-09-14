@@ -26,7 +26,7 @@ func main() {
 		log.Error("bad configuration", "err", err)
 		os.Exit(1)
 	}
-	log.Info("starting birdsense", "addr", cfg.Addr, "static_dir", cfg.StaticDir, "db", cfg.DB.Backend)
+	log.Info("starting birdsense", "addr", cfg.Addr, "static_dir", cfg.StaticDir, "db", cfg.DB.Backend, "dev", cfg.Dev)
 
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
 	store, err := db.Open(openCtx, cfg.DB)
@@ -81,7 +81,7 @@ func main() {
 // patterns do -- see web.Register.
 func newMux(cfg config, store db.Store, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
-	api.Register(mux, store, log)
+	api.Register(mux, store, log, cfg.Dev)
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
 }
@@ -90,6 +90,10 @@ type config struct {
 	Addr      string
 	StaticDir string
 	DB        db.Config
+	// Dev turns on development-only affordances, like signing in as anyone on
+	// the roster. It follows BIRDSENSE_DB=local: the JSON file is only ever a
+	// development database, and Azure runs Cosmos, so it can't be on there.
+	Dev bool
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -108,6 +112,7 @@ func configFromEnv() (config, error) {
 	}
 	switch cfg.DB.Backend {
 	case db.BackendLocal:
+		cfg.Dev = true
 	case db.BackendCosmos:
 		if cfg.DB.CosmosEndpoint == "" {
 			return cfg, errors.New("BIRDSENSE_COSMOS_ENDPOINT is required for the cosmos database (for local development, set BIRDSENSE_DB=local)")

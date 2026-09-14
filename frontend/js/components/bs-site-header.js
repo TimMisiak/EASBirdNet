@@ -27,7 +27,10 @@ class SiteHeader extends BaseElement {
         );
         this.render();
       },
-      signin: () => navigate(session.isSignedIn() ? "/app" : "/signin"),
+      signin: () => {
+        if (!session.isSignedIn()) return navigate("/signin");
+        navigate(session.isAdmin() ? "/admin" : "/app");
+      },
       toggle: () => {
         this.#open = !this.#open;
         this.render();
@@ -36,7 +39,7 @@ class SiteHeader extends BaseElement {
   }
 
   render() {
-    const signedIn = session.isSignedIn();
+    const cta = !session.isSignedIn() ? "Sign in" : session.isAdmin() ? "Admin" : "Upload";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -98,7 +101,7 @@ class SiteHeader extends BaseElement {
           <button class="link" data-action="jump" data-section="detections">Detections</button>
           <button class="link" data-action="jump" data-section="how">How it works</button>
           <button class="btn btn--primary btn--small" data-action="signin">
-            ${signedIn ? "Go to my cards" : "Sign in"}
+            ${cta}
           </button>
         </nav>
         <button class="menu-button" data-action="toggle"
@@ -110,7 +113,7 @@ class SiteHeader extends BaseElement {
         <button class="link" data-action="jump" data-section="detections">Detections</button>
         <button class="link" data-action="jump" data-section="how">How it works</button>
         <button class="btn btn--primary btn--small" data-action="signin">
-          ${signedIn ? "Go to my cards" : "Sign in"}
+          ${cta}
         </button>
       </div>
     `;
