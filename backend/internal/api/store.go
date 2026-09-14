@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -91,9 +93,12 @@ type store struct {
 	mu       sync.Mutex
 	stations []Station
 	people   []Person
-	uploads  []Upload
-	species  []Species
-	program  ProgramStats
+	// lastPersonID only counts up, so a removed person's id is never handed to
+	// someone new while it may still be in an admin's open tab.
+	lastPersonID int
+	uploads      []Upload
+	species      []Species
+	program      ProgramStats
 }
 
 // ProgramStats are the three headline numbers on the public page.
@@ -158,6 +163,7 @@ func (s *store) seed() {
 		{"p5", "Ellen Park", "ellen.park@example.com", "Google", RoleAdmin, day(2026, time.June, 8)},
 		{"p6", "Marcus Lee", "m.lee@example.com", "Google", RoleVolunteer, day(2026, time.August, 1)},
 	}
+	s.lastPersonID = len(s.people)
 
 	s.species = []Species{
 		{"Barred Owl", "Strix varia", 412, 7,
@@ -358,12 +364,84 @@ func (s *store) AddPerson(name, email, role string) Person {
 	if name == "" {
 		name = email
 	}
+	s.lastPersonID++
 	p := Person{
-		ID: fmt.Sprintf("p%d", len(s.people)+1), Name: name, Email: email,
+		ID: fmt.Sprintf("p%d", s.lastPersonID), Name: name, Email: email,
 		Provider: "—", Role: role, AddedOn: today(),
 	}
 	s.people = append(s.people, p)
 	return p
+}
+
+// Roster rules. The store checks them under its lock, so two admins removing
+// each other at the same moment can't leave the program with no admin at all.
+var (
+	ErrNoSuchPerson = errors.New("that person isn't on the roster")
+	ErrEmailTaken   = errors.New("that address is already on the roster")
+	ErrLastAdmin    = errors.New("the roster needs an admin; make someone else an admin first")
+	ErrRemoveSelf   = errors.New("you can't remove yourself from the roster")
+)
+
+// UpdatePerson sets someone's name, address and role. An empty name falls back
+// to the address, as it does in AddPerson.
+func (s *store) UpdatePerson(id, name, email, role string) (Person, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.people, func(p Person) bool { return p.ID == id })
+	if i < 0 {
+		return Person{}, ErrNoSuchPerson
+	}
+	for j, other := range s.people {
+		if j != i && strings.EqualFold(other.Email, email) {
+			return Person{}, ErrEmailTaken
+		}
+	}
+	p := s.people[i]
+	if p.Role == RoleAdmin && role != RoleAdmin && s.admins() == 1 {
+		return Person{}, ErrLastAdmin
+	}
+	if name == "" {
+		name = email
+	}
+	// Placeholder cards point at their volunteer by name (stored uploads use
+	// userId), so a rename has to take the person's cards with it.
+	for k := range s.uploads {
+		if s.uploads[k].VolunteerName == p.Name {
+			s.uploads[k].VolunteerName = name
+		}
+	}
+	p.Name, p.Email, p.Role = name, email, role
+	s.people[i] = p
+	return p, nil
+}
+
+// RemovePerson takes someone off the roster; by is the id of the admin doing
+// it. The stored version will set removedAt instead, so cards still resolve.
+func (s *store) RemovePerson(id, by string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.people, func(p Person) bool { return p.ID == id })
+	switch {
+	case i < 0:
+		return ErrNoSuchPerson
+	case id == by:
+		return ErrRemoveSelf
+	case s.people[i].Role == RoleAdmin && s.admins() == 1:
+		return ErrLastAdmin
+	}
+	s.people = slices.Delete(s.people, i, i+1)
+	return nil
+}
+
+// admins counts the admins on the roster. The caller holds s.mu.
+func (s *store) admins() int {
+	n := 0
+	for _, p := range s.people {
+		if p.Role == RoleAdmin {
+			n++
+		}
+	}
+	return n
 }
 
 // CreateUpload registers a card the volunteer is about to send. The reference

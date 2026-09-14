@@ -88,6 +88,7 @@ GET    /api/v1/uploads/{reference}
 POST   /api/v1/uploads/{reference}/progress
 GET    /api/v1/admin/uploads              every card, admin only
 GET    POST /api/v1/admin/people          the roster
+PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
 GET    /api/v1/dev/people                 the roster, dev mode only
 ```
@@ -99,7 +100,8 @@ there). It registers the `/dev/*` routes, and `GET /session` reports it as
 A card belongs to a volunteer: `/uploads/{ref}` 404s for anyone else, and the
 `/admin/*` routes 403 for a volunteer. Card counts only ever move forward in
 `RecordProgress`, so a retried batch is harmless and a client can't walk a
-card's progress backwards.
+card's progress backwards. The roster always keeps an admin: removing or
+demoting the last one is a 409, and so is an admin removing themselves.
 
 **Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
 `/admin/people`. `internal/web` already falls back to index.html for

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -271,6 +272,154 @@ func TestAddPersonRejectsADuplicate(t *testing.T) {
 		`{"name":"Jane Again","email":"jane@example.com","role":"volunteer"}`, admin)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func sessionFrom(rec *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestRosterEditsAreAdminOnly(t *testing.T) {
+	mux := newTestMux(t)
+	vol := signedIn(t, mux, RoleVolunteer)
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p3",
+		`{"name":"Tomas","email":"tomas.reyes@example.com","role":"admin"}`, vol); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer PUT = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p3", "", vol); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestUpdatePerson(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p2",
+		`{"name":"Jane Birder","email":"jane.birder@example.com","role":"admin"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	var body struct {
+		Person Person `json:"person"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p := body.Person; p.ID != "p2" || p.Name != "Jane Birder" || p.Email != "jane.birder@example.com" || p.Role != RoleAdmin {
+		t.Errorf("person = %+v", p)
+	}
+
+	// Her cards follow her to the new name and address.
+	rec = do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"jane.birder@example.com"}`, nil)
+	jane := sessionFrom(rec)
+	if rec.Code != http.StatusOK || jane == nil {
+		t.Fatalf("sign in with the new address = %d (%s)", rec.Code, rec.Body)
+	}
+	var mine struct {
+		Uploads []Upload `json:"uploads"`
+	}
+	rec = do(t, mux, http.MethodGet, "/api/v1/uploads", "", jane)
+	if err := json.Unmarshal(rec.Body.Bytes(), &mine); err != nil || len(mine.Uploads) == 0 {
+		t.Errorf("renamed volunteer's cards = %s, %v; want them kept", rec.Body, err)
+	}
+}
+
+func TestUpdatePersonRejectsBadInput(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"Jane","email":"ellen.park@example.com","role":"volunteer"}`, http.StatusConflict},
+		{`{"name":"Jane","email":"jane@example.com","role":"owner"}`, http.StatusBadRequest},
+		{`{"name":"Jane","email":"not an address","role":"volunteer"}`, http.StatusBadRequest},
+	} {
+		if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p2", tc.body, admin); rec.Code != tc.want {
+			t.Errorf("PUT %s = %d, want %d", tc.body, rec.Code, tc.want)
+		}
+	}
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p99",
+		`{"name":"Nobody","email":"nobody@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT unknown id = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestRemovePerson(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p6", "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p6", "", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// The next person added doesn't inherit the removed person's id.
+	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
+		`{"name":"Alex Rivera","email":"alex@example.com","role":"volunteer"}`, admin)
+	var added struct {
+		Person Person `json:"person"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &added); err != nil || added.Person.ID != "p7" {
+		t.Errorf("added = %s, %v; want id p7", rec.Body, err)
+	}
+}
+
+func TestAnAdminCannotRemoveThemselves(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin) // Dana, p1
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/p1", "", admin); rec.Code != http.StatusConflict {
+		t.Errorf("DELETE self = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestTheRosterKeepsAnAdmin(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin) // Dana, p1; Ellen, p5, is the other admin
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p5",
+		`{"name":"Ellen Park","email":"ellen.park@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusOK {
+		t.Fatalf("demote Ellen = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p1",
+		`{"name":"Dana Coordinator","email":"dana@eastsideaudubon.org","role":"volunteer"}`, admin); rec.Code != http.StatusConflict {
+		t.Errorf("demote the last admin = %d, want %d", rec.Code, http.StatusConflict)
+	}
+
+	// Removal can only reach the last admin through a race: two admins removing
+	// each other at once. Whoever is second must lose.
+	s := newStore()
+	if err := s.RemovePerson("p5", "p1"); err != nil {
+		t.Fatalf("Dana removes Ellen: %v", err)
+	}
+	if err := s.RemovePerson("p1", "p5"); !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("Ellen (already removed) removes Dana: err = %v, want ErrLastAdmin", err)
+	}
+}
+
+func TestReaddressingYourselfKeepsYouSignedIn(t *testing.T) {
+	mux := newTestMux(t)
+	admin := signedIn(t, mux, RoleAdmin)
+	rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/p1",
+		`{"name":"Dana Coordinator","email":"dana.c@eastsideaudubon.org","role":"admin"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+	fresh := sessionFrom(rec)
+	if fresh == nil {
+		t.Fatal("editing your own address issued no new session cookie")
+	}
+	var session struct {
+		User *Person `json:"user"`
+	}
+	rec = do(t, mux, http.MethodGet, "/api/v1/session", "", fresh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil || session.User == nil || session.User.ID != "p1" {
+		t.Errorf("session with the new cookie = %s, %v", rec.Body, err)
 	}
 }
 

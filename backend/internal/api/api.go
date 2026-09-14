@@ -61,6 +61,8 @@ func Register(mux *http.ServeMux, database db.Store, log *slog.Logger, dev bool)
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(RoleAdmin, h.listAllUploads))
 	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(RoleAdmin, h.listPeople))
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(RoleAdmin, h.addPerson))
+	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(RoleAdmin, h.updatePerson))
+	mux.HandleFunc("DELETE /api/v1/admin/people/{id}", h.requireRole(RoleAdmin, h.removePerson))
 	mux.HandleFunc("POST /api/v1/admin/stations", h.requireRole(RoleAdmin, h.addStation))
 
 	// Development only: not registered at all otherwise, so a deployed server
@@ -149,12 +151,16 @@ func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setSession(w, p)
+	h.json(w, http.StatusOK, map[string]any{"user": p})
+}
+
+func setSession(w http.ResponseWriter, p Person) {
 	// Volunteers sign in once and are left alone for the season.
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: p.Email, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 90 * 24 * 3600,
 	})
-	h.json(w, http.StatusOK, map[string]any{"user": p})
 }
 
 // listDevPeople is the whole roster, for the development sign-in picker. It is
@@ -319,6 +325,63 @@ func (h *handlers) addPerson(w http.ResponseWriter, r *http.Request, _ Person) {
 		return
 	}
 	h.json(w, http.StatusCreated, map[string]any{"person": h.store.AddPerson(strings.TrimSpace(body.Name), body.Email, body.Role)})
+}
+
+// updatePerson changes what a coordinator can change about someone: name,
+// address and role. The provider and the day they were added are facts.
+func (h *handlers) updatePerson(w http.ResponseWriter, r *http.Request, me Person) {
+	var body struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if err := decode(r, &body); err != nil {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	body.Email = strings.TrimSpace(body.Email)
+	if !strings.Contains(body.Email, "@") {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": "a valid email address is required"})
+		return
+	}
+	// Unlike addPerson, an unknown role is an error rather than "volunteer":
+	// quietly demoting an admin is not a safe default for an edit.
+	if body.Role != RoleAdmin && body.Role != RoleVolunteer {
+		h.json(w, http.StatusBadRequest, map[string]string{"error": "role must be volunteer or admin"})
+		return
+	}
+	p, err := h.store.UpdatePerson(r.PathValue("id"), strings.TrimSpace(body.Name), body.Email, body.Role)
+	if err != nil {
+		h.rosterError(w, err)
+		return
+	}
+	// The session cookie is the address, so re-addressing yourself would sign
+	// you out mid-edit. Reissue it for the new one.
+	if p.ID == me.ID {
+		setSession(w, p)
+	}
+	h.json(w, http.StatusOK, map[string]any{"person": p})
+}
+
+func (h *handlers) removePerson(w http.ResponseWriter, r *http.Request, me Person) {
+	id := r.PathValue("id")
+	if err := h.store.RemovePerson(id, me.ID); err != nil {
+		h.rosterError(w, err)
+		return
+	}
+	h.json(w, http.StatusOK, map[string]string{"removed": id})
+}
+
+// rosterError maps the store's roster rules onto status codes.
+func (h *handlers) rosterError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, ErrNoSuchPerson):
+		status = http.StatusNotFound
+	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrLastAdmin), errors.Is(err, ErrRemoveSelf):
+		status = http.StatusConflict
+	}
+	h.json(w, status, map[string]string{"error": err.Error()})
 }
 
 func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ Person) {

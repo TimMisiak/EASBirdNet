@@ -65,4 +65,9 @@ export const reportProgress = (reference, body) =>
 export const fetchAllUploads = () => get("/admin/uploads");
 export const fetchPeople = () => get("/admin/people");
 export const addPerson = (body) => request("POST", "/admin/people", body);
+/** Replace someone's name, email and role. */
+export const updatePerson = (id, body) =>
+  request("PUT", `/admin/people/${encodeURIComponent(id)}`, body);
+/** Take someone off the roster. Refused for yourself and for the last admin. */
+export const removePerson = (id) => request("DELETE", `/admin/people/${encodeURIComponent(id)}`);
 export const addStation = (body) => request("POST", "/admin/stations", body);
