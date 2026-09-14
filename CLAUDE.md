@@ -53,10 +53,20 @@ rule only; Go dependencies are a separate call, see *Go dependencies* below.)
 *Revisit when:* we need an npm dependency, or asset fingerprinting for
 long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
-The one thing not served from this repo is the webfonts (Newsreader, IBM Plex
-Sans/Mono), linked from Google Fonts in `index.html`. Every rule names a real
-fallback, so a container with no outbound network renders in system fonts rather
-than breaking. Self-host them if that trade stops being worth it.
+A few things are not served from this repo, and each degrades rather than
+breaks in a container with no outbound network:
+- The webfonts (Newsreader, IBM Plex Sans/Mono), linked from Google Fonts in
+  `index.html`. Every rule names a real fallback, so you get system fonts.
+- Leaflet, for the recorders map. It comes from jsDelivr through the import map
+  in `index.html` (pinned version and SRI hash); its CSS is linked inside
+  `<bs-station-map>`'s shadow root, so bump both together. The component
+  `import()`s it lazily, so if the CDN is unreachable the map shows a note and
+  the coordinate fields still work. A third-party frontend module that is
+  loaded this way doesn't trigger *Revisit when* below; one that needs npm does.
+- Map tiles, from OpenStreetMap's public tile servers. Their usage policy wants
+  the attribution kept visible and light traffic; move to a paid provider or
+  our own tiles before putting a map on the public landing page.
+Self-host any of these if that trade stops being worth it.
 
 **Go backend, static content included.** `internal/web` mounts the frontend at
 `/` as the catch-all; `internal/api` claims `/api/v1/`. Unmatched paths under

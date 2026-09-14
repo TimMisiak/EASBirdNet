@@ -15,6 +15,21 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/styles/app.css" />
+    <!--
+      Third-party ES modules, pinned by version and hash. The import map has to
+      come before the first module script. Leaflet's stylesheet is linked from
+      bs-station-map.js (inside its shadow root); keep the versions in step.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "leaflet": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet-src.esm.js"
+        },
+        "integrity": {
+          "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet-src.esm.js": "sha384-zd+tdvh8fbJAYA8L9jwid1BxMzHku/D6vwnXYzTG7Euqsam73FrDLArv8nyvdlUg"
+        }
+      }
+    </script>
     <script type="module" src="/js/main.js"></script>
   </head>
   <body>
