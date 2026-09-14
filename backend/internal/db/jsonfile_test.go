@@ -71,7 +71,7 @@ func TestJSONFileRoundTrip(t *testing.T) {
 
 	start := time.Date(2026, 8, 25, 4, 0, 0, 0, time.UTC)
 	file := AudioFile{RecorderID: r.ID, Path: `DATA\20260824\20260825_040000.WAV`, SizeBytes: 383_000_000,
-		Night: "2026-08-24", RecordedAt: &start, BlobName: AudioBlobName(up.ID, "DATA/20260824/20260825_040000.WAV"), Status: AudioUploaded}
+		Night: "2026-08-24", RecordedAt: &start, BlobName: "uploads/" + up.ID + "/3f9a0c2b7d1e4a65", Status: AudioUploaded}
 	if err := s.UpsertAudioFiles(ctx, up.ID, []AudioFile{file}); err != nil {
 		t.Fatalf("upsert audio: %v", err)
 	}
@@ -133,6 +133,7 @@ func TestJSONFileNotFound(t *testing.T) {
 	_, checks["get upload"] = s.GetUpload(ctx, "OWL-nope")
 	// A document is addressed by its partition as well as its id.
 	_, checks["audio file in the wrong upload"] = s.UpdateAudioFile(ctx, "OWL-other", fileID, noop)
+	_, checks["get audio file in the wrong upload"] = s.GetAudioFile(ctx, "OWL-other", fileID)
 	for what, err := range checks {
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("%s: err = %v, want ErrNotFound", what, err)
@@ -140,6 +141,9 @@ func TestJSONFileNotFound(t *testing.T) {
 	}
 	if _, err := s.UpdateAudioFile(ctx, up.ID, fileID, noop); err != nil {
 		t.Errorf("audio file in its own upload: %v", err)
+	}
+	if f, err := s.GetAudioFile(ctx, up.ID, fileID); err != nil || f.Path != "a.wav" {
+		t.Errorf("get audio file in its own upload = %+v, %v", f, err)
 	}
 }
 
@@ -313,9 +317,6 @@ func TestIDsAreStable(t *testing.T) {
 	}
 	if NewID("usr") == NewID("usr") {
 		t.Error("NewID repeated itself")
-	}
-	if got := AudioBlobName("OWL-1", `\DATA\a.WAV`); got != "uploads/OWL-1/DATA/a.WAV" {
-		t.Errorf("blob name = %q", got)
 	}
 }
 

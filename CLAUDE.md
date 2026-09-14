@@ -18,6 +18,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── birdnet/    Runs analyzer/analyze.py, returns detections
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── devseed/    Placeholder program written into an empty dev database
+│       ├── storage/    Card audio: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
 ├── analyzer/           analyze.py + pinned requirements.txt: BirdNET in Python
 ├── test/               Audio fixtures (a known Osprey clip)
@@ -32,7 +33,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── session.js       Who is signed in, shared by every component
 │       ├── shared-styles.js Constructable stylesheets for repeated primitives
 │       ├── format.js        Dates, sizes, counts, durations
-│       ├── upload-flow.js   The SD-card upload, which spans four routes
+│       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
@@ -68,6 +69,13 @@ breaks in a container with no outbound network:
   `import()`s it lazily, so if the CDN is unreachable the map shows a note and
   the coordinate fields still work. A third-party frontend module that is
   loaded this way doesn't trigger *Revisit when* below; one that needs npm does.
+- tus-js-client, for card uploads. It comes from jsDelivr as its browser build
+  (a classic script that defines `window.tus`), pinned with an SRI hash in
+  `js/upload-flow.js`, which injects it when an upload starts. It can't use the
+  import map: the package's ES modules import CommonJS dependencies, and
+  jsDelivr's generated `+esm` bundles can't carry an SRI hash. This one doesn't
+  degrade: without jsDelivr a card can't be sent, and the upload page says the
+  uploader didn't load.
 - Map tiles, from OpenStreetMap's public tile servers. Their usage policy wants
   the attribution kept visible and light traffic; move to a paid provider or
   our own tiles before putting a map on the public landing page.
@@ -99,9 +107,10 @@ GET    /api/v1/health
 GET    /api/v1/public/overview?days=      program stats + confirmed species
 GET    POST DELETE /api/v1/session        who you are; sign in; sign out
 GET    /api/v1/stations                   recorders in the field
-GET    POST /api/v1/uploads               your cards; register a card
+GET    POST /api/v1/uploads               your cards; register a card and its files
 GET    /api/v1/uploads/{reference}
-POST   /api/v1/uploads/{reference}/progress
+POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
+POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
@@ -114,10 +123,11 @@ Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
 there). It registers the `/dev/*` routes, and `GET /session` reports it as
 `dev`, so the sign-in page offers a picker of everyone on the roster.
 
-A card belongs to a volunteer: `/uploads/{ref}` 404s for anyone else, and the
-`/admin/*` routes 403 for a volunteer. Card counts only ever move forward in
-`RecordProgress`, so a retried batch is harmless and a client can't walk a
-card's progress backwards. The roster always keeps an admin: removing or
+A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
+anyone else, and the `/admin/*` routes 403 for a volunteer. A card's counts are
+the server's own tally of the files it has received (`tallyFiles`), never
+reported by the client, so a retried chunk can't count twice, and a card moves
+to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
@@ -127,6 +137,27 @@ coordinator can send a colleague a link to one admin tab. `js/router.js` is the
 whole router; `<bs-app>` holds the route table and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
+
+**Card audio goes over tus, through the app.** A card is ~128 GB in files of a
+few hundred MB, sent over home connections that drop. The browser sends each
+file as its own tus upload (tus-js-client) to `/api/v1/tus/`, where tusd, used
+as a Go library rather than its standalone server, writes it through
+`internal/storage`: a directory in dev, block blobs in Azure. A dropped or
+paused file resumes from the last chunk the server has. Birdsense's rules live
+in tusd's hooks (`internal/api/tus.go`). A file can only be created if it is on
+the list its card was registered with, at that size, and not already in. When
+its last byte lands, its `audioFiles` document is marked `uploaded` and the card
+recounted, before the browser is told it succeeded. Files go one at a time, in
+50 MB chunks, so each request fits the Container Apps ingress timeout.
+Going through the app rather than straight to Blob Storage with SAS URLs keeps
+one upload path for dev and prod and the card rules in Go, at the cost of every
+byte passing through the container.
+Gotchas: tusd's locks are in memory, so every request for an upload has to
+reach the same process -- one replica (see DEPLOYMENT.md). And tusd's
+`Config.Logger` is a `golang.org/x/exp/slog` logger, not `log/slog`, so tusd
+writes its own warnings to stdout.
+*Revisit when:* the app needs more than one replica, or the container's share
+of a card upload (CPU, bandwidth) costs more than direct-to-blob uploads would.
 
 **Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
 `CSSStyleSheet` objects for the primitives that appear on nearly every screen
@@ -220,12 +251,17 @@ cd backend && BIRDSENSE_DB=local go run ./cmd/server     # http://localhost:8080
 
 Frontend edits need only a browser reload; Go edits need a restart.
 `BIRDSENSE_DB=local` stores data in `backend/data/birdsense.json` (git-ignored,
-override with `BIRDSENSE_LOCAL_DB_PATH`). When that file is empty, startup fills
+override with `BIRDSENSE_LOCAL_DB_PATH`), and uploaded audio under
+`backend/data/audio` (`BIRDSENSE_STORAGE_DIR`), at the names it would have in
+Blob Storage. There is no sample card: to try an upload, point the folder
+picker at any folder with a few `.wav` files in it. When that file is empty, startup fills
 it with the placeholder program from `internal/devseed`: people to sign in as,
 recorders, cards in every state, recent detections. Dates are relative to the
 day it was seeded, so delete the file to re-seed once it has gone stale. Without
 `BIRDSENSE_DB=local` the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
-`BIRDSENSE_COSMOS_DATABASE`) and exits if it isn't configured.
+`BIRDSENSE_COSMOS_DATABASE`) and Blob Storage (`BIRDSENSE_BLOB_ENDPOINT`,
+`BIRDSENSE_BLOB_CONTAINER`), and exits if they aren't configured.
+`BIRDSENSE_STORAGE=local|azure` overrides where audio goes either way.
 `BIRDSENSE_BOOTSTRAP_ADMIN="Name <email>"` adds the first admin to an empty
 roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
 the seed, so setting it starts you from a clean roster. Outside dev mode it
@@ -239,8 +275,8 @@ python3.12 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt
 cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python go run ./cmd/analyze "../test/2026-09-09 Osprey.wav"
 ```
 
-Container (compose sets `BIRDSENSE_DB=local` and keeps the file in a named
-volume):
+Container (compose sets `BIRDSENSE_DB=local` and `BIRDSENSE_STORAGE=local`, and
+keeps the database and the audio in two named volumes):
 
 ```sh
 HOST_PORT=8080 docker compose up --build
@@ -251,6 +287,10 @@ Checks before committing:
 ```sh
 cd backend && gofmt -l . && go vet ./... && go test ./...
 ```
+
+`TestAzure` in `internal/storage` runs the blob backend against Azurite, and is
+skipped unless `BIRDSENSE_TEST_AZURITE` names its endpoint (the command is in
+the test). Set it when changing `internal/storage` or the tusd version.
 
 `TestAnalyzeOsprey` runs the real model and is skipped unless
 `BIRDSENSE_BIRDNET_PYTHON` names a Python with `analyzer/requirements.txt`
@@ -274,10 +314,12 @@ section is the rulebook for both the fields and what each write route does
 backend, deliberately not the dev seed.
 
 Still placeholder: sign-in (the session cookie is an unsigned email address, and
-`POST /session {"role": ...}` signs in as the first person with that role) and
-the upload transfer itself (the browser simulates it and reports progress).
+`POST /session {"role": ...}` signs in as the first person with that role).
 The Cosmos DB backend compiles but has not been run against Azure or the
 emulator; the JSON-file backend and its tests define the behaviour it must
-match. There is no blob storage yet. `internal/birdnet` can analyze files on
-disk, but nothing in the server calls it: no ingestion, no job queue, and no
-detections written to the Store.
+match. The Blob Storage backend has run against Azurite with a shared key, not
+against Azure with a managed identity (DEPLOYMENT.md lists what to check).
+Uploaded audio is stored, and a card whose files are all in moves to
+`processing`, but nothing picks it up: `internal/birdnet` can analyze files on
+disk, and nothing in the server calls it -- no job queue, and no detections
+written to the Store. Nothing cleans up abandoned partial uploads.

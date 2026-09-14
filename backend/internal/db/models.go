@@ -161,9 +161,9 @@ type AudioFile struct {
 	DurationSec float64    `json:"durationSec,omitempty"`
 	SampleRate  int        `json:"sampleRate,omitempty"`
 	SHA256      string     `json:"sha256,omitempty"`
-	// BlobName is where the audio lives in the storage account's audio
-	// container; see AudioBlobName.
-	BlobName       string     `json:"blobName"`
+	// BlobName is where the audio lives in file storage (storage.Name of its
+	// tus upload), set when the last byte lands.
+	BlobName       string     `json:"blobName,omitempty"`
 	Status         string     `json:"status"`
 	StatusDetail   string     `json:"statusDetail,omitempty"`
 	UploadedAt     *time.Time `json:"uploadedAt,omitempty"`
@@ -256,11 +256,6 @@ func AudioFileID(uploadID, cardPath string) string {
 // BirdNET output overwrites rather than duplicates.
 func DetectionID(audioFileID string, startMs int64, scientificName string) string {
 	return "det_" + digest(audioFileID, fmt.Sprint(startMs), scientificName)
-}
-
-// AudioBlobName is where a card's file is stored in the audio blob container.
-func AudioBlobName(uploadID, cardPath string) string {
-	return "uploads/" + uploadID + "/" + CardPath(cardPath)
 }
 
 func digest(parts ...string) string {

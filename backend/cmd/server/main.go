@@ -18,6 +18,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
 )
 
@@ -29,7 +30,7 @@ func main() {
 		log.Error("bad configuration", "err", err)
 		os.Exit(1)
 	}
-	log.Info("starting birdsense", "addr", cfg.Addr, "static_dir", cfg.StaticDir, "db", cfg.DB.Backend, "dev", cfg.Dev)
+	log.Info("starting birdsense", "addr", cfg.Addr, "static_dir", cfg.StaticDir, "db", cfg.DB.Backend, "storage", cfg.Storage.Backend, "dev", cfg.Dev)
 
 	openCtx, cancelOpen := context.WithTimeout(context.Background(), 30*time.Second)
 	store, err := db.Open(openCtx, cfg.DB)
@@ -46,6 +47,19 @@ func main() {
 			"endpoint", cfg.DB.CosmosEndpoint, "database", cfg.DB.CosmosDatabase, "key_auth", cfg.DB.CosmosKey != "")
 	}
 
+	files, err := storage.Open(cfg.Storage)
+	if err != nil {
+		log.Error("opening file storage", "err", err)
+		os.Exit(1)
+	}
+	switch cfg.Storage.Backend {
+	case storage.BackendLocal:
+		log.Info("file storage ready", "backend", storage.BackendLocal, "dir", cfg.Storage.LocalDir)
+	default:
+		log.Info("file storage ready", "backend", storage.BackendAzure,
+			"endpoint", cfg.Storage.AzureEndpoint, "container", cfg.Storage.AzureContainer)
+	}
+
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
 	err = prepareDatabase(bootCtx, cfg, store, log)
 	cancelBoot()
@@ -54,9 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// No ReadTimeout or WriteTimeout: a PATCH carrying audio takes as long as
+	// the volunteer's upstream link needs. tusd sets deadlines per read instead.
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           requestLogger(log, newMux(cfg, store, log)),
+		Handler:           requestLogger(log, newMux(cfg, store, files, log)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -90,9 +106,9 @@ func main() {
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
-	api.Register(mux, store, log, cfg.Dev)
+	api.Register(mux, store, files, log, cfg.Dev)
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
 }
@@ -101,6 +117,8 @@ type config struct {
 	Addr      string
 	StaticDir string
 	DB        db.Config
+	// Storage is where card audio goes.
+	Storage storage.Config
 	// Dev turns on development-only affordances, like signing in as anyone on
 	// the roster. It follows BIRDSENSE_DB=local: the JSON file is only ever a
 	// development database, and Azure runs Cosmos, so it can't be on there.
@@ -112,6 +130,8 @@ type config struct {
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
 // DB, which is what runs in Azure; local development sets BIRDSENSE_DB=local.
+// File storage follows the database unless BIRDSENSE_STORAGE says otherwise:
+// a directory in dev mode, Azure Blob Storage everywhere else.
 func configFromEnv() (config, error) {
 	cfg := config{
 		Addr:      envOr("BIRDSENSE_ADDR", ":8080"),
@@ -123,6 +143,12 @@ func configFromEnv() (config, error) {
 			CosmosDatabase: envOr("BIRDSENSE_COSMOS_DATABASE", "birdsense"),
 			CosmosKey:      os.Getenv("BIRDSENSE_COSMOS_KEY"),
 		},
+		Storage: storage.Config{
+			Backend:        os.Getenv("BIRDSENSE_STORAGE"),
+			LocalDir:       envOr("BIRDSENSE_STORAGE_DIR", "data/audio"),
+			AzureEndpoint:  os.Getenv("BIRDSENSE_BLOB_ENDPOINT"),
+			AzureContainer: envOr("BIRDSENSE_BLOB_CONTAINER", "audio"),
+		},
 	}
 	switch cfg.DB.Backend {
 	case db.BackendLocal:
@@ -133,6 +159,22 @@ func configFromEnv() (config, error) {
 		}
 	default:
 		return cfg, fmt.Errorf("BIRDSENSE_DB must be %q or %q, not %q", db.BackendCosmos, db.BackendLocal, cfg.DB.Backend)
+	}
+
+	if cfg.Storage.Backend == "" {
+		cfg.Storage.Backend = storage.BackendAzure
+		if cfg.Dev {
+			cfg.Storage.Backend = storage.BackendLocal
+		}
+	}
+	switch cfg.Storage.Backend {
+	case storage.BackendLocal:
+	case storage.BackendAzure:
+		if cfg.Storage.AzureEndpoint == "" {
+			return cfg, errors.New("BIRDSENSE_BLOB_ENDPOINT is required for azure file storage (for local development, set BIRDSENSE_DB=local)")
+		}
+	default:
+		return cfg, fmt.Errorf("BIRDSENSE_STORAGE must be %q or %q, not %q", storage.BackendLocal, storage.BackendAzure, cfg.Storage.Backend)
 	}
 
 	if v := strings.TrimSpace(os.Getenv("BIRDSENSE_BOOTSTRAP_ADMIN")); v != "" {

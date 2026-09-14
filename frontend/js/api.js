@@ -55,10 +55,17 @@ export const fetchStations = () => get("/stations");
 export const fetchMyUploads = () => get("/uploads");
 export const fetchUpload = (reference) => get(`/uploads/${encodeURIComponent(reference)}`);
 
-/** Register a card that is about to be sent. Returns it with its reference. */
+/**
+ * Register a card that is about to be sent, with the files read off it
+ * ({path, bytes, night}). Returns the card with its reference, and each file
+ * with its status on the server, so a resume sends only what's missing.
+ */
 export const createUpload = (body) => request("POST", "/uploads", body);
 
-/** Report what has landed so far. The server only ever moves the count up. */
+/**
+ * Say the transfer is running ("in_progress") or has stopped ("interrupted").
+ * The files themselves go over tus (upload-flow.js), and the server counts them.
+ */
 export const reportProgress = (reference, body) =>
   request("POST", `/uploads/${encodeURIComponent(reference)}/progress`, body);
 

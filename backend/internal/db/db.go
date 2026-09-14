@@ -57,6 +57,7 @@ type Store interface {
 	CreateUpload(ctx context.Context, u Upload) (Upload, error)
 	UpdateUpload(ctx context.Context, id string, mutate func(*Upload) error) (Upload, error)
 
+	GetAudioFile(ctx context.Context, uploadID, id string) (AudioFile, error)
 	// ListAudioFiles returns a card's files sorted by path.
 	ListAudioFiles(ctx context.Context, uploadID string) ([]AudioFile, error)
 	// UpsertAudioFiles writes whole documents, creating or replacing each. A

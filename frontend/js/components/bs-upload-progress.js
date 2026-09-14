@@ -1,9 +1,10 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
-import { controls, panels, typography } from "../shared-styles.js";
-import { count, duration, gigabytes, longDate, minutesLeft, percent, shortDate } from "../format.js";
+import { controls, forms, panels, typography } from "../shared-styles.js";
+import { count, duration, gigabytes, longDate, megabits, minutesLeft, percent } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 import "./bs-progress-bar.js";
+import "./bs-upload-file-list.js";
 
 /**
  * <bs-upload-progress> -- step 3, and the interrupted screen that shares its
@@ -11,14 +12,20 @@ import "./bs-progress-bar.js";
  * across, with a count that has to agree in both views.
  *
  * Whatever a card's progress, the screen never implies work has been lost --
- * the server's count is authoritative and only moves forward, so "we stopped at
- * 214 of 336" is a statement of fact, not an estimate.
+ * the server counts a file once it has all of it, so "we stopped at 214 of 336"
+ * is a statement of fact, not an estimate.
+ *
+ * Progress arrives several times a second, so the page is only rebuilt when the
+ * situation changes (sending, or stopped). In between, the numbers and the file
+ * list are updated in place.
  */
 class UploadProgress extends BaseElement {
-  static styles = [typography, controls, panels];
+  static styles = [typography, controls, forms, panels];
 
   #unsubscribe = null;
   #wakeLock = null;
+  #view = null;
+  #onVisible = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -28,7 +35,8 @@ class UploadProgress extends BaseElement {
         return;
       }
       this.#syncWakeLock(state.status);
-      this.render();
+      if (state.upload && viewOf(state) === this.#view) this.#update(state);
+      else this.render();
     });
     flow.current().then((upload) => {
       if (!upload) navigate("/app/upload", { replace: true });
@@ -45,12 +53,11 @@ class UploadProgress extends BaseElement {
     this.#releaseWakeLock();
   }
 
-  #onVisible = null;
-
   get actions() {
     return {
       pause: () => (flow.get().status === "paused" ? flow.start() : flow.pause()),
       retry: () => flow.start(),
+      rechoose: () => navigate("/app/upload"),
       later: () => navigate("/app"),
     };
   }
@@ -72,20 +79,51 @@ class UploadProgress extends BaseElement {
 
   render() {
     const state = flow.get();
-    const { upload } = state;
-    if (!upload) {
+    if (!state.upload) {
+      this.#view = null;
       this.shadowRoot.innerHTML = `<p class="lede">Finding the card…</p>`;
       return;
     }
-    this.shadowRoot.innerHTML =
-      state.status === "interrupted" ? this.#interrupted(state) : this.#uploading(state);
+    this.#view = viewOf(state);
+    this.shadowRoot.innerHTML = this.#view === "sending" ? this.#sending(state) : this.#stopped(state);
+    this.#update(state);
   }
 
-  #uploading(state) {
-    const { upload, filesUploaded, bytesUploaded, status } = state;
-    const done = percent(bytesUploaded, upload.totalBytes);
-    const remaining = upload.fileCount - Math.round(filesUploaded);
+  /** Everything that moves while the page stands still. */
+  #update(state) {
+    const { upload, status, files } = state;
+    const sent = flow.totals();
+    const done = percent(sent.bytes, upload.totalBytes);
+    const speed = flow.bytesPerSecond();
 
+    this.#out("pct", `${Math.floor(done)}%`);
+    this.#out(
+      "remain",
+      status === "paused"
+        ? `Paused · ${count(upload.fileCount - sent.files)} files left`
+        : minutesLeft(flow.minutesRemaining()),
+    );
+    this.#out("files", `${count(sent.files)} / ${count(upload.fileCount)}`);
+    this.#out("bytes", gigabytes(sent.bytes));
+    this.#out("elapsed", duration(flow.minutesElapsed()));
+    this.#out("speed", status !== "uploading" ? "—" : speed ? megabits(speed) : "measuring…");
+    this.#out("pause", status === "paused" ? "Resume upload" : "Pause upload");
+
+    const bar = this.$('bs-progress-bar[data-out="bar"]');
+    const value = String(Math.round(done * 10) / 10);
+    if (bar && bar.getAttribute("value") !== value) bar.setAttribute("value", value);
+
+    const list = this.$("bs-upload-file-list");
+    if (list) list.files = files;
+  }
+
+  #out(key, text) {
+    const el = this.$(`[data-out="${key}"]`);
+    if (el && el.textContent !== text) el.textContent = text;
+  }
+
+  #sending(state) {
+    const { upload } = state;
     return `
       ${STYLE}
       <h1>Uploading the card</h1>
@@ -97,37 +135,20 @@ class UploadProgress extends BaseElement {
       <div class="columns">
         <div>
           <div class="headline">
-            <div class="pct">${Math.round(done)}%</div>
-            <div class="remain">${
-              status === "paused"
-                ? `Paused · ${count(remaining)} files left`
-                : escapeHTML(minutesLeft(flow.minutesRemaining()))
-            }</div>
+            <div class="pct" data-out="pct"></div>
+            <div class="remain" data-out="remain"></div>
           </div>
-          <bs-progress-bar value="${done}" label="Card upload"></bs-progress-bar>
+          <bs-progress-bar data-out="bar" label="Card upload"></bs-progress-bar>
 
           <div class="live">
-            ${live(`${count(Math.round(filesUploaded))} / ${count(upload.fileCount)}`, "files uploaded")}
-            ${live(gigabytes(bytesUploaded), `of ${gigabytes(upload.totalBytes)}`)}
-            ${live(duration(flow.minutesElapsed()), "elapsed")}
-            ${live(flow.linkSpeed(), "current speed")}
+            ${live("files", "files uploaded")}
+            ${live("bytes", `of ${gigabytes(upload.totalBytes)}`)}
+            ${live("elapsed", "elapsed")}
+            ${live("speed", "current speed")}
           </div>
 
-          <div class="nights">
-            ${flow
-              .nightProgress()
-              .map(
-                (night) => `
-              <div class="night">
-                <span class="dot" data-state="${night.percent >= 100 ? "done" : night.percent > 0 ? "active" : "waiting"}"></span>
-                <span class="night-date">${escapeHTML(shortDate(night.date))}</span>
-                <bs-progress-bar size="thin" value="${night.percent}"
-                                 label="${escapeHTML(shortDate(night.date))}"></bs-progress-bar>
-                <span class="night-count">${count(night.done)} / ${count(night.files)} files</span>
-              </div>`,
-              )
-              .join("")}
-          </div>
+          ${FILES_HEAD}
+          <bs-upload-file-list></bs-upload-file-list>
         </div>
 
         <div class="aside">
@@ -144,19 +165,20 @@ class UploadProgress extends BaseElement {
               Each file is checked off as it lands. If anything interrupts this, come back and
               we'll finish only what's missing.
             </p>
-            <button class="btn btn--quiet btn--small btn--block" data-action="pause">
-              ${status === "paused" ? "Resume upload" : "Pause upload"}
-            </button>
+            <button class="btn btn--quiet btn--small btn--block" data-action="pause" data-out="pause"></button>
           </div>
         </div>
       </div>
     `;
   }
 
-  #interrupted(state) {
-    const { upload, filesUploaded, bytesUploaded } = state;
-    const done = percent(filesUploaded, upload.fileCount);
-    const filesLeft = upload.fileCount - Math.round(filesUploaded);
+  #stopped(state) {
+    const { upload, files, error } = state;
+    // After a reload the tab no longer has the card's files, so carrying on
+    // means choosing the card again.
+    const inHand = files.length > 0;
+    const sent = flow.totals();
+    const filesLeft = upload.fileCount - sent.files;
 
     return `
       ${STYLE}
@@ -165,24 +187,34 @@ class UploadProgress extends BaseElement {
           Interrupted — your progress is saved
         </div>
         <h1 style="margin-bottom: var(--bs-space-3);">
-          We stopped at ${count(Math.round(filesUploaded))} of ${count(upload.fileCount)} files.
+          We stopped at ${count(sent.files)} of ${count(upload.fileCount)} files.
         </h1>
         <p class="lede" style="font-size: 0.96875rem; margin-bottom: 1.75rem;">
-          Nothing is lost. Every file that made it is checked off on our side. When you're
-          ready, carry on and we'll upload only the ${count(filesLeft)} files that are still
-          missing.
+          Nothing is lost. Every file that made it is checked off on our side.
+          ${
+            inHand
+              ? `When you're ready, carry on and we'll upload only the ${count(filesLeft)} files that are still missing.`
+              : `To carry on, choose the card again and we'll upload only the ${count(filesLeft)} files that are still missing.`
+          }
         </p>
+        ${error ? `<p class="error" style="margin-bottom: 1.75rem;">${escapeHTML(error.message)}</p>` : ""}
 
-        <bs-progress-bar value="${done}" label="Files uploaded so far"></bs-progress-bar>
+        <bs-progress-bar value="${percent(sent.files, upload.fileCount)}" label="Files uploaded so far"></bs-progress-bar>
         <div class="split">
-          <span>${count(Math.round(filesUploaded))} files · ${gigabytes(bytesUploaded)} uploaded</span>
-          <span>${count(filesLeft)} files · ${gigabytes(upload.totalBytes - bytesUploaded)} remaining</span>
+          <span>${count(sent.files)} files · ${gigabytes(sent.bytes)} uploaded</span>
+          <span>${count(filesLeft)} files · ${gigabytes(upload.totalBytes - sent.bytes)} remaining</span>
         </div>
 
         <div class="row" style="margin-bottom: 2.125rem;">
-          <button class="btn btn--primary" data-action="retry">Try again now</button>
+          ${
+            inHand
+              ? `<button class="btn btn--primary" data-action="retry">Try again now</button>`
+              : `<button class="btn btn--primary" data-action="rechoose">Choose the card again</button>`
+          }
           <button class="btn btn--quiet" data-action="later">Finish later</button>
         </div>
+
+        ${inHand ? `${FILES_HEAD}<bs-upload-file-list style="margin-bottom: 2.125rem;"></bs-upload-file-list>` : ""}
 
         <div class="panel">
           <h3>The usual causes</h3>
@@ -201,14 +233,26 @@ class UploadProgress extends BaseElement {
   }
 }
 
-function live(value, label) {
+/** Which screen a state gets: files moving (or paused), or stopped. */
+function viewOf(state) {
+  return state.files.length && state.status !== "interrupted" ? "sending" : "stopped";
+}
+
+function live(key, label) {
   return `
     <div>
-      <div class="live-value">${escapeHTML(value)}</div>
+      <div class="live-value" data-out="${key}"></div>
       <div class="live-label">${escapeHTML(label)}</div>
     </div>
   `;
 }
+
+const FILES_HEAD = `
+  <div class="files-head">
+    <h3>Files</h3>
+    <span class="note">One at a time, in the order they're on the card</span>
+  </div>
+`;
 
 const STYLE = `
   <style>
@@ -227,21 +271,8 @@ const STYLE = `
     .live-value { font-family: var(--bs-font-mono); font-size: 1.125rem; }
     .live-label { font-size: 0.75rem; color: var(--bs-text-muted); margin-top: 0.25rem; }
 
-    .nights { display: flex; flex-direction: column; }
-    .night {
-      display: flex;
-      align-items: center;
-      gap: var(--bs-space-3);
-      padding: var(--bs-space-2) 0;
-      border-top: 1px solid var(--bs-rule);
-      font-size: 0.875rem;
-    }
-    .night bs-progress-bar { flex: 1; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--bs-border-strong); }
-    .dot[data-state="active"] { background: var(--bs-amber); }
-    .dot[data-state="done"] { background: var(--bs-forest); }
-    .night-date { width: 74px; flex: none; }
-    .night-count { font-family: var(--bs-font-mono); font-size: 0.75rem; color: var(--bs-text-muted); width: 6.5rem; text-align: right; flex: none; }
+    .files-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--bs-space-4); flex-wrap: wrap; margin-bottom: var(--bs-space-3); }
+    .files-head h3 { font-size: 1.125rem; }
 
     .aside { display: flex; flex-direction: column; gap: var(--bs-space-4); }
     .aside ul, .panel ul {
@@ -260,7 +291,6 @@ const STYLE = `
     @media (max-width: 860px) {
       .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); }
       .live { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .night-count { width: auto; }
     }
   </style>
 `;

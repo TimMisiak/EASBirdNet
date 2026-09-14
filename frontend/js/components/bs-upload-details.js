@@ -3,7 +3,7 @@ import { controls, forms, panels, typography } from "../shared-styles.js";
 import { navigate } from "../router.js";
 import * as api from "../api.js";
 import * as flow from "../upload-flow.js";
-import { CancelledError, sampleCard, scanCard } from "../card-scan.js";
+import { CancelledError, scanCard } from "../card-scan.js";
 
 /**
  * <bs-upload-details> -- step 1. Four questions, none of which the volunteer
@@ -34,8 +34,7 @@ class UploadDetails extends BaseElement {
       },
       pulled: (el) => flow.setDetails({ pulledOn: el.value }),
       notes: (el) => flow.setDetails({ notes: el.value }),
-      choose: () => this.#choose(() => scanCard()),
-      sample: () => this.#choose(async () => sampleCard()),
+      choose: () => this.#choose(),
     };
   }
 
@@ -52,13 +51,13 @@ class UploadDetails extends BaseElement {
     if (this.isConnected) this.render();
   }
 
-  async #choose(read) {
+  async #choose() {
     if (this.#busy) return;
     this.#busy = true;
     this.#error = null;
     this.render();
     try {
-      const card = await read();
+      const card = await scanCard();
       if (!card.fileCount) {
         throw new Error("No audio files on that card — is it the right folder?");
       }
@@ -99,7 +98,6 @@ class UploadDetails extends BaseElement {
           color: var(--bs-text-soft);
         }
         .step-footer .row { align-items: center; gap: var(--bs-space-4); }
-        .sample { font-size: 0.8125rem; }
         @media (max-width: 860px) { .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); } }
       </style>
 
@@ -167,10 +165,7 @@ class UploadDetails extends BaseElement {
       </div>
 
       <div class="step-footer">
-        <span class="note">
-          Next you'll point us at the card.
-          <a class="sample" href="#sample" data-action="sample">No card handy? Use a sample card</a>
-        </span>
+        <span class="note">Next you'll point us at the card.</span>
         <button class="btn btn--primary" data-action="choose" ${this.#busy || !station ? "disabled" : ""}>
           ${this.#busy ? "Reading the card…" : "Choose the SD card →"}
         </button>

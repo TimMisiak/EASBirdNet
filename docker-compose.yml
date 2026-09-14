@@ -14,9 +14,15 @@ services:
       # Cosmos DB -- see DEPLOYMENT.md.
       BIRDSENSE_DB: "local"
       BIRDSENSE_LOCAL_DB_PATH: "/app/data/birdsense.json"
+      # Card audio goes to a directory in its own volume. Azure uses Blob
+      # Storage -- see DEPLOYMENT.md.
+      BIRDSENSE_STORAGE: "local"
+      BIRDSENSE_STORAGE_DIR: "/app/audio"
     volumes:
       - birdsense-data:/app/data
+      - birdsense-audio:/app/audio
     restart: unless-stopped
 
 volumes:
   birdsense-data:
+  birdsense-audio:

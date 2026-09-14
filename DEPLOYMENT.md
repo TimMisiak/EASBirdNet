@@ -6,9 +6,10 @@ guessing: every resource names its Terraform type, and every setting that
 differs from the default is spelled out. The data those resources hold is
 described in [SCHEMA.md](SCHEMA.md).
 
-Status: nothing here is provisioned yet. The app code supports the Cosmos DB
-part; blob storage is listed because the upload flow needs it next, but no
-code uses it yet.
+Status: nothing here is provisioned yet. The app code supports both data
+stores, Cosmos DB for documents and Blob Storage for card audio, but neither
+has run against Azure. [Blob storage for uploads](#blob-storage-for-uploads)
+lists what the storage side needs and what to check first.
 
 ## Shape of it
 
@@ -128,14 +129,16 @@ Holds the audio. At ~128 GB per card, this is where the money goes (see *Cost*).
 | account_kind | `StorageV2` | |
 | account_tier / account_replication_type | `Standard` / `LRS` | Originals are recoverable from the card for a while, and results live in Cosmos. Revisit if the archive must survive a datacenter loss. |
 | access_tier | `Hot` | Lifecycle rules move old audio down. |
-| shared_access_key_enabled | `false` | Entra ID only. Browser uploads will use user-delegation SAS, which doesn't need account keys. |
+| shared_access_key_enabled | `false` | Entra ID only. Browsers upload through the app, which writes with its managed identity, so nothing needs an account key or a SAS. |
 | allow_nested_items_to_be_public | `false` | |
 | min_tls_version | `TLS1_2` | |
 | blob_properties.delete_retention_policy | 7 days | Soft delete. |
-| blob_properties.cors_rule | *added with direct browser upload*: origin = the app's hostname, methods `PUT, OPTIONS`, headers `*` | Not needed yet. |
+| blob_properties.cors_rule | *unset* | Browsers never talk to the storage account. |
 
 **Blob container** — `azurerm_storage_container`: name `audio`, access type
-`private`. Blob names follow `uploads/{uploadId}/{path}` (SCHEMA.md).
+`private`. Blob names follow `uploads/{uploadId}/{random}`, each with a
+`.info` blob beside it (SCHEMA.md). The app tries to create the container at
+startup and carries on if it exists; Terraform should still own it.
 
 **Lifecycle** — `azurerm_storage_management_policy`, one rule on prefix
 `audio/uploads/`. The day counts are placeholders until the retention question
@@ -195,7 +198,7 @@ environment forwards here.
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
 | container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
 | cpu / memory | `0.25` / `0.5Gi` | A Go binary serving small JSON and static files. The image also carries BirdNET (Python + models), but the server doesn't run it yet. Once it does in this app, a one-worker run peaks near 300 MB on top of the server, so raise memory to at least `1Gi` (and cpu with it, since Container Apps couples the two) or move analysis to a job; see *Open questions*. |
-| min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). Every handler reads and writes Cosmos, so more replicas would agree with each other; one is plenty for the traffic. |
+| min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). One is plenty for the traffic, and **uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)). |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | liveness / readiness / startup probes | HTTP GET `/api/v1/health` on port `8080` | The same endpoint the Dockerfile `HEALTHCHECK` uses. |
 
@@ -206,10 +209,13 @@ environment forwards here.
 | `BIRDSENSE_DB` | `cosmos` | The default. Set explicitly so the config reads plainly. |
 | `BIRDSENSE_COSMOS_ENDPOINT` | `azurerm_cosmosdb_account.this.endpoint` | e.g. `https://cosmos-birdsense-prod.documents.azure.com:443/` |
 | `BIRDSENSE_COSMOS_DATABASE` | `birdsense` | |
+| `BIRDSENSE_STORAGE` | `azure` | The default outside dev mode. Set explicitly so the config reads plainly. |
+| `BIRDSENSE_BLOB_ENDPOINT` | `azurerm_storage_account.this.primary_blob_endpoint` | e.g. `https://stbirdsenseprod.blob.core.windows.net/` (a trailing slash is fine). |
+| `BIRDSENSE_BLOB_CONTAINER` | `audio` | The default. Set explicitly. |
 | `AZURE_CLIENT_ID` | `azurerm_user_assigned_identity.this.client_id` | Tells the SDK *which* managed identity to use. Required for a user-assigned identity. |
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
-| `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`). |
+| `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
 | `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
@@ -222,9 +228,10 @@ with a managed certificate, plus a CNAME and `asuid` TXT record at the DNS host.
 Terraform infers most of this from references, but two dependencies are
 invisible to it:
 
-1. The **AcrPull** and **Cosmos SQL role** assignments must exist before the
-   container app's first revision. Otherwise the image pull fails, or the app
-   exits at startup because it can't read the containers. Add them to the app's
+1. The **AcrPull**, **Cosmos SQL role** and **Storage Blob Data Contributor**
+   assignments must exist before the container app's first revision. Otherwise
+   the image pull fails, or the app exits at startup because it can't read the
+   Cosmos containers or reach the blob container. Add them to the app's
    `depends_on`.
 2. Role assignments take a minute or two to propagate. A first `apply` can
    still race them. If the first revision fails, re-apply or restart the
@@ -269,6 +276,66 @@ update is drift the next `apply` reverts. The usual split is
 `lifecycle { ignore_changes = [template[0].container[0].image] }` in
 Terraform, with deploys done by `az`/CI.
 
+## Blob storage for uploads
+
+Card audio reaches the storage account through the app, never straight from
+the browser. Each file on a card is a tus upload to `/api/v1/tus/`, and the app
+runs tusd's Azure store (`backend/internal/storage`): each request's bytes are
+staged as a block, and the block list is committed when the last byte lands.
+It signs in with `DefaultAzureCredential`, which here is the managed identity,
+as for Cosmos. The code has run against Azurite with a shared key, and not yet
+against Azure.
+
+What it needs, beyond resources 7 and 8:
+
+- **Settings** on the container app: `BIRDSENSE_STORAGE`,
+  `BIRDSENSE_BLOB_ENDPOINT` and `BIRDSENSE_BLOB_CONTAINER` (see *Environment
+  variables*).
+- **Storage Blob Data Contributor** for the identity (resource 8). Besides
+  reading and writing blobs, the app tries to create the container at startup,
+  and exits if that fails for any reason other than the container already
+  existing.
+- **One replica.** tusd holds an upload's lock in memory while a request writes
+  to it, so every request for one upload has to reach the same replica: keep
+  `max_replicas = 1`. More replicas need ingress session affinity (sticky
+  sessions) or a shared locker in `internal/storage`. Scaling to zero between
+  uploads is fine; an upload resumes from what's stored.
+- **Ephemeral disk.** The Azure store writes each request body to a temp file
+  before staging it. The browser sends at most 50 MB a request and one file at
+  a time, so that is 50 MB per volunteer uploading at once, against the
+  replica's ephemeral storage allowance.
+- **Request time.** The Container Apps ingress ends a request after 240 s. At
+  50 MB a request that holds down to about 2 Mb/s of upstream; for slower links,
+  lower `CHUNK_BYTES` in `frontend/js/upload-flow.js`.
+- **CPU and memory while a card uploads.** Every byte of a ~128 GB card passes
+  through the container, for the hours the upload takes. Inbound transfer is
+  free, and the app only copies bytes, but at `0.25` vCPU the upload rate may
+  be CPU-bound. Watch the replica's CPU during the first real card, and raise
+  cpu/memory if it sits at the limit.
+- **Leftovers.** An upload that never finishes leaves uncommitted blocks, which
+  Azure discards after 7 days, and a `.info` blob, which stays. Finished uploads
+  keep their `.info` blob too. Nothing sweeps these yet; see *Open questions*.
+
+**First checks once we have Azure access:**
+
+1. Give your own Entra user Storage Blob Data Contributor on a non-production
+   account, `az login`, and run the app locally against it (the documents can
+   stay in the JSON file):
+   ```sh
+   cd backend
+   BIRDSENSE_DB=local BIRDSENSE_STORAGE=azure \
+   BIRDSENSE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \
+   go run ./cmd/server
+   ```
+   Upload a folder of a few large `.wav` files. Blobs should appear under
+   `audio/uploads/{card}/`, each with a `.info` blob, and only once the file
+   is complete. Pausing mid-file and resuming should carry on from the last
+   50 MB chunk, not start over.
+2. Deploy, and send one real card end to end. Watch the ingress for 499/504
+   responses and the replica's CPU, memory and restarts while it runs.
+3. If startup fails on the container check, the error names the refused
+   operation; the role assignment may still be propagating (see *Ordering*).
+
 ## Developing against real Cosmos DB
 
 Normal local development uses `BIRDSENSE_DB=local` and needs none of this. To
@@ -302,7 +369,7 @@ Rough order of magnitude at five recorders, one card each every two weeks
 |------|-----------------|-------------|
 | Audio in blob storage | 130 cards × ~128 GB ≈ **17 TB** | **The dominant cost.** Hot LRS storage is several hundred dollars a month by the end of a year; cool roughly halves that and archive cuts it by about an order of magnitude. Retention and tiering decide the bill. |
 | Cosmos DB, serverless | ~44k audio-file docs; detections depend on threshold (at 50 per file, ~2M docs, ~2 GB) | Low: a few dollars a year in request units, plus storage per GB-month. |
-| Container Apps | low traffic, scale to zero | Usually within the monthly free grant. |
+| Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |
 | Container Registry Basic | one small image | A few dollars a month. |
 | Log Analytics | low volume | Within the free ingestion allowance at this scale. |
 
@@ -327,6 +394,9 @@ can't be changed in place.
   (`/app/birdsense-analyze`, the Python venv, and the models), so a job can
   start from the same image and split off later. The build downloads the models
   from Zenodo, so `az acr build` needs outbound network.
+- **Upload clean-up**: when to delete `.info` blobs and abandoned partial
+  uploads (a job after a card is processed, or a lifecycle rule once retention
+  is decided).
 - **Email**: the upload flow promises "card received" and "results" emails,
   which needs Azure Communication Services or an external provider.
 
@@ -345,7 +415,7 @@ can't be changed in place.
 | 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` |
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` |
-| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` from a required variable, probes, 0–1 replicas, `depends_on` the role assignments) | `azurerm_container_app` |
+| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` from a required variable and the blob endpoint, probes, 0–1 replicas, `depends_on` the role assignments) | `azurerm_container_app` |
 
 **Outputs**: container app FQDN, Cosmos endpoint, ACR login server, identity
 client id.

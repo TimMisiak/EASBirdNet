@@ -39,11 +39,12 @@ birdnet.load("geo", "2.4", "tf", library="litert")'
 
 FROM python:3.12-slim-bookworm
 
-# /app/data is where BIRDSENSE_DB=local keeps its JSON file. Creating it here,
-# owned by the app user, means a named volume mounted over it is writable too.
+# /app/data is where BIRDSENSE_DB=local keeps its JSON file, and /app/audio is
+# where BIRDSENSE_STORAGE=local keeps card audio. Creating them here, owned by
+# the app user, means a named volume mounted over either is writable too.
 RUN useradd --uid 10001 --create-home birdsense \
- && mkdir -p /app/data \
- && chown birdsense:birdsense /app/data
+ && mkdir -p /app/data /app/audio \
+ && chown birdsense:birdsense /app/data /app/audio
 
 # The venv's python links to this base image's /usr/local/bin/python3.12, which
 # is why both stages use the same image.
@@ -61,6 +62,7 @@ EXPOSE 8080
 
 ENV BIRDSENSE_ADDR=":8080" \
     BIRDSENSE_STATIC_DIR="/app/frontend" \
+    BIRDSENSE_STORAGE_DIR="/app/audio" \
     BIRDSENSE_BIRDNET_PYTHON="/opt/birdnet/venv/bin/python" \
     BIRDSENSE_BIRDNET_SCRIPT="/app/analyzer/analyze.py" \
     BIRDNET_APP_DATA="/opt/birdnet/models"

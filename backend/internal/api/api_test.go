@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
 // testNow is the handlers' clock in every test: 11 a.m. Pacific.
@@ -27,19 +28,35 @@ func newTestMux(t *testing.T) (*http.ServeMux, db.Store) {
 
 func newTestMuxMode(t *testing.T, dev bool) (*http.ServeMux, db.Store) {
 	t.Helper()
+	store := newTestStore(t)
+	return muxFor(store, testFiles(t), dev), store
+}
+
+// newTestStore is a JSON-file database holding seedProgram.
+func newTestStore(t *testing.T) db.Store {
+	t.Helper()
 	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 	seedProgram(t, store)
-	return muxFor(store, dev), store
+	return store
 }
 
-func muxFor(store db.Store, dev bool) *http.ServeMux {
+func testFiles(t *testing.T) storage.Store {
+	t.Helper()
+	files, err := storage.OpenLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("open test file storage: %v", err)
+	}
+	return files
+}
+
+func muxFor(store db.Store, files storage.Store, dev bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	register(mux, &handlers{
-		store: store, log: slog.New(slog.NewTextHandler(io.Discard, nil)), dev: dev,
+		store: store, files: files, log: slog.New(slog.NewTextHandler(io.Discard, nil)), dev: dev,
 		now: func() time.Time { return testNow },
 	})
 	return mux
@@ -323,7 +340,7 @@ func (brokenStore) ListRecorders(context.Context) ([]db.Recorder, error) {
 
 func TestADatabaseFailureIsA500WithoutTheDetail(t *testing.T) {
 	_, store := newTestMux(t)
-	mux := muxFor(brokenStore{store}, false)
+	mux := muxFor(brokenStore{store}, testFiles(t), false)
 	rec := do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
@@ -419,34 +436,30 @@ func TestUploadsAreScopedToTheVolunteer(t *testing.T) {
 	}
 }
 
-func TestCreateUploadThenReportProgress(t *testing.T) {
+func TestCreateUpload(t *testing.T) {
 	mux, store := newTestMux(t)
 	vol := signedIn(t, mux, db.RoleVolunteer)
 
 	body := `{"stationId":"SW-03","pulledOn":"2026-09-14","notes":" clear night ",
-	          "nights":[{"date":"2026-09-12","files":24,"bytes":100},
-	                    {"date":"2026-09-13","files":6,"bytes":50,"flag":"partial"}]}`
+	          "nights":[{"date":"2026-09-12","files":2,"bytes":100},
+	                    {"date":"2026-09-13","files":1,"bytes":50,"flag":"partial"}],
+	          "files":[{"path":"DATA\\20260912\\a.WAV","bytes":60,"night":"2026-09-12"},
+	                   {"path":"/DATA/20260912/b.WAV","bytes":40,"night":"2026-09-12"},
+	                   {"path":"DATA/20260913/c.WAV","bytes":50,"night":"2026-09-13"}]}`
 	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
 	}
-	u := decodeInto[uploadBody](t, rec).Upload
+	reg := decodeInto[registeredBody](t, rec)
+	u := reg.Upload
 	if u.Reference != "OWL-20260914-SR03" || u.StationName != "Bridle Trails – North" || u.Notes != "clear night" {
 		t.Errorf("upload = %+v", u)
 	}
-	if u.FileCount != 30 || u.TotalBytes != 150 || u.Status != db.StatusInProgress {
-		t.Errorf("totals = %d files / %d bytes, %s; want 30 / 150, in_progress", u.FileCount, u.TotalBytes, u.Status)
+	if u.FileCount != 3 || u.TotalBytes != 150 || u.FilesUploaded != 0 || u.Status != db.StatusInProgress {
+		t.Errorf("totals = %d files / %d bytes, %d in, %s; want 3 / 150, none in, in_progress", u.FileCount, u.TotalBytes, u.FilesUploaded, u.Status)
 	}
-
-	rec = do(t, mux, http.MethodPost, "/api/v1/uploads/"+u.Reference+"/progress",
-		`{"filesUploaded":30,"bytesUploaded":150}`, vol)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("progress = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
-	}
-	// A fully received card moves itself on to processing; the client never
-	// gets to declare a card done.
-	if got := decodeInto[uploadBody](t, rec).Upload; got.Status != db.StatusProcessing {
-		t.Errorf("status = %q, want %q", got.Status, db.StatusProcessing)
+	if len(reg.Files) != 3 || reg.Files[0].Path != "DATA/20260912/a.WAV" || reg.Files[1].Path != "DATA/20260912/b.WAV" || reg.Files[2].Status != db.AudioPending {
+		t.Errorf("files = %+v; want the three, card paths normalized, pending", reg.Files)
 	}
 
 	stored, err := store.GetUpload(t.Context(), u.Reference)
@@ -454,20 +467,32 @@ func TestCreateUploadThenReportProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	jane := userByEmail(t, store, "jane@example.com")
-	if stored.UserID != jane.ID || stored.Recorder.Latitude != 47.656 || stored.ReceivedAt == nil || !stored.ReceivedAt.Equal(testNow) {
-		t.Errorf("stored card = %+v; want Jane's, with the recorder copied and receivedAt set", stored)
+	if stored.UserID != jane.ID || stored.Recorder.Latitude != 47.656 || stored.ReceivedAt != nil {
+		t.Errorf("stored card = %+v; want Jane's, with the recorder copied and nothing received", stored)
+	}
+	files, _ := store.ListAudioFiles(t.Context(), u.Reference)
+	if len(files) != 3 || files[2].RecorderID != "SW-03" || files[2].SizeBytes != 50 || files[2].Night != "2026-09-13" {
+		t.Errorf("stored files = %+v", files)
 	}
 }
 
 func TestCreateUploadRejectsBadInput(t *testing.T) {
 	mux, _ := newTestMux(t)
 	vol := signedIn(t, mux, db.RoleVolunteer)
+	const nights = `"nights":[{"date":"2026-09-12","files":2,"bytes":100}]`
+	const files = `"files":[{"path":"a.WAV","bytes":60,"night":"2026-09-12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]`
 	for _, body := range []string{
-		`{"stationId":"SW-99","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
-		`{"stationId":"SW-09","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
-		`{"stationId":"SW-03","pulledOn":"14/09/2026","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[]}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":-1,"bytes":100}]}`,
+		`{"stationId":"SW-99","pulledOn":"2026-09-14",` + nights + `,` + files + `}`,
+		`{"stationId":"SW-09","pulledOn":"2026-09-14",` + nights + `,` + files + `}`,
+		`{"stationId":"SW-03","pulledOn":"14/09/2026",` + nights + `,` + files + `}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[],` + files + `}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":-1,"bytes":100}],` + files + `}`,
+		// The file list has to be the card the nights describe.
+		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":100,"night":"2026-09-12"}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":60,"night":"2026-09-12"},{"path":"a.WAV","bytes":40,"night":"2026-09-12"}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":60,"night":"Sep 12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"/","bytes":60,"night":"2026-09-12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]}`,
 	} {
 		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusBadRequest {
 			t.Errorf("POST %s = %d, want %d", body, rec.Code, http.StatusBadRequest)
@@ -478,48 +503,49 @@ func TestCreateUploadRejectsBadInput(t *testing.T) {
 func TestReRegisteringACardResumesIt(t *testing.T) {
 	mux, _ := newTestMux(t)
 	jane := signedIn(t, mux, db.RoleVolunteer)
-	nights := `[` + strings.TrimSuffix(strings.Repeat(`{"date":"2026-08-24","files":24,"bytes":2400},`, 14), ",") + `]`
 
-	rec := do(t, mux, http.MethodPost, "/api/v1/uploads",
-		`{"stationId":"SW-02","pulledOn":"2026-09-07","notes":"second try","nights":`+nights+`}`, jane)
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-02", "2026-09-07", "second try", "2026-08-24", 14, 24), jane)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("re-register = %d (%s)", rec.Code, rec.Body)
 	}
-	u := decodeInto[uploadBody](t, rec).Upload
-	if u.Reference != "OWL-20260907-SR02" || u.FilesUploaded != 214 || u.Status != db.StatusInProgress || u.Notes != "second try" {
-		t.Errorf("resumed card = %+v; want 214 files kept, in_progress, the new notes", u)
+	// The seeded card says 214 files landed, but it has none stored, and the
+	// count comes from what is stored.
+	reg := decodeInto[registeredBody](t, rec)
+	if u := reg.Upload; u.Reference != "OWL-20260907-SR02" || u.FilesUploaded != 0 || u.Status != db.StatusInProgress || u.Notes != "second try" || len(reg.Files) != 336 {
+		t.Errorf("resumed card = %+v with %d files; want its 336 files, none in, in_progress, the new notes", u, len(reg.Files))
 	}
 
-	// A finished card stays finished.
-	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
-		`{"stationId":"SW-02","pulledOn":"2026-01-01","nights":[{"date":"2025-12-30","files":24,"bytes":2400}]}`, jane)
-	if u := decodeInto[uploadBody](t, rec).Upload; rec.Code != http.StatusCreated || u.Status != db.StatusResultsSent {
-		t.Errorf("re-register a sent card = %d, %+v; want it left results_sent", rec.Code, u)
+	// A finished card stays finished, with the list it was sent with.
+	rec = do(t, mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-02", "2026-01-01", "", "2025-12-30", 1, 3), jane)
+	if u := decodeInto[registeredBody](t, rec).Upload; rec.Code != http.StatusCreated || u.Status != db.StatusResultsSent || u.FileCount != 48 {
+		t.Errorf("re-register a sent card = %d, %+v; want it left results_sent with 48 files", rec.Code, u)
 	}
 
 	// Someone else's card isn't theirs to take over.
 	marcus := signInAs(t, mux, "m.lee@example.com")
-	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
-		`{"stationId":"SW-02","pulledOn":"2026-09-07","nights":`+nights+`}`, marcus)
+	rec = do(t, mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-02", "2026-09-07", "", "2026-08-24", 14, 24), marcus)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("another volunteer registers Jane's card = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
-func TestProgressOnlyMovesForward(t *testing.T) {
+func TestProgressOnlySetsWhetherACardIsMoving(t *testing.T) {
 	mux, _ := newTestMux(t)
 	vol := signedIn(t, mux, db.RoleVolunteer)
-	const ref = "OWL-20260907-SR02" // seeded at 214 of 336 files
+	const ref = "OWL-20260907-SR02" // seeded interrupted, at 214 of 336 files
 
-	rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"filesUploaded":9,"status":"in_progress"}`, vol)
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"status":"in_progress"}`, vol)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
 	if u := decodeInto[uploadBody](t, rec).Upload; u.FilesUploaded != 214 || u.Status != db.StatusInProgress {
 		t.Errorf("upload = %d files, %s; want 214 files, in_progress", u.FilesUploaded, u.Status)
 	}
-	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", `{"status":"processing"}`, vol); rec.Code != http.StatusBadRequest {
-		t.Errorf("client declares processing = %d, want %d", rec.Code, http.StatusBadRequest)
+	// The server counts what lands; the browser can't say, or declare a card in.
+	for _, body := range []string{`{"status":"processing"}`, `{"filesUploaded":336,"status":"in_progress"}`, `{}`} {
+		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/"+ref+"/progress", body, vol); rec.Code != http.StatusBadRequest {
+			t.Errorf("progress %s = %d, want %d", body, rec.Code, http.StatusBadRequest)
+		}
 	}
 }
 
@@ -539,7 +565,7 @@ func TestOneVolunteerCannotReachAnothersCard(t *testing.T) {
 	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260821-SR03", "", vol); rec.Code != http.StatusNotFound {
 		t.Errorf("GET = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/OWL-20260821-SR03/progress", `{"filesUploaded":1}`, vol); rec.Code != http.StatusNotFound {
+	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads/OWL-20260821-SR03/progress", `{"status":"interrupted"}`, vol); rec.Code != http.StatusNotFound {
 		t.Errorf("progress = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 	admin := signedIn(t, mux, db.RoleAdmin)

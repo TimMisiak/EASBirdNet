@@ -236,6 +236,17 @@ func (s *jsonFile) UpdateUpload(_ context.Context, id string, mutate func(*Uploa
 
 // --- audio files ---
 
+func (s *jsonFile) GetAudioFile(_ context.Context, uploadID, id string) (AudioFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Cosmos addresses a document by (partition key, id); so does this.
+	f, err := get(s.data.AudioFiles, id)
+	if err == nil && f.UploadID != uploadID {
+		return AudioFile{}, ErrNotFound
+	}
+	return f, err
+}
+
 func (s *jsonFile) ListAudioFiles(_ context.Context, uploadID string) ([]AudioFile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

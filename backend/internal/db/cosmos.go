@@ -229,6 +229,10 @@ func (s *cosmosStore) UpdateUpload(ctx context.Context, id string, mutate func(*
 
 // --- audio files ---
 
+func (s *cosmosStore) GetAudioFile(ctx context.Context, uploadID, id string) (AudioFile, error) {
+	return readDoc[AudioFile](ctx, s.audioFiles, uploadID, id)
+}
+
 func (s *cosmosStore) ListAudioFiles(ctx context.Context, uploadID string) ([]AudioFile, error) {
 	files, err := queryDocs[AudioFile](ctx, s.audioFiles, uploadID, "SELECT * FROM c")
 	sortAudioFiles(files)

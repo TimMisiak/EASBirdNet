@@ -48,7 +48,9 @@ class UploadCheck extends BaseElement {
 
     const nights = upload.nights ?? [];
     const flagged = nights.filter((n) => n.flag).length;
-    const estimate = duration(flow.totalMinutes(upload.totalBytes));
+    // A resumed card only has what's missing left to send.
+    const remaining = upload.totalBytes - upload.bytesUploaded;
+    const estimate = duration(flow.totalMinutes(remaining));
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -97,8 +99,8 @@ class UploadCheck extends BaseElement {
       <div class="stats">
         ${stat(count(nights.length), `nights · ${nightRange(nights)}`)}
         ${stat(count(upload.fileCount), "audio files")}
-        ${stat(gigabytes(upload.totalBytes), "to upload")}
-        ${stat(`~${estimate}`, `at your speed (${flow.linkSpeed()})`)}
+        ${stat(gigabytes(remaining), upload.bytesUploaded ? "left to upload" : "to upload")}
+        ${stat(`~${estimate}`, `at a typical ${flow.assumedSpeed()}`)}
       </div>
 
       <div class="columns">

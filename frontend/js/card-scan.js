@@ -3,7 +3,7 @@
 // The card is never copied to the volunteer's disk: we ask for the folder, walk
 // it, and keep file handles. What comes back is a manifest -- how many nights,
 // how many files, how big -- which is what the "here's what's on the card"
-// screen is built on.
+// screen is built on, and the list of files the upload sends.
 
 const AUDIO = /\.(wav|flac|mp3|w4v)$/i;
 
@@ -16,12 +16,14 @@ export class CancelledError extends Error {
 }
 
 /**
- * Ask for the card and read its manifest.
+ * Ask for the card and read its manifest. Each of `files` is
+ * {path, bytes, night, file}: the path from the card's root with forward
+ * slashes, and the File to send.
  * @returns {Promise<{label: string, nights: object[], files: object[], fileCount: number, totalBytes: number, skipped: string[]}>}
  */
 export async function scanCard() {
-  const files = window.showDirectoryPicker ? await viaDirectoryPicker() : await viaInput();
-  return manifest(files);
+  const found = window.showDirectoryPicker ? await viaDirectoryPicker() : await viaInput();
+  return manifest(found);
 }
 
 // The modern path: a real directory handle, so the files stay on the card and
@@ -33,20 +35,20 @@ async function viaDirectoryPicker() {
   } catch {
     throw new CancelledError();
   }
-  const files = [];
-  await walk(handle, files);
-  return { label: handle.name, entries: files };
+  const entries = [];
+  await walk(handle, entries);
+  return { label: handle.name, entries };
 }
 
-async function walk(dir, out, depth = 0) {
+async function walk(dir, out, prefix = "", depth = 0) {
   // Recorders write one flat folder, sometimes one folder per deployment.
   // Anything deeper than that is not a card we understand.
   if (depth > 3) return;
   for await (const entry of dir.values()) {
     if (entry.kind === "directory") {
-      await walk(entry, out, depth + 1);
+      await walk(entry, out, `${prefix}${entry.name}/`, depth + 1);
     } else {
-      out.push(await entry.getFile());
+      out.push({ path: prefix + entry.name, file: await entry.getFile() });
     }
   }
 }
@@ -65,11 +67,17 @@ function viaInput() {
     input.addEventListener(
       "change",
       () => {
-        const entries = [...input.files];
+        const files = [...input.files];
         input.remove();
-        if (!entries.length) return reject(new CancelledError());
-        const first = entries[0].webkitRelativePath?.split("/")[0];
-        resolve({ label: first || "SD card", entries });
+        if (!files.length) return reject(new CancelledError());
+        // Relative paths start with the folder that was picked; the card's
+        // paths start inside it.
+        const [label] = files[0].webkitRelativePath.split("/");
+        const entries = files.map((file) => ({
+          path: file.webkitRelativePath.split("/").slice(1).join("/") || file.name,
+          file,
+        }));
+        resolve({ label: label || "SD card", entries });
       },
       { once: true },
     );
@@ -80,20 +88,26 @@ function viaInput() {
 }
 
 function manifest({ label, entries }) {
-  const audio = [];
+  const files = [];
   const skipped = [];
-  for (const file of entries) {
-    if (AUDIO.test(file.name)) audio.push(file);
-    else skipped.push(file.name);
+  for (const { path, file } of entries) {
+    // A Mac writes a "._" shadow file beside every file on a FAT card. They
+    // match the extension and hold no audio.
+    if (AUDIO.test(file.name) && !file.name.startsWith("._")) {
+      files.push({ path, bytes: file.size, night: nightOf(file.lastModified), file });
+    } else {
+      skipped.push(file.name);
+    }
   }
+  // Byte order, the way the server sorts a card's files.
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   const byNight = new Map();
-  for (const file of audio) {
-    const date = nightOf(file.lastModified);
-    const night = byNight.get(date) ?? { date, files: 0, bytes: 0 };
+  for (const file of files) {
+    const night = byNight.get(file.night) ?? { date: file.night, files: 0, bytes: 0 };
     night.files += 1;
-    night.bytes += file.size;
-    byNight.set(date, night);
+    night.bytes += file.bytes;
+    byNight.set(file.night, night);
   }
 
   const nights = [...byNight.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -102,9 +116,9 @@ function manifest({ label, entries }) {
   return {
     label,
     nights,
-    files: audio,
-    fileCount: audio.length,
-    totalBytes: audio.reduce((sum, f) => sum + f.size, 0),
+    files,
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, f) => sum + f.bytes, 0),
     skipped,
   };
 }
@@ -133,33 +147,4 @@ function flagOddNights(nights) {
     if (night.files >= typical * 0.75) return;
     night.flag = i === nights.length - 1 ? "partial" : "short";
   });
-}
-
-/**
- * A stand-in card, for trying the flow without an SD card in the reader.
- * Fourteen nights, two of them odd, matching a full SwiftOne deployment.
- */
-export function sampleCard() {
-  const nights = [];
-  const start = new Date();
-  start.setDate(start.getDate() - 21);
-  for (let i = 0; i < 14; i += 1) {
-    const day = new Date(start);
-    day.setDate(start.getDate() + i);
-    const files = i === 6 ? 11 : i === 13 ? 3 : 24;
-    nights.push({
-      date: nightOf(day.getTime() + 12 * 3600 * 1000),
-      files,
-      bytes: files * 383_000_000,
-      flag: i === 6 ? "short" : i === 13 ? "partial" : undefined,
-    });
-  }
-  return {
-    label: "SWIFT01",
-    nights,
-    files: [],
-    fileCount: nights.reduce((n, x) => n + x.files, 0),
-    totalBytes: nights.reduce((n, x) => n + x.bytes, 0),
-    skipped: ["CONFIG.TXT", ".DS_Store"],
-  };
 }

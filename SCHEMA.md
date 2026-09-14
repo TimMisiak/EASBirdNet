@@ -135,8 +135,8 @@ recorder `SW-02`, pulled 7 September 2026.
 | `nights`         | array    | Per-night manifest the browser read off the card; see below. |
 | `fileCount`      | integer  | Sum of `nights[].files`. |
 | `totalBytes`     | integer  | Sum of `nights[].bytes`. |
-| `filesUploaded`  | integer  | Only ever increases. |
-| `bytesUploaded`  | integer  | Only ever increases. |
+| `filesUploaded`  | integer  | The card's audio files in `uploaded` or `analyzed` status, counted by the server as each file lands. Capped at `fileCount`. |
+| `bytesUploaded`  | integer  | Their total size. Capped at `totalBytes`. |
 | `status`         | string   | See [Upload status](#upload-status). |
 | `statusDetail?`  | string   | Short human reason shown instead of the status label, e.g. `2 unreadable`. |
 | `analysis?`      | object   | How BirdNET was run over the card; see below. |
@@ -224,7 +224,7 @@ interruption produces the same ids instead of duplicates.
 | `durationSec?`   | number  | Filled in by processing. |
 | `sampleRate?`    | integer | Hz, filled in by processing. |
 | `sha256?`        | string  | Hex checksum, to tell a corrupt transfer from a corrupt card. |
-| `blobName`       | string  | Where the audio is stored; see [Blob naming](#blob-naming). |
+| `blobName?`      | string  | Where the audio is stored, set when its last byte lands; see [Blob naming](#blob-naming). |
 | `status`         | string  | `pending` → `uploaded` → `analyzed`, or `failed`. |
 | `statusDetail?`  | string  | Why it failed, e.g. `checksum mismatch`. |
 | `uploadedAt?`    | instant | |
@@ -244,7 +244,7 @@ interruption produces the same ids instead of duplicates.
   "recordedAt": "2026-08-25T11:00:00Z",
   "durationSec": 3600,
   "sampleRate": 48000,
-  "blobName": "uploads/OWL-20260907-SR02/DATA/20260824/20260825_040000.WAV",
+  "blobName": "uploads/OWL-20260907-SR02/K7XQ3M2NHD5WBYVAJF4TGC6PLE",
   "status": "analyzed",
   "uploadedAt": "2026-09-13T03:20:02Z",
   "analyzedAt": "2026-09-13T09:41:17Z",
@@ -257,9 +257,9 @@ interruption produces the same ids instead of duplicates.
 | Status     | Meaning |
 |------------|---------|
 | `pending`  | Registered from the card manifest; not in storage yet. |
-| `uploaded` | In blob storage; not analyzed yet. |
+| `uploaded` | In file storage; not analyzed yet. |
 | `analyzed` | BirdNET has run over it (it may still have zero detections). |
-| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. |
+| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
 
 ## `detections`
 
@@ -346,7 +346,8 @@ Every read the API needs, and what it costs in Cosmos:
 | One card | `GetUpload` | `uploads` | point read |
 | A volunteer's cards | `ListUploads{UserID}` | `uploads` | cross-partition |
 | Coordinator's card table | `ListUploads{Status?}` | `uploads` | cross-partition |
-| Files on a card (resume, processing) | `ListAudioFiles` | `audioFiles` | single partition |
+| Files on a card (registering, counting, processing) | `ListAudioFiles` | `audioFiles` | single partition |
+| A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
 
@@ -386,15 +387,29 @@ concurrent progress reports.
 ## Blob naming
 
 Audio isn't stored in Cosmos. Each file goes to the storage account's `audio`
-blob container (see DEPLOYMENT.md) under:
+blob container (see DEPLOYMENT.md), or in local development to the same name
+under `BIRDSENSE_STORAGE_DIR`:
 
 ```
-uploads/{uploadId}/{path on card}
+uploads/{uploadId}/{random}
 ```
 
-e.g. `uploads/OWL-20260907-SR02/DATA/20260824/20260825_040000.WAV`
-(`db.AudioBlobName`). The whole card is one prefix, so lifecycle rules and
-clean-up can act on one card at a time.
+e.g. `uploads/OWL-20260907-SR02/K7XQ3M2NHD5WBYVAJF4TGC6PLE`. That is
+`storage.Name` of the file's tus upload id, which the server picks when the
+upload is created. The name isn't the path on the card, because two tries at
+the same file (one abandoned, one started over) mustn't write into the same
+blob; the path is on the `audioFiles` document, and so is `blobName`. The whole
+card is one prefix, so lifecycle rules and clean-up can act on one card at a
+time. In the prefix, anything but letters, digits, `-`, `_` and `.` becomes `_`,
+since an upload id has to be URL-safe.
+
+Beside each file, tusd keeps `{name}.info`: a small JSON record of the upload,
+with its size and the metadata the server set (`reference`, `path`,
+`audioFileId`, `userId`). In Azure a file is a block blob whose block list is
+committed when the last byte lands, so the blob only appears once it is whole;
+until then the blocks are uncommitted, and Azure discards them after 7 days. A
+local file grows in place. Nothing deletes `.info` records, or what's left of
+uploads that never finished.
 
 ## API mapping
 
@@ -410,6 +425,7 @@ public summary), following these rules:
 | `person.addedOn` (date) | `users.createdAt`, same |
 | `person.provider` | `users.identity.provider`, title-cased; `—` before first sign-in |
 | `upload.reference` | `uploads.id`, built by `db.UploadID(pulledOn, recorderId)` |
+| `files[].bytes` (`POST /uploads`) | `audioFiles.sizeBytes`; `files[].path` is `path`, normalized by `db.CardPath` |
 | `upload.stationName` | `uploads.recorder.name` (the copy, not the live recorder) |
 | `upload.volunteerName` | `uploads.userName` |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
@@ -424,8 +440,10 @@ What the write routes do to documents:
 |-------|--------|
 | `GET /stations`, `GET /admin/people`, `GET /dev/people` | Leave out retired recorders and removed users. |
 | `POST /session` | Sets `lastSignInAt`. A removed user can't sign in, and their open session stops working. |
-| `POST /uploads` | Creates the upload. If that id exists and is the caller's, it is a resume: `notes`, `nights` and the totals are replaced, the uploaded counts and the `recorder`/`userName` copies are kept, and `status` goes back to `in_progress` only if the card was still transferring. Someone else's card is a 409. |
-| `POST /uploads/{ref}/progress` | Counts only increase, capped at the totals. The client's `status` applies only while the card is `in_progress` or `interrupted`; the last file sets `processing` and `receivedAt`. |
+| `POST /uploads` | Creates the upload, and a `pending` audio file for each file listed. The list has to add up to `nights`. If that id exists and is the caller's, it is a resume: `notes` are replaced and the `recorder`/`userName` copies are kept. If the card was still transferring, `nights` and the totals are replaced too, `status` goes back to `in_progress`, and the audio files are matched to the new list: a listed file already `uploaded` at the same size stays, other listed files are `pending`, and a file no longer listed becomes `failed`. The uploaded counts are then recounted. Someone else's card is a 409. Answers the card and its listed files. |
+| `POST /uploads/{ref}/progress` | Sets `status` to the client's `in_progress` or `interrupted`, only while the card is one of those. The client can't report counts. |
+| `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
+| `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
@@ -455,5 +473,7 @@ recorders or uploads is filled by `internal/devseed` with a placeholder program
 (six people, five recorders, nine cards, a few weeks of reviewed detections),
 dated relative to that day. Setting `BIRDSENSE_BOOTSTRAP_ADMIN` in dev skips
 that, because the roster is no longer empty. A file with a different `version` is
-refused rather than guessed at. It is sized for development: a season of real
+refused rather than guessed at. Uploaded audio isn't in the file: it goes under
+`BIRDSENSE_STORAGE_DIR` (default `backend/data/audio`), at the blob names
+above, so delete that directory too when starting over. It is sized for development: a season of real
 detections would make every write slow.

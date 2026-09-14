@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
 // sessionCookie carries the signed-in person's email.
@@ -27,10 +29,11 @@ import (
 // reachable from outside a demo.
 const sessionCookie = "bs_session"
 
-// Register mounts the API routes on mux. dev turns on the development-only
-// routes -- today, the roster the sign-in page lets you pick an account from.
-func Register(mux *http.ServeMux, store db.Store, log *slog.Logger, dev bool) {
-	register(mux, &handlers{store: store, log: log, dev: dev, now: time.Now})
+// Register mounts the API routes on mux. files is where card audio goes. dev
+// turns on the development-only routes -- today, the roster the sign-in page
+// lets you pick an account from.
+func Register(mux *http.ServeMux, store db.Store, files storage.Store, log *slog.Logger, dev bool) {
+	register(mux, &handlers{store: store, files: files, log: log, dev: dev, now: time.Now})
 }
 
 func register(mux *http.ServeMux, h *handlers) {
@@ -51,6 +54,9 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/uploads", h.requireSession(h.createUpload))
 	mux.HandleFunc("GET /api/v1/uploads/{reference}", h.requireSession(h.getUpload))
 	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", h.requireSession(h.recordProgress))
+	// Card audio, one tus upload per file (see tus.go). tusd routes POST, HEAD
+	// and PATCH itself, so the pattern has no method.
+	mux.Handle(tusPath, h.tusEndpoint())
 
 	// Admin.
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
@@ -77,6 +83,8 @@ func register(mux *http.ServeMux, h *handlers) {
 
 type handlers struct {
 	store db.Store
+	// files is where card audio is stored.
+	files storage.Store
 	log   *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
@@ -291,15 +299,17 @@ func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.Upl
 	h.json(w, http.StatusOK, map[string]any{"uploads": mapAll(uploads, uploadOf)})
 }
 
-// createUpload registers a card the volunteer is about to send. Its reference
-// is derived from the pull date and the recorder, so registering the same card
-// again is a resume: the manifest is refreshed and what already landed is kept.
+// createUpload registers a card the volunteer is about to send, with the list
+// of audio files the browser read off it. Its reference is derived from the
+// pull date and the recorder, so registering the same card again is a resume:
+// the list is refreshed and the files already in are kept.
 func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.User) {
 	var body struct {
-		StationID string  `json:"stationId"`
-		PulledOn  string  `json:"pulledOn"`
-		Notes     string  `json:"notes"`
-		Nights    []Night `json:"nights"`
+		StationID string     `json:"stationId"`
+		PulledOn  string     `json:"pulledOn"`
+		Notes     string     `json:"notes"`
+		Nights    []Night    `json:"nights"`
+		Files     []CardFile `json:"files"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -320,7 +330,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		h.problem(w, http.StatusBadRequest, "pulledOn must be YYYY-MM-DD")
 		return
 	}
-	if len(body.Nights) == 0 {
+	if len(body.Nights) == 0 || len(body.Files) == 0 {
 		h.problem(w, http.StatusBadRequest, "the card has no audio on it")
 		return
 	}
@@ -336,10 +346,16 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		files += n.Files
 		bytes += n.Bytes
 	}
+	listed, problem := cardList(body.Files, files, bytes)
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
 	notes, started := strings.TrimSpace(body.Notes), h.stamp()
+	ref := db.UploadID(body.PulledOn, rec.ID)
 
 	u, err := h.store.CreateUpload(ctx, db.Upload{
-		ID:         db.UploadID(body.PulledOn, rec.ID),
+		ID:         ref,
 		RecorderID: rec.ID,
 		Recorder:   db.RecorderSnapshot{Name: rec.Name, Latitude: rec.Latitude, Longitude: rec.Longitude},
 		UserID:     me.ID, UserName: me.Name,
@@ -350,17 +366,28 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	if errors.Is(err, db.ErrConflict) {
 		// Same card again. The recorder and volunteer copies stay as they were
 		// when it was first registered.
-		u, err = h.store.UpdateUpload(ctx, db.UploadID(body.PulledOn, rec.ID), func(u *db.Upload) error {
+		u, err = h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
 			if u.UserID != me.ID {
 				return errCardTaken
 			}
-			u.Notes, u.Nights, u.FileCount, u.TotalBytes = notes, nights, files, bytes
-			// A card that is already in doesn't go back to being sent.
+			u.Notes = notes
+			// A card that is already in keeps the list it was sent with, and
+			// doesn't go back to being sent.
 			if transferring(u.Status) {
+				u.Nights, u.FileCount, u.TotalBytes = nights, files, bytes
 				u.Status, u.StartedAt = db.StatusInProgress, started
 			}
 			return nil
 		})
+	}
+	if err == nil && transferring(u.Status) {
+		if err = h.registerFiles(ctx, u, listed); err == nil {
+			u, err = h.tallyFiles(ctx, ref)
+		}
+	}
+	var stored []db.AudioFile
+	if err == nil {
+		stored, err = h.store.ListAudioFiles(ctx, ref)
 	}
 	switch {
 	case errors.Is(err, errCardTaken):
@@ -368,11 +395,114 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u)})
+		out := []CardFile{}
+		for _, f := range stored {
+			if f.StatusDetail != detailNotOnCard {
+				out = append(out, cardFileOf(f))
+			}
+		}
+		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u), "files": out})
 	}
 }
 
 var errCardTaken = errors.New("card belongs to someone else")
+
+// cardList checks a card's file list against the nights it was summed into,
+// and returns it as audio files, or else what is wrong with it.
+func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile, string) {
+	listed := make([]db.AudioFile, 0, len(files))
+	seen := make(map[string]bool, len(files))
+	var bytes int64
+	for _, f := range files {
+		p := db.CardPath(f.Path)
+		if _, err := time.Parse("2006-01-02", f.Night); err != nil || p == "" || f.Bytes < 0 {
+			return nil, "each file needs its path on the card, a non-negative size and a YYYY-MM-DD night"
+		}
+		if seen[p] {
+			return nil, fmt.Sprintf("the file list has %s twice", p)
+		}
+		seen[p] = true
+		bytes += f.Bytes
+		listed = append(listed, db.AudioFile{Path: p, SizeBytes: f.Bytes, Night: f.Night})
+	}
+	if len(listed) != wantFiles || bytes != wantBytes {
+		return nil, "the file list and the nights don't add up to the same card"
+	}
+	return listed, ""
+}
+
+// registerFiles makes a card's audio files match the list the browser has just
+// read off it. A file that is already in stays in if it is the same size, and
+// everything else listed is pending. A file that is no longer listed is marked
+// failed rather than deleted, so whatever was stored for it is still accounted
+// for.
+func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.AudioFile) error {
+	existing, err := h.store.ListAudioFiles(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	unlisted := make(map[string]db.AudioFile, len(existing))
+	for _, f := range existing {
+		unlisted[f.ID] = f
+	}
+	var writes []db.AudioFile
+	for _, f := range listed {
+		id := db.AudioFileID(u.ID, f.Path)
+		old, had := unlisted[id]
+		delete(unlisted, id)
+		unchanged := old.SizeBytes == f.SizeBytes && (received(old) || (old.Status == db.AudioPending && old.Night == f.Night))
+		if had && unchanged {
+			continue
+		}
+		writes = append(writes, db.AudioFile{
+			ID: id, RecorderID: u.RecorderID, Path: f.Path, SizeBytes: f.SizeBytes,
+			Night: f.Night, Status: db.AudioPending, CreatedAt: old.CreatedAt,
+		})
+	}
+	for _, old := range unlisted {
+		if old.StatusDetail != detailNotOnCard {
+			old.Status, old.StatusDetail = db.AudioFailed, detailNotOnCard
+			writes = append(writes, old)
+		}
+	}
+	if len(writes) == 0 {
+		return nil
+	}
+	return h.store.UpsertAudioFiles(ctx, u.ID, writes)
+}
+
+// tallyFiles sets a card's uploaded counts from its audio files, and moves a
+// card whose every listed file has landed on to processing. The counts are
+// recounted rather than added to, so a retried request can't count a file
+// twice, and the browser never reports them.
+func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error) {
+	files, err := h.store.ListAudioFiles(ctx, ref)
+	if err != nil {
+		return db.Upload{}, err
+	}
+	var in, waiting int
+	var bytes int64
+	for _, f := range files {
+		switch {
+		case received(f):
+			in++
+			bytes += f.SizeBytes
+		case f.Status == db.AudioPending:
+			waiting++
+		}
+	}
+	now := h.stamp()
+	return h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+		if !transferring(u.Status) {
+			return nil
+		}
+		u.FilesUploaded, u.BytesUploaded = min(in, u.FileCount), min(bytes, u.TotalBytes)
+		if waiting == 0 && in > 0 {
+			u.Status, u.ReceivedAt = db.StatusProcessing, &now
+		}
+		return nil
+	})
+}
 
 // transferring reports whether a card's files are still being sent, which are
 // the only states the client gets a say in.
@@ -397,41 +527,30 @@ func (h *handlers) getUpload(w http.ResponseWriter, r *http.Request, me db.User)
 	}
 }
 
-// recordProgress is what the browser calls as each batch of files lands. The
-// real version will be the storage backend's own callback; until then the
-// client reports, and the counts only ever move forward.
+// recordProgress is the browser saying a transfer has stopped or started
+// again, which is what the volunteer's home page shows. What has landed is
+// counted by the server as each file arrives (afterFileUpload), never reported
+// by the browser.
 func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request, me db.User) {
 	var body struct {
-		FilesUploaded int    `json:"filesUploaded"`
-		BytesUploaded int64  `json:"bytesUploaded"`
-		Status        string `json:"status"`
+		Status string `json:"status"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Status != "" && !transferring(body.Status) {
+	if !transferring(body.Status) {
 		h.problem(w, http.StatusBadRequest, "status must be in_progress or interrupted")
 		return
 	}
 
-	now := h.stamp()
 	u, err := h.store.UpdateUpload(r.Context(), r.PathValue("reference"), func(u *db.Upload) error {
 		if !canSee(me, *u) {
 			return db.ErrNotFound
 		}
-		u.FilesUploaded = max(u.FilesUploaded, min(body.FilesUploaded, u.FileCount))
-		u.BytesUploaded = max(u.BytesUploaded, min(body.BytesUploaded, u.TotalBytes))
-		if !transferring(u.Status) {
-			return nil
-		}
-		if body.Status != "" {
+		// A card that is in stays in; the client never moves it along.
+		if transferring(u.Status) {
 			u.Status = body.Status
-		}
-		// A fully received card moves itself on to processing; the client never
-		// gets to declare a card done.
-		if u.FilesUploaded >= u.FileCount {
-			u.Status, u.ReceivedAt = db.StatusProcessing, &now
 		}
 		return nil
 	})

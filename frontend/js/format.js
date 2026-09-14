@@ -11,6 +11,19 @@ export function gigabytes(bytes, digits = 1) {
   return `${((bytes ?? 0) / 1e9).toFixed(digits)} GB`;
 }
 
+/** "383 MB" or "1.2 GB" -- one file, where decimal GB alone would read "0.4 GB". */
+export function fileSize(bytes) {
+  const b = bytes ?? 0;
+  if (b >= 1e9) return gigabytes(b);
+  return b >= 1e7 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e6).toFixed(1)} MB`;
+}
+
+/** "42 Mb/s" -- a link speed in megabits, the unit the ISP quotes. */
+export function megabits(bytesPerSecond) {
+  const mbps = ((bytesPerSecond ?? 0) * 8) / 1e6;
+  return `${mbps >= 10 ? Math.round(mbps) : mbps.toFixed(1)} Mb/s`;
+}
+
 export function percent(part, whole) {
   if (!whole) return 0;
   return Math.min(100, Math.max(0, (part / whole) * 100));

@@ -80,6 +80,15 @@ type Upload struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
+// CardFile is one audio file on a card. The browser lists them when it
+// registers a card, and gets them back with where each one stands.
+type CardFile struct {
+	Path   string `json:"path"` // relative to the card's root, forward slashes
+	Bytes  int64  `json:"bytes"`
+	Night  string `json:"night"`            // YYYY-MM-DD, the evening the night began
+	Status string `json:"status,omitempty"` // db.AudioPending, db.AudioUploaded, ...; ignored on the way in
+}
+
 // pacific is the program's timezone: the day someone was added is the day it
 // was in East King County. time/tzdata is embedded because the runtime image
 // has no zoneinfo, and a fixed offset would be an hour out half the year.
@@ -131,6 +140,10 @@ func uploadOf(u db.Upload) Upload {
 		Status: u.Status, StatusDetail: u.StatusDetail,
 		StartedAt: u.StartedAt, UpdatedAt: u.UpdatedAt,
 	}
+}
+
+func cardFileOf(f db.AudioFile) CardFile {
+	return CardFile{Path: f.Path, Bytes: f.SizeBytes, Night: f.Night, Status: f.Status}
 }
 
 func mapAll[T, U any](in []T, f func(T) U) []U {
