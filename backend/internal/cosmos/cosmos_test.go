@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // emulatorKey is the Cosmos DB emulator's well-known account key. It is
@@ -14,61 +15,91 @@ import (
 // and it unlocks nothing but a local container.
 const emulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="
 
-// fakeGateway stands in for the emulator: it answers the two requests the SDK
-// makes for Check -- the account read at "/" and the database query at "/dbs".
-// The point is not to reimplement Cosmos DB, it is to pin down that Check
-// issues read-only requests and that they work over plain HTTP, which is how
-// docker-compose reaches the emulator.
-func fakeGateway(t *testing.T, status int) string {
+// fakeGateway stands in for the emulator: it answers the account read at "/"
+// with accountStatus and the read of /dbs/birdsense with dbStatus. The point is
+// not to reimplement Cosmos DB, it is to pin down that Check issues nothing but
+// reads -- no query, no create -- and that it works over plain HTTP, which is
+// how docker-compose reaches the emulator.
+func fakeGateway(t *testing.T, accountStatus, dbStatus int) string {
 	t.Helper()
 	var self string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.URL.Path != "/dbs" {
-			t.Errorf("unexpected write: %s %s", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet {
+			t.Errorf("Check sent %s %s; want reads only", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if status != http.StatusOK {
-			w.WriteHeader(status)
-			fmt.Fprint(w, `{"message":"denied"}`)
-			return
-		}
-		if r.URL.Path == "/" {
+		switch r.URL.Path {
+		case "/":
+			if accountStatus != http.StatusOK {
+				w.WriteHeader(accountStatus)
+				fmt.Fprint(w, `{"code":"Error","message":"account read refused"}`)
+				return
+			}
 			// The gateway advertises where the account can be reached; the SDK
 			// reads this before anything else and routes by it.
 			fmt.Fprintf(w, `{"id":"localhost","_self":"","_rid":"localhost","_dbs":"//dbs/",`+
 				`"writableLocations":[{"name":"local","databaseAccountEndpoint":%q}],`+
 				`"readableLocations":[{"name":"local","databaseAccountEndpoint":%q}],`+
 				`"userConsistencyPolicy":{"defaultConsistencyLevel":"Session"}}`, self, self)
-			return
+		case "/dbs/birdsense":
+			w.WriteHeader(dbStatus)
+			if dbStatus == http.StatusOK {
+				fmt.Fprint(w, `{"id":"birdsense","_rid":"AAAA==","_self":"dbs/AAAA==/","_etag":"\"0\"","_colls":"colls/","_users":"users/","_ts":1}`)
+				return
+			}
+			fmt.Fprint(w, `{"code":"NotFound","message":"Resource Not Found"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
 		}
-		fmt.Fprint(w, `{"_rid":"","Databases":[],"_count":0}`)
 	}))
 	t.Cleanup(srv.Close)
 	self = srv.URL + "/"
 	return srv.URL
 }
 
-func TestCheckOverPlainHTTP(t *testing.T) {
-	c, err := New(Config{Endpoint: fakeGateway(t, http.StatusOK), Key: emulatorKey, Database: "birdsense"})
+// check runs Check with a deadline, so an SDK retry loop fails the test
+// instead of hanging it.
+func check(t *testing.T, endpoint string) error {
+	t.Helper()
+	c, err := New(Config{Endpoint: endpoint, Key: emulatorKey, Database: "birdsense"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := c.Check(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.Check(ctx)
+}
+
+func TestCheckWhenDatabaseExists(t *testing.T) {
+	if err := check(t, fakeGateway(t, http.StatusOK, http.StatusOK)); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 }
 
-func TestCheckReportsRejection(t *testing.T) {
-	c, err := New(Config{Endpoint: fakeGateway(t, http.StatusUnauthorized), Key: emulatorKey, Database: "birdsense"})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+// Nothing creates the database yet, so "not found" is the normal answer from
+// a healthy emulator.
+func TestCheckWhenDatabaseNotCreatedYet(t *testing.T) {
+	if err := check(t, fakeGateway(t, http.StatusOK, http.StatusNotFound)); err != nil {
+		t.Fatalf("Check: %v, want nil for a database that does not exist yet", err)
 	}
-	err = c.Check(context.Background())
+}
+
+func TestCheckReportsRejection(t *testing.T) {
+	err := check(t, fakeGateway(t, http.StatusUnauthorized, http.StatusUnauthorized))
 	if err == nil {
 		t.Fatal("Check on a rejecting account = nil, want an error")
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Errorf("Check error = %v, want it to mention the 401", err)
+	}
+}
+
+// An endpoint that 404s everything is not a Cosmos gateway, and its 404 must
+// not pass for "database not created yet".
+func TestCheckRejectsEndpointThatIsNotCosmos(t *testing.T) {
+	if err := check(t, fakeGateway(t, http.StatusNotFound, http.StatusNotFound)); err == nil {
+		t.Fatal("Check against an endpoint whose account read 404s = nil, want an error")
 	}
 }
 

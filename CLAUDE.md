@@ -150,6 +150,15 @@ is Postgres exiting with SIGILL (exit 132) straight after its first log line,
 and an emulator that never reports ready. Check the CPU before bumping the tag,
 and rename the data volume with it.
 
+Gotcha: the emulator's `GATEWAY_PUBLIC_ENDPOINT` must be `cosmos`, the name the
+app dials. The Cosmos SDK reads the account first and then sends every request
+to the address the account advertises, which defaults to `localhost` — inside
+the app's container, that is the app. The SDK's own failover retries (separate
+from the azcore retries `internal/cosmos` turns off) then spin until the
+deadline, so the symptom is `read database "birdsense": context deadline
+exceeded` in `/api/v1/health`, not a connection error. The same applies to any
+future endpoint: what the account advertises has to be reachable from the app.
+
 Gotcha: `/api/v1/health` is *liveness*, not readiness. It answers 200 whenever
 the process can serve HTTP — the frontend and the public page do not need a
 database — and reports a dependency that is down as `"status": "degraded"` with

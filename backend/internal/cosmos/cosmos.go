@@ -11,9 +11,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 )
@@ -92,23 +94,49 @@ func (c *Client) Database() string { return c.cfg.Database }
 // Name identifies this dependency in the health response.
 func (c *Client) Name() string { return "cosmos" }
 
-// Check confirms the account answers an authenticated read. Listing databases
-// is the one useful read that works before anything has been created: it needs
-// no database, no container, and creates nothing.
+// Check confirms the account answers an authenticated read. It reads the
+// configured database's metadata, and "not found" counts as success: the
+// account answered and accepted the key, and the database has simply not been
+// created yet -- which is the state of things until DATA-MODEL.md is built.
 //
-// Once the containers from DATA-MODEL.md exist, this should become a metadata
-// read on one of them -- that also proves the schema we expect is there, which
-// listing databases does not.
+// It is a point read rather than a query on purpose. The emulator this project
+// is pinned to answers a query over /dbs with "Have not implemented Query on
+// Database", while reading one database works there and on Azure alike. Once
+// the containers exist, this should read one of them instead, so a missing
+// schema shows up here rather than on the first real request.
 func (c *Client) Check(ctx context.Context) error {
-	// A probe wants a verdict, not persistence. Left to the SDK's default three
-	// retries with backoff, "nothing is listening" takes about ten seconds to
-	// say, which is ten seconds of startup or of a held-open health request.
+	// A probe wants a verdict, not persistence. This turns off azcore's generic
+	// retries (three, with backoff), so an endpoint with nothing listening says
+	// so at once instead of after about ten seconds.
+	//
+	// It does not turn off azcosmos's own failover retries. The SDK reads the
+	// account first and then sends every request to the address the account
+	// advertises; if this process cannot reach that address -- the emulator
+	// advertising "localhost" is the usual way -- it retries there until ctx
+	// expires, and all that surfaces is "context deadline exceeded". See
+	// GATEWAY_PUBLIC_ENDPOINT in docker-compose.yml.
 	ctx = policy.WithRetryOptions(ctx, policy.RetryOptions{MaxRetries: -1})
 
-	// One page is enough; we care that the account answered, not what it said.
-	pager := c.az.NewQueryDatabasesPager("SELECT * FROM root r", nil)
-	if _, err := pager.NextPage(ctx); err != nil {
-		return fmt.Errorf("list databases: %w", err)
+	db, err := c.az.NewDatabase(c.cfg.Database)
+	if err != nil {
+		return fmt.Errorf("database %q: %w", c.cfg.Database, err)
 	}
-	return nil
+	_, err = db.Read(ctx, nil)
+	if err == nil || isDatabaseNotFound(err, c.cfg.Database) {
+		return nil
+	}
+	return fmt.Errorf("read database %q: %w", c.cfg.Database, err)
+}
+
+// isDatabaseNotFound reports whether err is a 404 for the database itself.
+// The path matters: the SDK reads the account at "/" before anything else, and
+// an endpoint that is not a Cosmos gateway at all can 404 that request too.
+// Only a 404 for /dbs/<name> means "reachable, just not created yet".
+func isDatabaseNotFound(err error, database string) bool {
+	var respErr *azcore.ResponseError
+	if !errors.As(err, &respErr) || respErr.StatusCode != http.StatusNotFound || respErr.RawResponse == nil {
+		return false
+	}
+	req := respErr.RawResponse.Request
+	return req != nil && strings.TrimSuffix(req.URL.Path, "/") == "/dbs/"+database
 }

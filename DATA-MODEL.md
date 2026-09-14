@@ -321,6 +321,15 @@ Worth knowing:
   not have (see `docker-compose.yml`). Treat a feature that is missing locally
   as a possible emulator gap before treating it as a modeling problem, and
   confirm against a real account.
+- **What the pinned emulator cannot do.** Confirmed by running it: a SQL
+  query over databases fails with "Have not implemented Query on Database",
+  which is why `internal/cosmos` reads one database rather than listing them.
+  Likely, from reading its gateway rather than exercising it: no hierarchical
+  partition keys (nothing in it mentions `MultiHash`), no `If-Match`
+  optimistic concurrency, and no patch filter predicate. Those are the
+  `detections` partition key, the concurrent-reviewer guard and monotonic
+  `RecordProgress` above. Try each against the emulator before building on it,
+  and test whatever it refuses against a real account.
 - **RU charges reported locally are not Azure's.** Never tune throughput or
   indexing against emulator numbers.
 - **Hierarchical partition keys are supported by the SDK** (`MultiHash`,

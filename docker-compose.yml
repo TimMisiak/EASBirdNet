@@ -68,6 +68,15 @@ services:
           /home/cosmosdev/docker_entrypoint.sh
     environment:
       PROTOCOL: http
+      # The address the emulator tells clients to use. The SDK reads the account
+      # first and then sends every request wherever this points, so it must be
+      # the name the app reaches the emulator by. Left at its default,
+      # "localhost", the app's requests go back to the app's own container and
+      # the SDK retries until its deadline: `/api/v1/health` shows `read
+      # database "birdsense": context deadline exceeded` rather than a
+      # connection error.
+      # A bare host is right; the emulator adds the protocol and port 8081.
+      GATEWAY_PUBLIC_ENDPOINT: cosmos
       # The Data Explorer would be served on 1234, but only one host port is
       # assigned to this project and the app owns it -- so it would be
       # unreachable, and it costs a Node process to run. To browse the data by
