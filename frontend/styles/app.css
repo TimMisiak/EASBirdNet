@@ -3,40 +3,100 @@
  * Custom properties pierce shadow DOM, so these tokens are how components stay
  * visually consistent: every component styles itself with var(--bs-*) and never
  * hard-codes a color or spacing value. Component-specific rules live inside the
- * component's own <style>, not here. */
+ * component's own <style>, not here.
+ *
+ * The palette is a field-notebook one: paper and ink, forest green for
+ * structure, amber for anything that asks the volunteer to act. */
 
 :root {
-  color-scheme: light dark;
+  /* The design has one look, deliberately: paper. No dark variant. */
+  color-scheme: light;
 
-  --bs-bg: #fbfaf7;
+  /* Paper and ink */
+  --bs-bg: #f7f5ef;
+  --bs-bg-deep: #e8e5dc;
   --bs-surface: #ffffff;
-  --bs-border: #e3ded3;
-  --bs-text: #1e1c18;
-  --bs-text-muted: #6b6558;
-  --bs-accent: #2f6b4f;
-  --bs-accent-soft: #e6f0e9;
+  --bs-surface-sunk: #f1efe8;
+  --bs-surface-band: #efede4;
+  --bs-field: #fdfcf8;
 
+  --bs-border: #dfdcd1;
+  --bs-border-strong: #c9c5b8;
+  --bs-rule: #e7e4da;
+  --bs-track: #e3e0d6;
+
+  --bs-text: #1c201b;
+  --bs-text-soft: #3c4239;
+  --bs-text-body: #4a5145;
+  --bs-text-quiet: #5a604f;
+  --bs-text-muted: #6c7268;
+
+  /* Forest: mastheads, primary buttons, confirmed things */
+  --bs-forest: #23402f;
+  --bs-forest-hover: #2f5039;
+  --bs-forest-edge: #16281d;
+  --bs-on-forest: #f0efe6;
+  --bs-on-forest-nav: #e6e4d8;
+  --bs-on-forest-body: #d5d8cc;
+  --bs-on-forest-muted: #a9b3a3;
+
+  /* Amber: the accent, and every call to action */
+  --bs-amber: #c9852b;
+  --bs-amber-hover: #e0a03a;
+  --bs-amber-ink: #8a5a18;
+  --bs-amber-edge: #7a5514;
+  --bs-amber-track: #e3d6b8;
+
+  /* Parchment: advisory panels that aren't warnings */
+  --bs-parchment: #efe9da;
+  --bs-parchment-border: #dfd5be;
+  --bs-notice: #fbf3e0;
+  --bs-notice-border: #c9ae77;
+  --bs-notice-text: #4a3d20;
+
+  /* Status chips */
+  --bs-chip-done-bg: #e4ede4;
+  --bs-chip-done-border: #a9c2ac;
+  --bs-chip-done-text: #23402f;
+  --bs-chip-progress-bg: #fbf3e0;
+  --bs-chip-progress-border: #c9ae77;
+  --bs-chip-progress-text: #7a5514;
+  --bs-chip-processing-bg: #eae7f0;
+  --bs-chip-processing-border: #b7afc9;
+  --bs-chip-processing-text: #463a63;
+  --bs-chip-attention-bg: #f6e3dc;
+  --bs-chip-attention-border: #d3a894;
+  --bs-chip-attention-text: #7a3b22;
+
+  --bs-link: #8a5a18;
+  --bs-link-hover: #23402f;
+  --bs-focus: #23402f;
+
+  /* Spacing. The design works on a 4px grid; these are the steps it uses. */
   --bs-space-1: 0.25rem;
   --bs-space-2: 0.5rem;
-  --bs-space-3: 1rem;
-  --bs-space-4: 1.5rem;
-  --bs-space-5: 2.5rem;
+  --bs-space-3: 0.75rem;
+  --bs-space-4: 1rem;
+  --bs-space-5: 1.375rem;
+  --bs-space-6: 2rem;
+  --bs-space-7: 2.75rem;
+  --bs-space-8: 4.25rem;
 
-  --bs-radius: 10px;
-  --bs-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --bs-measure: 62rem;
+  /* Controls are near-square; only pills are round. */
+  --bs-radius: 2px;
+  --bs-radius-pill: 999px;
+
+  --bs-font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bs-font-display: Newsreader, Georgia, "Times New Roman", serif;
+  --bs-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Two content widths: the public page runs a little wider than the app. */
+  --bs-measure: 1120px;
+  --bs-measure-wide: 1180px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bs-bg: #14171a;
-    --bs-surface: #1c2024;
-    --bs-border: #2e343a;
-    --bs-text: #eceae5;
-    --bs-text-muted: #9aa2a8;
-    --bs-accent: #7cc9a0;
-    --bs-accent-soft: #223029;
-  }
+* {
+  box-sizing: border-box;
 }
 
 body {
@@ -45,4 +105,12 @@ body {
   color: var(--bs-text);
   font-family: var(--bs-font);
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Keyboard focus has to be visible through every shadow root, and the default
+ * ring disappears against forest green. */
+:focus-visible {
+  outline: 2px solid var(--bs-focus);
+  outline-offset: 2px;
 }

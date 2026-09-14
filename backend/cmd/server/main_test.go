@@ -25,7 +25,8 @@ func TestRoutesCoexist(t *testing.T) {
 		want int
 	}{
 		{"/api/v1/health", http.StatusOK},
-		{"/api/v1/detections", http.StatusOK},
+		{"/api/v1/public/overview", http.StatusOK},
+		{"/api/v1/uploads", http.StatusUnauthorized},
 		{"/api/v1/nope", http.StatusNotFound},
 		{"/", http.StatusOK},
 		{"/stations/mercer-slough", http.StatusOK},

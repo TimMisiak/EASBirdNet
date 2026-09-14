@@ -16,9 +16,16 @@ Node runtime, and no separate deploy for the UI.
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
 │   └── js/
-│       ├── main.js     Imports every component so they self-register
-│       ├── api.js      fetch wrapper for /api/v1
-│       └── components/ One custom element per file, plus base-element.js
+│       ├── main.js         Imports every component so they self-register
+│       ├── api.js          fetch wrapper for /api/v1
+│       ├── router.js       History router; in-app links, guards live in <bs-app>
+│       ├── session.js       Who is signed in, shared by every component
+│       ├── shared-styles.js Constructable stylesheets for repeated primitives
+│       ├── format.js        Dates, sizes, counts, durations
+│       ├── upload-flow.js   The SD-card upload, which spans four routes
+│       ├── card-scan.js     Reads a card folder into a night-by-night manifest
+│       ├── upload-status.js Card status -> chip colour and wording
+│       └── components/      One custom element per file, plus base-element.js
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
 └── docker-compose.yml
 ```
@@ -38,6 +45,10 @@ until we actually need a dependency.
 *Revisit when:* we need an npm dependency, or asset fingerprinting for
 long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
+The one thing not served from this repo is the webfonts (Newsreader, IBM Plex
+Sans/Mono), linked from Google Fonts in `index.html`. Every rule names a real
+fallback, so a container with no outbound network renders in system fonts rather
+than breaking. Self-host them if that trade stops being worth it.
 
 **Go backend, static content included.** `internal/web` mounts the frontend at
 `/` as the catch-all; `internal/api` claims `/api/v1/`. Unmatched paths under
@@ -54,6 +65,46 @@ setting (`BIRDSENSE_STATIC_DIR`), so editing a file in `frontend/` and hitting
 reload shows the change without recompiling Go. The container gets
 self-containment from `COPY frontend/`, not from embedding.
 *Revisit when:* we want a single distributable binary outside Docker.
+
+**The API is the same shape the real one will be.** Routes, methods and JSON
+shapes are settled; only what is behind them is temporary (see *State of the
+code*). Public data is separated from everything else at the route level, so the
+landing page never needs a session:
+
+```
+GET    /api/v1/health
+GET    /api/v1/public/overview?days=      program stats + confirmed species
+GET    POST DELETE /api/v1/session        who you are; sign in; sign out
+GET    /api/v1/stations                   recorders in the field
+GET    POST /api/v1/uploads               your cards; register a card
+GET    /api/v1/uploads/{reference}
+POST   /api/v1/uploads/{reference}/progress
+GET    /api/v1/admin/uploads              every card, admin only
+GET    POST /api/v1/admin/people          the roster
+POST   /api/v1/admin/stations
+```
+
+A card belongs to a volunteer: `/uploads/{ref}` 404s for anyone else, and the
+`/admin/*` routes 403 for a volunteer. Card counts only ever move forward in
+`RecordProgress`, so a retried batch is harmless and a client can't walk a
+card's progress backwards.
+
+**Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
+`/admin/people`. `internal/web` already falls back to index.html for
+extension-less paths, so a reload mid-wizard lands on the same screen, and a
+coordinator can send a colleague a link to one admin tab. `js/router.js` is the
+whole router; `<bs-app>` holds the route table and the two guards (signed in,
+and admin for `/admin/*`). Guards are convenience only -- the API enforces the
+same rules, so guessing a path gets you a 401 or 403, not data.
+
+**Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
+`CSSStyleSheet` objects for the primitives that appear on nearly every screen
+(buttons, tables, form fields, panels); a component adopts what it needs via
+`static styles`. Gotcha: `adoptedStyleSheets` are ordered *after* a shadow
+root's own `<style>`, so an unlayered shared rule silently beats the component
+that adopted it. Every shared sheet is therefore wrapped in
+`@layer bs-base { ... }`, because unlayered rules outrank every layer -- what a
+component writes for itself always wins.
 
 **Standard library only.** `net/http` with Go 1.22+ method-and-path patterns
 (`"GET /api/v1/health"`) covers routing; `log/slog` covers logging. No router,

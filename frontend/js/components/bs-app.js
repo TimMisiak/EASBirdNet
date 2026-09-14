@@ -1,49 +1,108 @@
 import { BaseElement } from "./base-element.js";
+import { navigate, onNavigate, path } from "../router.js";
+import * as session from "../session.js";
+import "./bs-site-header.js";
+import "./bs-site-footer.js";
+import "./bs-app-header.js";
+import "./bs-upload-steps.js";
 
 /**
- * <bs-app> is the page shell: masthead, main content, footer. It owns layout
- * only -- data fetching belongs to the components that display the data.
+ * <bs-app> is the shell: it picks the page for the current route, wraps it in
+ * the right chrome, and keeps anyone who isn't signed in out of the app.
+ *
+ * Routes are grouped by chrome rather than by feature -- the public pages get
+ * the masthead and footer, everything behind sign-in gets the app header.
  */
+const ROUTES = [
+  { path: "/", tag: "bs-home-page", chrome: "public" },
+  { path: "/signin", tag: "bs-signin-page", chrome: "bare" },
+  { path: "/app", tag: "bs-volunteer-home", chrome: "app", auth: true },
+  { path: "/app/upload", tag: "bs-upload-details", chrome: "app", auth: true, step: 1 },
+  { path: "/app/upload/check", tag: "bs-upload-check", chrome: "app", auth: true, step: 2 },
+  { path: "/app/upload/progress", tag: "bs-upload-progress", chrome: "app", auth: true, step: 3 },
+  { path: "/app/upload/done", tag: "bs-upload-done", chrome: "app", auth: true, step: 4 },
+  { path: "/admin", redirect: "/admin/people" },
+  { path: "/admin/people", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/recorders", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/uploads", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+];
+
 class BirdsenseApp extends BaseElement {
+  #route = null;
+
+  connectedCallback() {
+    super.connectedCallback();
+    onNavigate(() => this.render());
+    session.onChange(() => this.render());
+    session.load();
+  }
+
   render() {
+    if (!session.isLoaded()) {
+      // Routing before the session is known would bounce a signed-in volunteer
+      // to /signin for a frame. Hold the frame instead.
+      this.shadowRoot.innerHTML = `<style>:host{display:block;min-height:100vh;background:var(--bs-bg);}</style>`;
+      return;
+    }
+
+    const route = ROUTES.find((r) => r.path === path());
+
+    if (route?.redirect) return navigate(route.redirect, { replace: true });
+    if (route?.auth && !session.isSignedIn()) return navigate("/signin", { replace: true });
+    if (route?.admin && !session.isAdmin()) return navigate("/app", { replace: true });
+
+    this.#route = route;
     this.shadowRoot.innerHTML = `
       <style>
-        :host {
-          display: block;
+        :host { display: flex; flex-direction: column; min-height: 100vh; }
+        main.app {
+          flex: 1;
+          width: 100%;
           max-width: var(--bs-measure);
           margin: 0 auto;
-          padding: var(--bs-space-4) var(--bs-space-3) var(--bs-space-5);
+          padding: var(--bs-space-7) var(--bs-space-6) var(--bs-space-8);
         }
-        header {
-          border-bottom: 1px solid var(--bs-border);
-          padding-bottom: var(--bs-space-3);
-          margin-bottom: var(--bs-space-4);
+        main.public { flex: 1; }
+        .missing {
+          flex: 1;
+          display: grid;
+          place-content: center;
+          gap: var(--bs-space-4);
+          text-align: center;
+          padding: var(--bs-space-8) var(--bs-space-4);
         }
-        h1 {
-          margin: 0;
-          font-size: 1.6rem;
-          letter-spacing: -0.01em;
-        }
-        p {
-          margin: var(--bs-space-1) 0 0;
-          color: var(--bs-text-muted);
-        }
-        footer {
-          margin-top: var(--bs-space-5);
-          padding-top: var(--bs-space-3);
-          border-top: 1px solid var(--bs-border);
-          color: var(--bs-text-muted);
-          font-size: 0.85rem;
+        .missing h1 { font-family: var(--bs-font-display); font-weight: 400; font-size: 2rem; margin: 0; }
+        @media (max-width: 720px) {
+          main.app { padding: var(--bs-space-5) var(--bs-space-4) var(--bs-space-7); }
         }
       </style>
-      <header>
-        <h1>Birdsense</h1>
-        <p>Bird calls heard at Eastside Audubon listening stations.</p>
-      </header>
-      <main>
-        <bs-detection-list></bs-detection-list>
-      </main>
-      <footer>Eastside Audubon Society</footer>
+      ${this.#chrome(route)}
+    `;
+  }
+
+  #chrome(route) {
+    if (!route) {
+      return `
+        <bs-site-header></bs-site-header>
+        <div class="missing">
+          <h1>That page isn't here.</h1>
+          <p><a href="/">Back to the detections page</a></p>
+        </div>
+        <bs-site-footer></bs-site-footer>
+      `;
+    }
+    if (route.chrome === "bare") return `<${route.tag}></${route.tag}>`;
+    if (route.chrome === "public") {
+      return `
+        <bs-site-header></bs-site-header>
+        <main class="public"><${route.tag}></${route.tag}></main>
+        <bs-site-footer></bs-site-footer>
+      `;
+    }
+    return `
+      <bs-app-header></bs-app-header>
+      ${route.step ? `<bs-upload-steps step="${route.step}"></bs-upload-steps>` : ""}
+      <main class="app"><${route.tag}></${route.tag}></main>
     `;
   }
 }
