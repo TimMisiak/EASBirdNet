@@ -453,6 +453,7 @@ What the write routes do to documents:
 | `GET /stations`, `GET /admin/people`, `GET /dev/people` | Leave out retired recorders and removed users. |
 | `POST /session` | Sets `lastSignInAt`. A removed user can't sign in, and their open session stops working. |
 | `POST /uploads` | Creates the upload, and a `pending` audio file for each file listed. The list has to add up to `nights`. If that id exists and is the caller's, it is a resume: `notes` are replaced and the `recorder`/`userName` copies are kept. If the card is already received, the same list (paths and sizes) answers the card as it is, and a different list is a 409: it is another card with that recorder and pull date. If the card was still transferring, `nights` and the totals are replaced too, `status` goes back to `in_progress`, and the audio files are matched to the new list: a listed file already `uploaded` at the same size stays, other listed files are `pending`, and a file no longer listed becomes `failed`. The uploaded counts are then recounted. Someone else's card is a 409. Answers the card and its listed files. |
+| `GET /uploads/{ref}` | Answers the card and its listed files with their `status`, the same list `POST /uploads` answers. The browser checks a card chosen again against it before registering it. |
 | `POST /uploads/{ref}/progress` | Sets `status` to the client's `in_progress` or `interrupted`, only while the card is one of those. The client can't report counts. |
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
@@ -495,8 +496,7 @@ The file is read once at startup, held in memory and rewritten in full,
 atomically, after every change. It's fine to hand-edit it while the server
 is stopped. Delete it to start over. On startup, a database with no users,
 recorders or uploads is filled by `internal/devseed` with a placeholder program
-(six people, five recorders, nine cards, a few weeks of reviewed detections),
-dated relative to that day. Setting `BIRDSENSE_BOOTSTRAP_ADMIN` in dev skips
+(six people and five recorders, no cards), dated relative to that day. Setting `BIRDSENSE_BOOTSTRAP_ADMIN` in dev skips
 that, because the roster is no longer empty. A file with a different `version` is
 refused rather than guessed at. Uploaded audio isn't in the file: it goes under
 `BIRDSENSE_STORAGE_DIR` (default `backend/data/audio`), at the blob names

@@ -214,6 +214,18 @@ func cardFileOf(f db.AudioFile) CardFile {
 	return CardFile{Path: f.Path, Bytes: f.SizeBytes, Night: f.Night, Status: f.Status}
 }
 
+// cardFilesOf is a card's list as it was last read off the card: every file
+// but those taken off it when the card was registered again.
+func cardFilesOf(stored []db.AudioFile) []CardFile {
+	out := []CardFile{}
+	for _, f := range stored {
+		if f.StatusDetail != db.AudioDetailNotOnCard {
+			out = append(out, cardFileOf(f))
+		}
+	}
+	return out
+}
+
 func mapAll[T, U any](in []T, f func(T) U) []U {
 	out := make([]U, len(in))
 	for i, v := range in {

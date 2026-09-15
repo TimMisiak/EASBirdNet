@@ -225,9 +225,10 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 	}
 }
 
-// A fresh dev database is seeded, so the sign-in picker, the volunteer's cards
-// and the landing page all have something on them -- unless a bootstrap admin
-// got there first, which is how to start dev from a clean roster.
+// A fresh dev database is seeded, so the sign-in picker and the upload form
+// have people and recorders on them -- unless a bootstrap admin got there
+// first, which is how to start dev from a clean roster. Cards only come from
+// real uploads.
 func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 	ctx := t.Context()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -260,16 +261,17 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 		}
 		return rec.Body.String()
 	}
-	if body := get("/api/v1/public/overview", nil); !strings.Contains(body, `"scientificName"`) {
-		t.Errorf("overview after seeding = %s; want confirmed species", body)
-	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(`{"role":"volunteer"}`)))
 	if rec.Code != http.StatusOK || len(rec.Result().Cookies()) == 0 {
 		t.Fatalf("sign in as a volunteer = %d (%s)", rec.Code, rec.Body)
 	}
-	if body := get("/api/v1/uploads", rec.Result().Cookies()[0]); !strings.Contains(body, `"reference"`) {
-		t.Errorf("volunteer's cards = %s; want some", body)
+	cookie := rec.Result().Cookies()[0]
+	if body := get("/api/v1/stations", cookie); !strings.Contains(body, `"SW-01"`) {
+		t.Errorf("stations after seeding = %s; want the placeholder recorders", body)
+	}
+	if body := get("/api/v1/uploads", cookie); strings.Contains(body, `"reference"`) {
+		t.Errorf("volunteer's cards = %s; want none seeded", body)
 	}
 	if users, _ := store.ListUsers(ctx); len(users) != 6 {
 		t.Errorf("starting twice left %d people, want the 6 seeded once", len(users))

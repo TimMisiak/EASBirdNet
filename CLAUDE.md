@@ -109,7 +109,7 @@ GET    /api/v1/public/overview?days=      program stats + confirmed species
 GET    POST DELETE /api/v1/session        who you are; sign in; sign out
 GET    /api/v1/stations                   recorders in the field
 GET    POST /api/v1/uploads               your cards; register a card and its files
-GET    /api/v1/uploads/{reference}
+GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
@@ -279,9 +279,10 @@ override with `BIRDSENSE_LOCAL_DB_PATH`), and uploaded audio under
 `backend/data/audio` (`BIRDSENSE_STORAGE_DIR`), at the names it would have in
 Blob Storage. There is no sample card: to try an upload, point the folder
 picker at any folder with a few `.wav` files in it. When that file is empty, startup fills
-it with the placeholder program from `internal/devseed`: people to sign in as,
-recorders, cards in every state, recent detections. Dates are relative to the
-day it was seeded, so delete the file to re-seed once it has gone stale. Without
+it with the placeholder program from `internal/devseed`: people to sign in as
+and recorders. It seeds no cards or detections, so the card lists and the landing
+page stay empty until you upload a card and BirdNET runs over it. Delete the file
+to re-seed. Without
 `BIRDSENSE_DB=local` the server expects Cosmos DB (`BIRDSENSE_COSMOS_ENDPOINT`,
 `BIRDSENSE_COSMOS_DATABASE`) and Blob Storage (`BIRDSENSE_BLOB_ENDPOINT`,
 `BIRDSENSE_BLOB_CONTAINER`), and exits if they aren't configured.

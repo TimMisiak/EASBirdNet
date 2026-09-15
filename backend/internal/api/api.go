@@ -420,13 +420,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		out := []CardFile{}
-		for _, f := range stored {
-			if f.StatusDetail != db.AudioDetailNotOnCard {
-				out = append(out, cardFileOf(f))
-			}
-		}
-		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u), "files": out})
+		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u), "files": cardFilesOf(stored)})
 	}
 }
 
@@ -571,15 +565,23 @@ func canSee(me db.User, u db.Upload) bool {
 	return me.Role == db.RoleAdmin || u.UserID == me.ID
 }
 
+// getUpload is one card with the files on its list and where each stands, so a
+// volunteer finishing a card can be told which files it already has before the
+// card is registered again.
 func (h *handlers) getUpload(w http.ResponseWriter, r *http.Request, me db.User) {
-	u, err := h.store.GetUpload(r.Context(), r.PathValue("reference"))
+	ctx := r.Context()
+	u, err := h.store.GetUpload(ctx, r.PathValue("reference"))
+	var files []db.AudioFile
+	if err == nil && canSee(me, u) {
+		files, err = h.store.ListAudioFiles(ctx, u.ID)
+	}
 	switch {
 	case errors.Is(err, db.ErrNotFound) || (err == nil && !canSee(me, u)):
 		h.problem(w, http.StatusNotFound, "no such card")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u)})
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "files": cardFilesOf(files)})
 	}
 }
 

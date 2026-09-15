@@ -35,6 +35,7 @@ class SpeciesTable extends BaseElement {
         .stations, .last { font-size: 0.875rem; color: var(--bs-text-soft); }
         .last { white-space: nowrap; }
         .sub { display: none; }
+        .empty { color: var(--bs-text-muted); }
 
         @media (max-width: 760px) {
           thead, .nights, .stations, .last { display: none; }
@@ -66,7 +67,11 @@ class SpeciesTable extends BaseElement {
             </tr>
           </thead>
           <tbody>
-            ${this.#species.map(row).join("")}
+            ${
+              this.#species.length
+                ? this.#species.map(row).join("")
+                : `<tr><td colspan="5" class="empty">Nothing confirmed in these nights yet.</td></tr>`
+            }
           </tbody>
         </table>
       </div>

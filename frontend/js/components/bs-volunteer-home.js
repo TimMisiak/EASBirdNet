@@ -29,7 +29,9 @@ class VolunteerHome extends BaseElement {
     return {
       resume: async (el) => {
         await flow.adopt(el.dataset.reference);
-        navigate("/app/upload/progress");
+        // A card this tab is already sending carries on where it is. Any other
+        // needs the card chosen again, so the server can say what's missing.
+        navigate(flow.get().files.length ? "/app/upload/progress" : "/app/upload");
       },
       start: () => {
         flow.reset();
@@ -82,6 +84,13 @@ class VolunteerHome extends BaseElement {
            narrow screen the table scrolls inside its own box instead. */
         td, th { padding-top: 0.9375rem; padding-bottom: 0.9375rem; white-space: nowrap; }
         td { font-size: 0.90625rem; }
+        /* An unfinished card's "Finish uploading" link covers its row. */
+        tbody tr { position: relative; }
+        tbody tr[data-unfinished]:hover { background: var(--bs-surface-sunk); }
+        .go { text-align: right; }
+        .go a { text-decoration: none; }
+        .go a::after { content: ""; position: absolute; inset: 0; }
+        tbody tr:hover .go a { text-decoration: underline; }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
         @media (max-width: 720px) {
           .callout, .new { padding: var(--bs-space-4); }
@@ -156,19 +165,27 @@ class VolunteerHome extends BaseElement {
               <th scope="col">Pulled</th>
               <th scope="col" style="text-align: right;">Nights</th>
               <th scope="col">Status</th>
+              <th scope="col" aria-label="Next step"></th>
             </tr>
           </thead>
           <tbody>
             ${uploads
               .map((u) => {
                 const chip = statusChip(u);
+                const unfinished = isUnfinished(u);
                 return `
-                  <tr>
+                  <tr ${unfinished ? "data-unfinished" : ""}>
                     <td class="ref">${escapeHTML(u.reference)}</td>
                     <td>${escapeHTML(u.stationName)}</td>
                     <td style="color: var(--bs-text-body);">${escapeHTML(longDate(u.pulledOn))}</td>
                     <td class="num">${u.nights?.length ?? 0}</td>
                     <td><bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip></td>
+                    <td class="go">${
+                      unfinished
+                        ? `<a href="/app/upload" data-action="resume"
+                              data-reference="${escapeHTML(u.reference)}">Finish uploading →</a>`
+                        : ""
+                    }</td>
                   </tr>`;
               })
               .join("")}

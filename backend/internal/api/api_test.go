@@ -514,6 +514,12 @@ func TestReRegisteringACardResumesIt(t *testing.T) {
 	if u := reg.Upload; u.Reference != "OWL-20260907-SR02" || u.FilesUploaded != 0 || u.Status != db.StatusInProgress || u.Notes != "second try" || len(reg.Files) != 336 {
 		t.Errorf("resumed card = %+v with %d files; want its 336 files, none in, in_progress, the new notes", u, len(reg.Files))
 	}
+	// Picking the card up again answers the same list, so the browser can check
+	// a folder against it before registering it.
+	got := decodeInto[registeredBody](t, do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260907-SR02", "", jane))
+	if len(got.Files) != len(reg.Files) || got.Files[0] != reg.Files[0] || got.Files[0].Status != db.AudioPending {
+		t.Errorf("card's files = %d, first %+v; want the %d registered, pending", len(got.Files), got.Files[0], len(reg.Files))
+	}
 
 	// A finished card stays finished, with the list it was sent with. A
 	// different list for its recorder and pull date is another card, and isn't

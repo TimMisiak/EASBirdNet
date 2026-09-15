@@ -53,6 +53,7 @@ export const fetchStations = () => get("/stations");
 
 /** The signed-in volunteer's own cards, newest first. */
 export const fetchMyUploads = () => get("/uploads");
+/** One of the volunteer's cards, and each file on its list with its status ({path, bytes, night, status}). */
 export const fetchUpload = (reference) => get(`/uploads/${encodeURIComponent(reference)}`);
 
 /**

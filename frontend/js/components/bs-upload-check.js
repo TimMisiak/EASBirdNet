@@ -19,10 +19,12 @@ class UploadCheck extends BaseElement {
   connectedCallback() {
     super.connectedCallback();
     this.#unsubscribe = flow.subscribe(() => this.render());
+    const over = () => navigate("/app/upload", { replace: true });
     flow.current().then((upload) => {
-      // Reloaded onto this URL with nothing in flight: start the step over.
-      if (!upload) navigate("/app/upload", { replace: true });
-    });
+      // Reloaded onto this URL, the tab no longer has the card's files: start
+      // the step over, which for a registered card means choosing it again.
+      if (!upload || !flow.get().files.length) over();
+    }, over);
   }
 
   disconnectedCallback() {
@@ -50,6 +52,7 @@ class UploadCheck extends BaseElement {
     const flagged = nights.filter((n) => n.flag).length;
     // A resumed card only has what's missing left to send.
     const remaining = upload.totalBytes - upload.bytesUploaded;
+    const already = upload.filesUploaded;
     const estimate = duration(flow.totalMinutes(remaining));
 
     this.shadowRoot.innerHTML = `
@@ -98,7 +101,11 @@ class UploadCheck extends BaseElement {
 
       <div class="stats">
         ${stat(count(nights.length), `nights · ${nightRange(nights)}`)}
-        ${stat(count(upload.fileCount), "audio files")}
+        ${
+          already
+            ? stat(count(upload.fileCount - already), `of ${count(upload.fileCount)} audio files left`)
+            : stat(count(upload.fileCount), "audio files")
+        }
         ${stat(byteSize(remaining), upload.bytesUploaded ? "left to upload" : "to upload")}
         ${stat(`~${estimate}`, `at a typical ${flow.assumedSpeed()}`)}
       </div>
@@ -142,6 +149,17 @@ class UploadCheck extends BaseElement {
             </div>
           </div>
           ${
+            already
+              ? `<div class="panel panel--parchment">
+                   <h3>Picking up where you left off</h3>
+                   <p>
+                     ${count(already)} of ${count(upload.fileCount)} files are already uploaded.
+                     We'll skip those and send the other ${count(upload.fileCount - already)}.
+                   </p>
+                 </div>`
+              : ""
+          }
+          ${
             flagged
               ? `<div class="panel panel--notice">
                    <p>
@@ -159,7 +177,7 @@ class UploadCheck extends BaseElement {
         <button class="btn btn--quiet btn--small" data-action="back">← Back</button>
         <span class="row" style="align-items: center; gap: var(--bs-space-5);">
           <span class="note">Keep the laptop awake and plugged in.</span>
-          <button class="btn btn--primary" data-action="start">Start upload →</button>
+          <button class="btn btn--primary" data-action="start">${already ? "Upload the rest →" : "Start upload →"}</button>
         </span>
       </div>
     `;

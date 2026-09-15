@@ -64,6 +64,13 @@ function initial() {
     stationId: "",
     pulledOn: today(),
     notes: "",
+    /**
+     * True when the card was picked up from the server ("Finish uploading" on
+     * the volunteer's cards, or a reload) rather than started in this tab. Its
+     * station and date are what make it that card, so step 1 only asks for the
+     * card again.
+     */
+    resuming: false,
     card: null,
     upload: null,
     /**
@@ -132,10 +139,10 @@ function registration(card) {
   };
 }
 
+const isStored = (f) => f.status === "uploaded" || f.status === "analyzed";
+
 function storedPaths(files) {
-  return new Set(
-    files.filter((f) => f.status === "uploaded" || f.status === "analyzed").map((f) => f.path),
-  );
+  return new Set(files.filter(isStored).map((f) => f.path));
 }
 
 /**
@@ -147,15 +154,21 @@ function storedPaths(files) {
 export async function adopt(reference) {
   if (state.upload?.reference === reference) return state.upload;
   const { upload } = await api.fetchUpload(reference);
+  // Picking up another card stops the one this tab is sending. Its files so
+  // far are safe, and a file part-way across resumes when it's chosen again.
+  const sending = state.status === "uploading" ? state.upload.reference : null;
   stop();
+  if (sending) report(sending, "interrupted");
   sessionStorage.setItem(KEY, reference);
+  const unfinished = isUnfinished(upload);
   set({
     ...initial(),
     upload,
     stationId: upload.stationId,
     pulledOn: upload.pulledOn,
     notes: upload.notes,
-    status: "interrupted",
+    resuming: unfinished,
+    status: unfinished ? "interrupted" : "done",
   });
   return upload;
 }
@@ -164,7 +177,31 @@ export async function adopt(reference) {
 export async function current() {
   if (state.upload) return state.upload;
   const reference = sessionStorage.getItem(KEY);
-  return reference ? adopt(reference) : null;
+  if (!reference) return null;
+  try {
+    return await adopt(reference);
+  } catch (error) {
+    // A card that's gone, or isn't this volunteer's, is nothing to pick up.
+    if (error.status !== 404) throw error;
+    sessionStorage.removeItem(KEY);
+    return null;
+  }
+}
+
+/** The card step 1 is finishing, or null when it's a new one. */
+export const resumingCard = () =>
+  state.resuming && state.upload && isUnfinished(state.upload) ? state.upload : null;
+
+/**
+ * The files the server already has for the card being finished that aren't on
+ * a freshly read card at the same path and size. Registering that card would
+ * take them off the card's list, so step 1 asks first. The usual cause is
+ * choosing a folder on the card instead of the card, which changes every path.
+ */
+export async function storedFilesMissingFrom(card) {
+  const { files } = await api.fetchUpload(state.upload.reference);
+  const onCard = new Map(card.files.map((f) => [f.path, f.bytes]));
+  return files.filter((f) => isStored(f) && onCard.get(f.path) !== f.bytes);
 }
 
 /** Send what's still to go -- including files that failed, which get another try. */

@@ -2,7 +2,6 @@ package devseed
 
 import (
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -29,75 +28,26 @@ func TestSeedFillsAnEmptyDatabaseOnce(t *testing.T) {
 	}
 	users, _ := s.ListUsers(ctx)
 	recorders, _ := s.ListRecorders(ctx)
+	if len(users) != len(roster) || len(recorders) != len(stations) {
+		t.Fatalf("seeded %d users, %d recorders", len(users), len(recorders))
+	}
+	// Cards come from real uploads, so every one has audio behind it.
 	uploads, _ := s.ListUploads(ctx, db.UploadFilter{})
 	detections, _ := s.ListDetections(ctx, db.DetectionFilter{})
-	if len(users) != len(roster) || len(recorders) != len(stations) || len(uploads) != len(cards) || len(detections) == 0 {
-		t.Fatalf("seeded %d users, %d recorders, %d uploads, %d detections", len(users), len(recorders), len(uploads), len(detections))
+	if len(uploads) != 0 || len(detections) != 0 {
+		t.Errorf("seeded %d uploads, %d detections; want none", len(uploads), len(detections))
+	}
+	for _, u := range users {
+		if u.CreatedAt.After(now) || (u.LastSignInAt != nil && u.LastSignInAt.After(now)) {
+			t.Errorf("%s: added or signed in in the future", u.Email)
+		}
 	}
 
 	if seeded, err := Seed(ctx, s, now.Add(time.Hour)); err != nil || seeded {
 		t.Errorf("seed again = %v, %v; want it left alone", seeded, err)
 	}
-	if again, _ := s.ListUploads(ctx, db.UploadFilter{}); len(again) != len(uploads) {
-		t.Errorf("seeding twice left %d uploads, want %d", len(again), len(uploads))
-	}
-}
-
-// The screens trust the data to hang together, so the seed has to.
-func TestSeedIsCoherent(t *testing.T) {
-	ctx := t.Context()
-	s := openTemp(t)
-	now := time.Date(2026, time.March, 9, 7, 30, 0, 0, time.UTC) // the morning after DST starts
-	if _, err := Seed(ctx, s, now); err != nil {
-		t.Fatal(err)
-	}
-
-	uploads, _ := s.ListUploads(ctx, db.UploadFilter{})
-	nights := map[string][]string{}
-	for _, u := range uploads {
-		if _, err := s.GetRecorder(ctx, u.RecorderID); err != nil {
-			t.Errorf("%s: recorder %s: %v", u.ID, u.RecorderID, err)
-		}
-		if user, err := s.GetUser(ctx, u.UserID); err != nil || user.Name != u.UserName {
-			t.Errorf("%s: user %s = %+v, %v", u.ID, u.UserID, user, err)
-		}
-		if u.ID != db.UploadID(u.PulledOn, u.RecorderID) {
-			t.Errorf("%s: id doesn't match pulledOn %s and recorder %s", u.ID, u.PulledOn, u.RecorderID)
-		}
-		files := 0
-		for _, n := range u.Nights {
-			files += n.Files
-			nights[u.ID] = append(nights[u.ID], n.Date)
-			if n.Date >= u.PulledOn {
-				t.Errorf("%s: night %s isn't before the card was pulled", u.ID, n.Date)
-			}
-		}
-		if files != u.FileCount || u.FilesUploaded > u.FileCount {
-			t.Errorf("%s: %d of %d files, nights add up to %d", u.ID, u.FilesUploaded, u.FileCount, files)
-		}
-		for _, at := range []*time.Time{&u.StartedAt, u.ReceivedAt, u.ProcessedAt, u.ResultsSentAt} {
-			if at != nil && at.After(now) {
-				t.Errorf("%s: timestamp %v is in the future", u.ID, at)
-			}
-		}
-	}
-
-	detections, _ := s.ListDetections(ctx, db.DetectionFilter{})
-	recent := 0
-	for _, d := range detections {
-		if !slices.Contains(nights[d.UploadID], d.Night) {
-			t.Errorf("%s: night %s isn't on card %s", d.ID, d.Night, d.UploadID)
-		}
-		if d.DetectedAt.After(now) || (d.Review != nil && d.Review.At.After(now)) {
-			t.Errorf("%s: heard or reviewed in the future", d.ID)
-		}
-		if d.ReviewStatus == db.ReviewConfirmed && d.DetectedAt.After(now.AddDate(0, 0, -7)) {
-			recent++
-		}
-	}
-	// The landing page's default window has something in it.
-	if recent == 0 {
-		t.Error("no confirmed detections in the last 7 days")
+	if again, _ := s.ListUsers(ctx); len(again) != len(users) {
+		t.Errorf("seeding twice left %d users, want %d", len(again), len(users))
 	}
 }
 

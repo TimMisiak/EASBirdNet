@@ -258,7 +258,7 @@ func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.
 		return fmt.Errorf("seeding the dev database: %w", err)
 	}
 	if seeded {
-		log.Info("seeded an empty dev database with placeholder people, recorders and cards", "path", cfg.DB.LocalPath)
+		log.Info("seeded an empty dev database with placeholder people and recorders", "path", cfg.DB.LocalPath)
 	}
 	return nil
 }
