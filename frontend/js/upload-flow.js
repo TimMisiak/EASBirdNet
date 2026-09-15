@@ -105,7 +105,8 @@ export async function registerCard(card) {
   set({
     card,
     upload,
-    status: "ready",
+    // The same card chosen again after it was received: nothing left to send.
+    status: isUnfinished(upload) ? "ready" : "done",
     error: null,
     files: card.files.map((f) =>
       stored.has(f.path)
@@ -417,6 +418,9 @@ export const minutesElapsed = () => (elapsedMs + (runningSince ? Date.now() - ru
 export const totalMinutes = (bytes) => bytes / (ASSUMED_BYTES_PER_SECOND * 60);
 export const assumedSpeed = () => `${ASSUMED_MBPS} Mb/s`;
 
-function today() {
-  return new Date().toISOString().slice(0, 10);
+/** Today's date where the volunteer is. toISOString's is UTC's, a day ahead every evening in Pacific time. */
+export function today() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

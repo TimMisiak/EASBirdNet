@@ -11,8 +11,8 @@ export function gigabytes(bytes, digits = 1) {
   return `${((bytes ?? 0) / 1e9).toFixed(digits)} GB`;
 }
 
-/** "383 MB" or "1.2 GB" -- one file, where decimal GB alone would read "0.4 GB". */
-export function fileSize(bytes) {
+/** "383 MB" or "1.2 GB" -- a file or a card, where decimal GB alone would read "0.4 GB", or "0.0 GB" for a few recordings. */
+export function byteSize(bytes) {
   const b = bytes ?? 0;
   if (b >= 1e9) return gigabytes(b);
   return b >= 1e7 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e6).toFixed(1)} MB`;

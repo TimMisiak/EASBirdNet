@@ -515,10 +515,15 @@ func TestReRegisteringACardResumesIt(t *testing.T) {
 		t.Errorf("resumed card = %+v with %d files; want its 336 files, none in, in_progress, the new notes", u, len(reg.Files))
 	}
 
-	// A finished card stays finished, with the list it was sent with.
+	// A finished card stays finished, with the list it was sent with. A
+	// different list for its recorder and pull date is another card, and isn't
+	// answered with this one's counts.
 	rec = do(t, mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-02", "2026-01-01", "", "2025-12-30", 1, 3), jane)
-	if u := decodeInto[registeredBody](t, rec).Upload; rec.Code != http.StatusCreated || u.Status != db.StatusResultsSent || u.FileCount != 48 {
-		t.Errorf("re-register a sent card = %d, %+v; want it left results_sent with 48 files", rec.Code, u)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("register a different card over a sent one = %d (%s), want %d", rec.Code, rec.Body, http.StatusConflict)
+	}
+	if u := decodeInto[uploadBody](t, do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260101-SR02", "", jane)).Upload; u.Status != db.StatusResultsSent || u.FileCount != 48 {
+		t.Errorf("sent card after a refused re-register = %+v; want it left results_sent with 48 files", u)
 	}
 
 	// Someone else's card isn't theirs to take over.

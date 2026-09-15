@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, typography } from "../shared-styles.js";
-import { count, gigabytes, longDate, nightRange } from "../format.js";
+import { byteSize, count, longDate, nightRange } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 
@@ -87,7 +87,7 @@ class UploadDone extends BaseElement {
           ${entry("Station", upload.stationName)}
           ${entry("Recorder", upload.stationId)}
           ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
-          ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${gigabytes(upload.totalBytes)}`)}
+          ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
           ${entry("Card pulled", longDate(upload.pulledOn))}
           ${upload.notes ? entry("Your note", `“${upload.notes}”`) : ""}
         </dl>

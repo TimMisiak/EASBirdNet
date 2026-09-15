@@ -1,6 +1,6 @@
 import { escapeHTML } from "./base-element.js";
 import { reset } from "../shared-styles.js";
-import { fileSize } from "../format.js";
+import { byteSize } from "../format.js";
 import "./bs-progress-bar.js";
 
 /**
@@ -51,7 +51,7 @@ class UploadFileList extends HTMLElement {
         <li class="file" data-state="${escapeHTML(f.state)}">
           <span class="dot" aria-hidden="true"></span>
           <span class="name" title="${escapeHTML(f.path)}">${escapeHTML(f.path)}</span>
-          <span class="size">${escapeHTML(fileSize(f.bytes))}</span>
+          <span class="size">${escapeHTML(byteSize(f.bytes))}</span>
           <bs-progress-bar size="thin" value="0" label="${escapeHTML(f.path)}"></bs-progress-bar>
           <span class="state"></span>
           <span class="why"></span>

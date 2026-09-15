@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { count, duration, gigabytes, longDate, nightRange, shortDate } from "../format.js";
+import { byteSize, count, duration, longDate, nightRange, shortDate } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 import * as session from "../session.js";
@@ -99,7 +99,7 @@ class UploadCheck extends BaseElement {
       <div class="stats">
         ${stat(count(nights.length), `nights · ${nightRange(nights)}`)}
         ${stat(count(upload.fileCount), "audio files")}
-        ${stat(gigabytes(remaining), upload.bytesUploaded ? "left to upload" : "to upload")}
+        ${stat(byteSize(remaining), upload.bytesUploaded ? "left to upload" : "to upload")}
         ${stat(`~${estimate}`, `at a typical ${flow.assumedSpeed()}`)}
       </div>
 
@@ -176,7 +176,7 @@ function nightRow(night) {
     <tr data-flagged="${Boolean(night.flag)}">
       <td>${escapeHTML(shortDate(night.date))}</td>
       <td class="num" style="font-size: 0.8125rem;">${count(night.files)}</td>
-      <td class="num muted" style="font-size: 0.8125rem;">${gigabytes(night.bytes)}</td>
+      <td class="num muted" style="font-size: 0.8125rem;">${byteSize(night.bytes)}</td>
       <td class="check">${escapeHTML(REASONS[night.flag] ?? "✓ looks normal")}</td>
     </tr>
   `;

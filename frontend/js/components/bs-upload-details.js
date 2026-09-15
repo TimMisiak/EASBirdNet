@@ -62,7 +62,7 @@ class UploadDetails extends BaseElement {
         throw new Error("No audio files on that card — is it the right folder?");
       }
       await flow.registerCard(card);
-      navigate("/app/upload/check");
+      navigate(flow.get().status === "done" ? "/app/upload/done" : "/app/upload/check");
     } catch (error) {
       this.#busy = false;
       // Closing the picker isn't a failure; it's a change of mind.
@@ -132,7 +132,7 @@ class UploadDetails extends BaseElement {
           <div>
             <label class="label" for="pulled">Date you pulled the card</label>
             <input class="field" id="pulled" type="date" value="${escapeHTML(pulledOn)}"
-                   max="${escapeHTML(new Date().toISOString().slice(0, 10))}" data-change="pulled" />
+                   max="${escapeHTML(flow.today())}" data-change="pulled" />
           </div>
 
           <div>

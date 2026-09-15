@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, typography } from "../shared-styles.js";
-import { count, duration, gigabytes, longDate, megabits, minutesLeft, percent } from "../format.js";
+import { byteSize, count, duration, longDate, megabits, minutesLeft, percent } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 import "./bs-progress-bar.js";
@@ -104,7 +104,7 @@ class UploadProgress extends BaseElement {
         : minutesLeft(flow.minutesRemaining()),
     );
     this.#out("files", `${count(sent.files)} / ${count(upload.fileCount)}`);
-    this.#out("bytes", gigabytes(sent.bytes));
+    this.#out("bytes", byteSize(sent.bytes));
     this.#out("elapsed", duration(flow.minutesElapsed()));
     this.#out("speed", status !== "uploading" ? "—" : speed ? megabits(speed) : "measuring…");
     this.#out("pause", status === "paused" ? "Resume upload" : "Pause upload");
@@ -142,7 +142,7 @@ class UploadProgress extends BaseElement {
 
           <div class="live">
             ${live("files", "files uploaded")}
-            ${live("bytes", `of ${gigabytes(upload.totalBytes)}`)}
+            ${live("bytes", `of ${byteSize(upload.totalBytes)}`)}
             ${live("elapsed", "elapsed")}
             ${live("speed", "current speed")}
           </div>
@@ -201,8 +201,8 @@ class UploadProgress extends BaseElement {
 
         <bs-progress-bar value="${percent(sent.files, upload.fileCount)}" label="Files uploaded so far"></bs-progress-bar>
         <div class="split">
-          <span>${count(sent.files)} files · ${gigabytes(sent.bytes)} uploaded</span>
-          <span>${count(filesLeft)} files · ${gigabytes(upload.totalBytes - sent.bytes)} remaining</span>
+          <span>${count(sent.files)} files · ${byteSize(sent.bytes)} uploaded</span>
+          <span>${count(filesLeft)} files · ${byteSize(upload.totalBytes - sent.bytes)} remaining</span>
         </div>
 
         <div class="row" style="margin-bottom: 2.125rem;">

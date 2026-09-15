@@ -208,6 +208,20 @@ func TestUploadingEveryFileMovesACardToProcessing(t *testing.T) {
 	if card, _ := s.store.GetUpload(t.Context(), ref); card.ReceivedAt == nil || !card.ReceivedAt.Equal(testNow) {
 		t.Errorf("receivedAt = %v, want %v", card.ReceivedAt, testNow)
 	}
+
+	// Choosing the same card again finds it in, with nothing left to send.
+	again := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 2, 1))
+	if u := again.Upload; u.FilesUploaded != 2 || u.FileCount != 2 || u.Status != db.StatusProcessing {
+		t.Errorf("same card again = %d of %d files, %s; want 2 of 2, processing", u.FilesUploaded, u.FileCount, u.Status)
+	}
+	// Another folder for the same recorder and pull date isn't that card.
+	other := do(t, s.mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-03", "2026-09-14", "", "2026-09-01", 1, 5), jane)
+	if other.Code != http.StatusConflict {
+		t.Errorf("a different card over a received one = %d (%s), want %d", other.Code, other.Body, http.StatusConflict)
+	}
+	if u := s.card(jane, ref); u.FilesUploaded != 2 || u.FileCount != 2 || u.Status != db.StatusProcessing {
+		t.Errorf("received card after a refused re-register = %d of %d, %s", u.FilesUploaded, u.FileCount, u.Status)
+	}
 }
 
 func TestTusRefusesFilesThatArentOnTheCard(t *testing.T) {

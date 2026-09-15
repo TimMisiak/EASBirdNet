@@ -366,19 +366,30 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	if errors.Is(err, db.ErrConflict) {
 		// Same card again. The recorder and volunteer copies stay as they were
 		// when it was first registered.
-		u, err = h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
-			if u.UserID != me.ID {
-				return errCardTaken
-			}
-			u.Notes = notes
-			// A card that is already in keeps the list it was sent with, and
-			// doesn't go back to being sent.
-			if transferring(u.Status) {
+		var sameList bool
+		sameList, err = h.listedAsBefore(ctx, ref, listed)
+		if err == nil {
+			u, err = h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+				if u.UserID != me.ID {
+					return errCardTaken
+				}
+				// A card that is already in keeps the list it was sent with, and
+				// doesn't go back to being sent. A different list is another card
+				// with the same recorder and pull date, and answering with the one
+				// that's in would show the volunteer its counts as theirs.
+				if !transferring(u.Status) {
+					if !sameList {
+						return errCardReceived
+					}
+					u.Notes = notes
+					return nil
+				}
+				u.Notes = notes
 				u.Nights, u.FileCount, u.TotalBytes = nights, files, bytes
 				u.Status, u.StartedAt = db.StatusInProgress, started
-			}
-			return nil
-		})
+				return nil
+			})
+		}
 	}
 	if err == nil && transferring(u.Status) {
 		if err = h.registerFiles(ctx, u, listed); err == nil {
@@ -392,6 +403,9 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	switch {
 	case errors.Is(err, errCardTaken):
 		h.problem(w, http.StatusConflict, "another volunteer has already registered this card")
+	case errors.Is(err, errCardReceived):
+		h.problem(w, http.StatusConflict,
+			"a different card from this recorder, pulled on the same date, has already been uploaded; check the date you pulled the card")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
@@ -405,7 +419,34 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	}
 }
 
-var errCardTaken = errors.New("card belongs to someone else")
+var (
+	errCardTaken    = errors.New("card belongs to someone else")
+	errCardReceived = errors.New("card has been received with a different file list")
+)
+
+// listedAsBefore reports whether a card's file list is the one it was last
+// registered with: the same paths at the same sizes.
+func (h *handlers) listedAsBefore(ctx context.Context, ref string, listed []db.AudioFile) (bool, error) {
+	existing, err := h.store.ListAudioFiles(ctx, ref)
+	if err != nil {
+		return false, err
+	}
+	sizes := make(map[string]int64, len(existing))
+	for _, f := range existing {
+		if f.StatusDetail != detailNotOnCard {
+			sizes[f.Path] = f.SizeBytes
+		}
+	}
+	if len(sizes) != len(listed) {
+		return false, nil
+	}
+	for _, f := range listed {
+		if size, ok := sizes[f.Path]; !ok || size != f.SizeBytes {
+			return false, nil
+		}
+	}
+	return true, nil
+}
 
 // cardList checks a card's file list against the nights it was summed into,
 // and returns it as audio files, or else what is wrong with it.

@@ -94,7 +94,7 @@ function manifest({ label, entries }) {
     // A Mac writes a "._" shadow file beside every file on a FAT card. They
     // match the extension and hold no audio.
     if (AUDIO.test(file.name) && !file.name.startsWith("._")) {
-      files.push({ path, bytes: file.size, night: nightOf(file.lastModified), file });
+      files.push({ path, bytes: file.size, night: nightOf(file), file });
     } else {
       skipped.push(file.name);
     }
@@ -124,14 +124,43 @@ function manifest({ label, entries }) {
 }
 
 /**
+ * Recorders put the start of each recording in the file name, as local time:
+ * "Marymoor_20260723_160624(-0700).wav" began at 16:06:24 on July 23. The
+ * "(-0700)" is the UTC offset, which a night doesn't need -- it is a local date.
+ */
+const NAMED_START = /(?<!\d)(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)/;
+
+/**
  * Which night a file belongs to. Recording runs dusk to dawn, so a 3 a.m. file
  * is part of the previous evening's night -- shifting back 12 hours puts the
  * whole night on one date.
+ *
+ * The time comes from the file name. A file's modified time is when it was
+ * last copied, not recorded, so it is only the fallback for a name without one.
  */
-function nightOf(timestamp) {
-  const t = new Date(timestamp - 12 * 3600 * 1000);
+function nightOf(file) {
+  const named = startFromName(file.name);
+  if (named !== null) {
+    // Wall-clock arithmetic in UTC, so the browser's own timezone stays out of it.
+    return new Date(named - 12 * 3600 * 1000).toISOString().slice(0, 10);
+  }
+  const t = new Date(file.lastModified - 12 * 3600 * 1000);
   const pad = (n) => String(n).padStart(2, "0");
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+}
+
+/** The recording's local start as if it were UTC, in ms, or null if the name has none. */
+function startFromName(name) {
+  const match = NAMED_START.exec(name);
+  if (!match) return null;
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+  const ms = Date.UTC(year, month - 1, day, hour, minute, second);
+  const t = new Date(ms);
+  // Date.UTC rolls "20260231" over into March; a name like that isn't a date.
+  const real =
+    t.getUTCMonth() === month - 1 && t.getUTCDate() === day &&
+    t.getUTCHours() === hour && t.getUTCMinutes() === minute && t.getUTCSeconds() === second;
+  return real ? ms : null;
 }
 
 /**
