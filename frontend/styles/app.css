@@ -68,6 +68,21 @@
   --bs-chip-attention-border: #d3a894;
   --bs-chip-attention-text: #7a3b22;
 
+  /* Species marks on a spectrogram, in order: a strip and its darker edge.
+   * The first is amber, for the detection under review. */
+  --bs-species-1: var(--bs-amber);
+  --bs-species-1-ink: var(--bs-amber-ink);
+  --bs-species-2: #3f7ea6;
+  --bs-species-2-ink: #25506e;
+  --bs-species-3: #8c5a9e;
+  --bs-species-3-ink: #5a3769;
+  --bs-species-4: #5f8f3e;
+  --bs-species-4-ink: #3b5c25;
+  --bs-species-5: #b5523b;
+  --bs-species-5-ink: #7a3b22;
+  --bs-species-6: #6d7b8a;
+  --bs-species-6-ink: #434e59;
+
   --bs-link: #8a5a18;
   --bs-link-hover: #23402f;
   --bs-focus: #23402f;

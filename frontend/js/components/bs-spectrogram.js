@@ -1,15 +1,19 @@
 import { controls, reset } from "../shared-styles.js";
 import { clock } from "../format.js";
+import { escapeHTML } from "./base-element.js";
 
 /**
- * <bs-spectrogram src="/api/v1/.../clip" clip-start="731" highlight-start="732"
- * highlight-end="735"> -- a clip to play, drawn as a spectrogram with a
- * playhead. The browser draws it from the audio itself: Web Audio decodes the
- * WAV and a short FFT below does the rest, so the clip is all that is stored.
+ * <bs-spectrogram src="/api/v1/.../clip" clip-start="731"> -- a clip to play,
+ * drawn as a spectrogram with a playhead. The browser draws it from the audio
+ * itself: Web Audio decodes the WAV and a short FFT below does the rest, so the
+ * clip is all that is stored.
  *
- * Attributes, all in seconds into the recording the clip was cut from:
- * clip-start, where the clip begins, for the time axis; highlight-start and
- * highlight-end, the stretch to mark above the plot.
+ * Attribute: clip-start, the seconds into the recording where the clip begins,
+ * for the time axis.
+ *
+ * Property: marks, what was heard, as [{label, spans: [{startSec, endSec}]}] in
+ * seconds into the recording. Each mark gets its own strip above the plot, in
+ * the next --bs-species-* colour, and a line in the legend.
  *
  * Extends HTMLElement rather than BaseElement: the playhead moves many times a
  * second, and rewriting the shadow root would stop the audio.
@@ -21,9 +25,11 @@ const TOP_HZ = 12_000;
 const BIN_HZ = 46;
 /** Enough columns for a wide screen at 2x; more is FFT time nobody sees. */
 const MAX_COLUMNS = 2400;
+/** How many --bs-species-* colours there are; marks past it reuse them. */
+const SPECIES_COLOURS = 6;
 
 class Spectrogram extends HTMLElement {
-  static observedAttributes = ["src", "clip-start", "highlight-start", "highlight-end"];
+  static observedAttributes = ["src", "clip-start"];
 
   #audio;
   #button;
@@ -32,7 +38,9 @@ class Spectrogram extends HTMLElement {
   #stage;
   #canvas;
   #playhead;
-  #band;
+  #bands;
+  #legend;
+  #marks = [];
   #ticks;
   #freq;
   /** The spectrogram at one pixel per column and bin, scaled onto #canvas. */
@@ -50,15 +58,20 @@ class Spectrogram extends HTMLElement {
     this.shadowRoot.adoptedStyleSheets = [reset, controls];
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; --plot-height: 15rem; --band: 0.5rem; }
+        :host { display: block; --plot-height: 15rem; --band: 0.5rem; --band-gap: 2px; }
         [hidden] { display: none !important; }
         .bar { display: flex; align-items: center; gap: var(--bs-space-3); margin-bottom: var(--bs-space-3); flex-wrap: wrap; }
         .play { min-width: 6.5rem; }
         .time { font-family: var(--bs-font-mono); font-size: 0.8125rem; color: var(--bs-text-soft); }
         .status { font-size: 0.8125rem; color: var(--bs-text-muted); }
 
-        .plot { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr); }
-        .freq { position: relative; height: var(--plot-height); margin-top: var(--band); }
+        /* --lanes is how many strips are stacked above the plot; set from the marks. */
+        .plot {
+          display: grid;
+          grid-template-columns: 3.5rem minmax(0, 1fr);
+          --strips: calc(var(--lanes, 1) * var(--band) + (var(--lanes, 1) - 1) * var(--band-gap));
+        }
+        .freq { position: relative; height: var(--plot-height); margin-top: var(--strips); }
         .freq span, .ticks span {
           position: absolute;
           font-family: var(--bs-font-mono);
@@ -69,7 +82,7 @@ class Spectrogram extends HTMLElement {
         .freq span { right: var(--bs-space-2); transform: translateY(50%); }
         .freq span:first-child { transform: none; }
 
-        .area { position: relative; padding-top: var(--band); }
+        .area { position: relative; padding-top: var(--strips); }
         .stage {
           position: relative;
           height: var(--plot-height);
@@ -89,14 +102,14 @@ class Spectrogram extends HTMLElement {
           background: var(--bs-amber-ink);
           pointer-events: none;
         }
-        /* What was heard: a solid strip above the plot, dashed edges down it. */
+        /* What was heard: a solid strip above the plot in its lane, dashed edges down it. */
         .band {
           position: absolute;
-          top: 0;
-          height: calc(var(--band) + var(--plot-height));
-          border-top: var(--band) solid var(--bs-amber);
-          border-left: 1px dashed var(--bs-amber-ink);
-          border-right: 1px dashed var(--bs-amber-ink);
+          top: calc(var(--lane) * (var(--band) + var(--band-gap)));
+          bottom: 0;
+          border-top: var(--band) solid var(--mark);
+          border-left: 1px dashed var(--mark-ink);
+          border-right: 1px dashed var(--mark-ink);
           pointer-events: none;
         }
         .ticks { grid-column: 2; position: relative; height: 1.5rem; }
@@ -109,8 +122,17 @@ class Spectrogram extends HTMLElement {
           height: 0.25rem;
           border-left: 1px solid var(--bs-border-strong);
         }
-        .legend { grid-column: 2; display: flex; align-items: center; gap: var(--bs-space-2); font-size: 0.78125rem; color: var(--bs-text-muted); }
-        .swatch { width: 1.25rem; height: var(--band); background: var(--bs-amber); }
+        .legend {
+          grid-column: 2;
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: var(--bs-space-2) var(--bs-space-4);
+          font-size: 0.78125rem;
+          color: var(--bs-text-muted);
+        }
+        .legend .key { display: inline-flex; align-items: center; gap: var(--bs-space-2); color: var(--bs-text-soft); }
+        .swatch { width: 1.25rem; height: var(--band); background: var(--mark); }
       </style>
 
       <div class="bar">
@@ -125,10 +147,10 @@ class Spectrogram extends HTMLElement {
             <canvas role="img"></canvas>
             <div class="playhead" hidden></div>
           </div>
-          <div class="band" hidden></div>
+          <div class="bands" aria-hidden="true"></div>
         </div>
         <div class="ticks" aria-hidden="true"></div>
-        <p class="legend" hidden><span class="swatch"></span>What BirdNET heard · click the spectrogram to jump there</p>
+        <p class="legend" hidden></p>
       </div>
       <audio preload="auto"></audio>
     `;
@@ -141,7 +163,8 @@ class Spectrogram extends HTMLElement {
     this.#stage = $(".stage");
     this.#canvas = $("canvas");
     this.#playhead = $(".playhead");
-    this.#band = $(".band");
+    this.#bands = $(".bands");
+    this.#legend = $(".legend");
     this.#ticks = $(".ticks");
     this.#freq = $(".freq");
 
@@ -185,6 +208,15 @@ class Spectrogram extends HTMLElement {
     if (!this.isConnected) return;
     if (name === "src") this.#load();
     else this.#layout();
+  }
+
+  get marks() {
+    return this.#marks;
+  }
+
+  set marks(marks) {
+    this.#marks = marks ?? [];
+    this.#layout();
   }
 
   /** Plays the clip, or pauses it if it is playing. Does nothing until the clip has loaded. */
@@ -273,10 +305,10 @@ class Spectrogram extends HTMLElement {
       `Spectrogram of the clip, 0 to ${Math.round(kHz)} kHz${length ? `, ${Math.round(length)} seconds` : ""}`,
     );
 
+    this.shadowRoot.querySelector(".plot").style.setProperty("--lanes", Math.max(1, this.#marks.length));
     if (!length) {
-      this.#ticks.innerHTML = "";
-      this.#band.hidden = this.#playhead.hidden = true;
-      this.shadowRoot.querySelector(".legend").hidden = true;
+      this.#ticks.innerHTML = this.#bands.innerHTML = "";
+      this.#playhead.hidden = this.#legend.hidden = true;
       return;
     }
     const every = [1, 2, 5, 10, 15, 30].find((s) => length / s <= 8) ?? 60;
@@ -284,15 +316,24 @@ class Spectrogram extends HTMLElement {
     for (let t = Math.ceil(start / every) * every; t <= start + length + 1e-9; t += every) ticks.push(t);
     this.#ticks.innerHTML = ticks.map((t) => `<span style="left: ${at(t)}">${clock(t)}</span>`).join("");
 
-    const from = Number(this.getAttribute("highlight-start"));
-    const to = Number(this.getAttribute("highlight-end"));
-    const marked = this.hasAttribute("highlight-start") && this.hasAttribute("highlight-end") && to > from;
-    this.#band.hidden = !marked;
-    this.shadowRoot.querySelector(".legend").hidden = !marked;
-    if (marked) {
-      this.#band.style.left = at(from);
-      this.#band.style.width = `calc(${at(to)} - ${at(from)})`;
-    }
+    const colour = (i) => {
+      const n = (i % SPECIES_COLOURS) + 1;
+      return `--mark: var(--bs-species-${n}); --mark-ink: var(--bs-species-${n}-ink);`;
+    };
+    this.#bands.innerHTML = this.#marks
+      .flatMap((mark, lane) =>
+        mark.spans
+          .filter((s) => s.endSec > s.startSec && s.endSec > start && s.startSec < start + length)
+          .map(
+            (s) =>
+              `<div class="band" style="${colour(lane)} --lane: ${lane}; left: ${at(s.startSec)}; width: calc(${at(s.endSec)} - ${at(s.startSec)})"></div>`,
+          ),
+      )
+      .join("");
+    this.#legend.hidden = this.#marks.length === 0;
+    this.#legend.innerHTML = `${this.#marks
+      .map((mark, i) => `<span class="key"><span class="swatch" style="${colour(i)}"></span>${escapeHTML(mark.label)}</span>`)
+      .join("")}<span>Click the spectrogram to jump there</span>`;
     this.#playhead.hidden = false;
     this.#tick();
   }

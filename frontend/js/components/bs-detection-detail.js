@@ -16,8 +16,9 @@ import "./bs-spectrogram.js";
  * every detection, which it goes back to with that list's filters. Its links
  * stay under whichever it was opened from.
  *
- * Below its facts are the other species BirdNET heard during the clip, from the
- * same file's detections, so a reviewer knows what else they're listening to.
+ * The other species BirdNET heard during the clip, from the same file's
+ * detections, are marked on the spectrogram beside this one and listed below
+ * its facts, so a reviewer knows what else they're listening to.
  *
  * The page is rendered whole once the detection loads. A verdict redraws only
  * the review panel and the chip, so a clip that is playing keeps playing.
@@ -87,16 +88,26 @@ class DetectionDetail extends BaseElement {
   }
 
   /**
-   * The file's detections of other species that overlap what can be heard:
-   * the clip, or the detection itself when it has none. Most confident first.
+   * The other species whose detections in the file overlap what can be heard:
+   * the clip, or the detection itself when it has none. One entry per species,
+   * [{best, runs}], where best is its most confident detection there and runs
+   * are all of them, in the order heard. Most confident species first.
    */
   #alsoHeard() {
     const { detection: d, siblings } = this.#state;
     const from = d.clip?.startSec ?? d.startSec;
     const to = d.clip?.endSec ?? d.endSec;
-    return siblings
-      .filter((s) => s.scientificName !== d.scientificName && s.startSec < to && s.endSec > from)
-      .sort((a, b) => b.confidence - a.confidence || a.startSec - b.startSec);
+    const species = new Map();
+    for (const s of siblings) {
+      if (s.scientificName === d.scientificName || s.startSec >= to || s.endSec <= from) continue;
+      const seen = species.get(s.scientificName);
+      if (!seen) species.set(s.scientificName, { best: s, runs: [s] });
+      else {
+        seen.runs.push(s);
+        if (s.confidence > seen.best.confidence) seen.best = s;
+      }
+    }
+    return [...species.values()].sort((a, b) => b.best.confidence - a.best.confidence || a.best.startSec - b.best.startSec);
   }
 
   attributeChangedCallback() {
@@ -219,7 +230,6 @@ class DetectionDetail extends BaseElement {
         .also { margin-top: var(--bs-space-6); }
         .also h3 { margin-bottom: var(--bs-space-2); }
         .also .sci { font-size: 0.875rem; }
-        .also .nowrap { white-space: nowrap; }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
       </style>
 
@@ -232,6 +242,16 @@ class DetectionDetail extends BaseElement {
             : this.#page()
       }
     `;
+
+    const player = this.$("bs-spectrogram");
+    if (player) {
+      const d = this.#state.detection;
+      const span = (x) => ({ startSec: x.startSec, endSec: x.endSec });
+      player.marks = [
+        { label: d.commonName, spans: [span(d)] },
+        ...this.#alsoHeard().map(({ best, runs }) => ({ label: best.commonName, spans: runs.map(span) })),
+      ];
+    }
   }
 
   #page() {
@@ -267,9 +287,7 @@ class DetectionDetail extends BaseElement {
           d.clip
             ? `<bs-spectrogram
                  src="${escapeHTML(api.clipURL(this.reference, d.id))}"
-                 clip-start="${d.clip.startSec}"
-                 highlight-start="${d.startSec}"
-                 highlight-end="${d.endSec}"></bs-spectrogram>`
+                 clip-start="${d.clip.startSec}"></bs-spectrogram>`
             : `<p class="quiet">There's no clip of this detection: its file was analyzed before clips were cut.</p>`
         }
       </div>
@@ -311,31 +329,26 @@ class DetectionDetail extends BaseElement {
     return `
       <section class="also">
         <h3>Other possible birds detected</h3>
-        <p class="quiet">BirdNET also heard these in the file during ${d.clip ? "this clip" : "this detection"}.</p>
+        <p class="quiet">BirdNET also heard these in the file during ${d.clip ? "this clip" : "this detection"}, each at its most confident.</p>
         <div class="table-scroll">
           <table>
             <thead>
               <tr>
-                <th scope="col">In file</th>
                 <th scope="col">Species</th>
                 <th scope="col" style="text-align: right;">Confidence</th>
-                <th scope="col">Review</th>
               </tr>
             </thead>
             <tbody>
               ${others
-                .map((o) => {
-                  const { kind, label } = reviewChip(o.reviewStatus);
-                  return `
+                .map(
+                  ({ best: o }) => `
               <tr>
-                <td class="num nowrap" style="text-align: left;">${clock(o.startSec)}–${clock(o.endSec)}</td>
                 <td><a href="${escapeHTML(this.#href(o.id))}">${escapeHTML(o.commonName)}</a>${
                   o.scientificName && o.scientificName !== o.commonName ? ` <span class="sci">${escapeHTML(o.scientificName)}</span>` : ""
                 }</td>
                 <td class="num">${Math.round(o.confidence * 100)}%</td>
-                <td><bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip></td>
-              </tr>`;
-                })
+              </tr>`,
+                )
                 .join("")}
             </tbody>
           </table>
