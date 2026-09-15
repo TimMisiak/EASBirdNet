@@ -1,5 +1,5 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
-import { controls, panels, typography } from "../shared-styles.js";
+import { controls, panels, tables, typography } from "../shared-styles.js";
 import { clock, dateAtTime, longDate, shortDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
@@ -16,6 +16,9 @@ import "./bs-spectrogram.js";
  * every detection, which it goes back to with that list's filters. Its links
  * stay under whichever it was opened from.
  *
+ * Below its facts are the other species BirdNET heard during the clip, from the
+ * same file's detections, so a reviewer knows what else they're listening to.
+ *
  * The page is rendered whole once the detection loads. A verdict redraws only
  * the review panel and the chip, so a clip that is playing keeps playing.
  *
@@ -28,7 +31,7 @@ import "./bs-spectrogram.js";
  */
 
 class DetectionDetail extends BaseElement {
-  static styles = [typography, controls, panels];
+  static styles = [typography, controls, panels, tables];
   static observedAttributes = ["reference", "detection", "list"];
 
   /** {status, upload, file, detection, siblings, error}; siblings are the file's detections, in order. */
@@ -81,6 +84,19 @@ class DetectionDetail extends BaseElement {
       prev: at > 0 ? siblings[at - 1] : null,
       next: at >= 0 && at < siblings.length - 1 ? siblings[at + 1] : null,
     };
+  }
+
+  /**
+   * The file's detections of other species that overlap what can be heard:
+   * the clip, or the detection itself when it has none. Most confident first.
+   */
+  #alsoHeard() {
+    const { detection: d, siblings } = this.#state;
+    const from = d.clip?.startSec ?? d.startSec;
+    const to = d.clip?.endSec ?? d.endSec;
+    return siblings
+      .filter((s) => s.scientificName !== d.scientificName && s.startSec < to && s.endSec > from)
+      .sort((a, b) => b.confidence - a.confidence || a.startSec - b.startSec);
   }
 
   attributeChangedCallback() {
@@ -199,6 +215,11 @@ class DetectionDetail extends BaseElement {
         .review .error { margin-top: var(--bs-space-3); }
         .review .next { display: inline-block; margin-top: var(--bs-space-4); font-size: 0.875rem; }
         .review .note { margin-top: var(--bs-space-4); }
+
+        .also { margin-top: var(--bs-space-6); }
+        .also h3 { margin-bottom: var(--bs-space-2); }
+        .also .sci { font-size: 0.875rem; }
+        .also .nowrap { white-space: nowrap; }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
       </style>
 
@@ -254,29 +275,72 @@ class DetectionDetail extends BaseElement {
       </div>
 
       <div class="layout">
-        <dl class="facts">
-          <dt>Heard</dt>
-          <dd>
-            ${clock(d.startSec)}–${clock(d.endSec)} into the recording
-            <small>${windows > 1 ? `${windows} consecutive 3-second windows, merged` : "One 3-second window"}</small>
-          </dd>
-          <dt>Confidence</dt>
-          <dd>
-            ${Math.round(d.confidence * 100)}%
-            ${windows > 1 ? `<small>The most confident of its windows</small>` : ""}
-          </dd>
-          <dt>File</dt>
-          <dd><span class="path">${escapeHTML(file.path).replaceAll("/", "/<wbr>")}</span></dd>
-          <dt>Night</dt>
-          <dd>${escapeHTML(shortDate(file.night))}</dd>
-          <dt>Card</dt>
-          <dd>
-            <a class="path" href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a>
-            <small>${escapeHTML(upload.volunteerName)}, pulled ${escapeHTML(longDate(upload.pulledOn))}</small>
-          </dd>
-        </dl>
+        <div>
+          <dl class="facts">
+            <dt>Heard</dt>
+            <dd>
+              ${clock(d.startSec)}–${clock(d.endSec)} into the recording
+              <small>${windows > 1 ? `${windows} consecutive 3-second windows, merged` : "One 3-second window"}</small>
+            </dd>
+            <dt>Confidence</dt>
+            <dd>
+              ${Math.round(d.confidence * 100)}%
+              ${windows > 1 ? `<small>The most confident of its windows</small>` : ""}
+            </dd>
+            <dt>File</dt>
+            <dd><span class="path">${escapeHTML(file.path).replaceAll("/", "/<wbr>")}</span></dd>
+            <dt>Night</dt>
+            <dd>${escapeHTML(shortDate(file.night))}</dd>
+            <dt>Card</dt>
+            <dd>
+              <a class="path" href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a>
+              <small>${escapeHTML(upload.volunteerName)}, pulled ${escapeHTML(longDate(upload.pulledOn))}</small>
+            </dd>
+          </dl>
+          ${this.#alsoHeardSection()}
+        </div>
         <section class="panel review" aria-live="polite">${this.#reviewPanel(next)}</section>
       </div>
+    `;
+  }
+
+  #alsoHeardSection() {
+    const others = this.#alsoHeard();
+    if (others.length === 0) return "";
+    const d = this.#state.detection;
+    return `
+      <section class="also">
+        <h3>Other possible birds detected</h3>
+        <p class="quiet">BirdNET also heard these in the file during ${d.clip ? "this clip" : "this detection"}.</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">In file</th>
+                <th scope="col">Species</th>
+                <th scope="col" style="text-align: right;">Confidence</th>
+                <th scope="col">Review</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${others
+                .map((o) => {
+                  const { kind, label } = reviewChip(o.reviewStatus);
+                  return `
+              <tr>
+                <td class="num nowrap" style="text-align: left;">${clock(o.startSec)}–${clock(o.endSec)}</td>
+                <td><a href="${escapeHTML(this.#href(o.id))}">${escapeHTML(o.commonName)}</a>${
+                  o.scientificName && o.scientificName !== o.commonName ? ` <span class="sci">${escapeHTML(o.scientificName)}</span>` : ""
+                }</td>
+                <td class="num">${Math.round(o.confidence * 100)}%</td>
+                <td><bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip></td>
+              </tr>`;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
     `;
   }
 
