@@ -3,6 +3,7 @@ import { controls, panels, typography } from "../shared-styles.js";
 import { clock, dateAtTime, longDate, shortDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
+import { navigate } from "../router.js";
 import "./bs-chip.js";
 import "./bs-spectrogram.js";
 
@@ -17,6 +18,9 @@ import "./bs-spectrogram.js";
  *
  * The page is rendered whole once the detection loads. A verdict redraws only
  * the review panel and the chip, so a clip that is playing keeps playing.
+ *
+ * Keys: ← and → go to the previous and next detection, and space plays or
+ * pauses the clip, unless focus is somewhere those keys already mean something.
  *
  * Attributes: reference, the card; detection, the detection's id; list, present
  * when it was opened from the list of every detection, holding that list's
@@ -35,7 +39,48 @@ class DetectionDetail extends BaseElement {
 
   connectedCallback() {
     super.connectedCallback();
+    document.addEventListener("keydown", this.#onKey);
     this.#load();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("keydown", this.#onKey);
+  }
+
+  /** ← and → step through the file's detections; space plays or pauses the clip. */
+  #onKey = (event) => {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (this.#state.status !== "ready") return;
+    // Focus is in a shadow root, so look along the composed path, not at event.target.
+    const focus = event.composedPath()[0];
+    const typing = focus instanceof Element && focus.closest("input, textarea, select, [contenteditable]");
+    if (typing) return;
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const { prev, next } = this.#neighbours();
+      const to = event.key === "ArrowLeft" ? prev : next;
+      if (!to) return;
+      event.preventDefault();
+      navigate(this.#href(to.id));
+    } else if (event.key === " ") {
+      // A focused button or link already answers space itself.
+      if (focus instanceof Element && focus.closest("button, a")) return;
+      const player = this.$("bs-spectrogram");
+      if (!player) return;
+      event.preventDefault();
+      if (!event.repeat) player.toggle();
+    }
+  };
+
+  /** The detections either side of this one in its file, or null at either end. */
+  #neighbours() {
+    const { detection, siblings } = this.#state;
+    const at = siblings.findIndex((s) => s.id === detection.id);
+    return {
+      at,
+      prev: at > 0 ? siblings[at - 1] : null,
+      next: at >= 0 && at < siblings.length - 1 ? siblings[at + 1] : null,
+    };
   }
 
   attributeChangedCallback() {
@@ -170,9 +215,7 @@ class DetectionDetail extends BaseElement {
 
   #page() {
     const { upload, file, detection: d, siblings } = this.#state;
-    const at = siblings.findIndex((s) => s.id === d.id);
-    const prev = at > 0 ? siblings[at - 1] : null;
-    const next = at >= 0 && at < siblings.length - 1 ? siblings[at + 1] : null;
+    const { at, prev, next } = this.#neighbours();
     const span = d.endSec - d.startSec;
     const windows = Math.round(span / 3);
 
@@ -278,9 +321,7 @@ class DetectionDetail extends BaseElement {
   /** Redraws what a verdict changes, leaving the clip alone. */
   #renderReview() {
     if (this.#state.status !== "ready") return;
-    const { detection, siblings } = this.#state;
-    const at = siblings.findIndex((s) => s.id === detection.id);
-    const next = at >= 0 && at < siblings.length - 1 ? siblings[at + 1] : null;
+    const { next } = this.#neighbours();
     const panel = this.$(".review");
     const chip = this.$(".chip-slot");
     if (panel) panel.innerHTML = this.#reviewPanel(next);

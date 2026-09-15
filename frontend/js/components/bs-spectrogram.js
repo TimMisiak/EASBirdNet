@@ -145,10 +145,7 @@ class Spectrogram extends HTMLElement {
     this.#ticks = $(".ticks");
     this.#freq = $(".freq");
 
-    this.#button.addEventListener("click", () => {
-      if (this.#audio.paused) this.#audio.play().catch((error) => this.#say(`Couldn't play the clip: ${error.message}`));
-      else this.#audio.pause();
-    });
+    this.#button.addEventListener("click", () => this.toggle());
     this.#audio.addEventListener("play", () => {
       this.#button.textContent = "❚❚ Pause";
       this.#tick();
@@ -188,6 +185,13 @@ class Spectrogram extends HTMLElement {
     if (!this.isConnected) return;
     if (name === "src") this.#load();
     else this.#layout();
+  }
+
+  /** Plays the clip, or pauses it if it is playing. Does nothing until the clip has loaded. */
+  toggle() {
+    if (this.#button.disabled) return;
+    if (this.#audio.paused) this.#audio.play().catch((error) => this.#say(`Couldn't play the clip: ${error.message}`));
+    else this.#audio.pause();
   }
 
   get #clipStart() {
