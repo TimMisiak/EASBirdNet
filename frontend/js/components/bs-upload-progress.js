@@ -58,7 +58,7 @@ class UploadProgress extends BaseElement {
       pause: () => (flow.get().status === "paused" ? flow.start() : flow.pause()),
       retry: () => flow.start(),
       rechoose: () => navigate("/app/upload"),
-      later: () => navigate("/app"),
+      later: () => navigate("/app/uploads"),
     };
   }
 

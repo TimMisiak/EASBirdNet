@@ -378,9 +378,9 @@ Every read the API needs, and what it costs in Cosmos:
 | A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
 | One detection (its page, its clip, a review) | `GetDetection` | `detections` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
-| What was heard in one file (admin card page) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
+| What was heard in one file (card page, a detection's neighbours) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
-| Every detection (admin Detections tab) | `ListDetections{ReviewStatus?, Since?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go |
+| Every detection (Detections tab) | `ListDetections{ReviewStatus?, Since?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go |
 | Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
@@ -493,11 +493,11 @@ What the write routes do to documents:
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list. |
-| `GET /admin/detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`) as `{detections, total, species}`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (`uploads.recorder.name`) and `night`. `species[]` counts every match before the species filter. |
-| `GET /admin/uploads/{ref}/files/{id}/detections` | Answers that file's detections, in the order heard. |
-| `GET /admin/uploads/{ref}/detections/{id}` | Answers the detection, its card and its audio file. |
-| `GET /admin/uploads/{ref}/detections/{id}/clip` | Serves `clip.blobName` from file storage as `audio/wav`, answering range requests. 404 for a detection with no clip. |
-| `PUT /admin/uploads/{ref}/detections/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
+| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`) as `{detections, total, species}`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (`uploads.recorder.name`) and `night`. `species[]` counts every match before the species filter. |
+| `GET /detections/{ref}?file={id}` | Answers the card's detections, or with `file` that file's, in the order heard. 404 for a card, or a file on it, that isn't there. |
+| `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
+| `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/wav`, answering range requests. 404 for a detection with no clip. |
+| `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
 | `DELETE /admin/uploads/{ref}` | Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |

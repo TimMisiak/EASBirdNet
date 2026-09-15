@@ -65,7 +65,7 @@ function initial() {
     pulledOn: today(),
     notes: "",
     /**
-     * True when the card was picked up from the server ("Finish uploading" on
+     * True when the card was picked up from the server ("Resume upload" on
      * the volunteer's cards, or a reload) rather than started in this tab. Its
      * station and date are what make it that card, so step 1 only asks for the
      * card again.
@@ -146,8 +146,8 @@ function storedPaths(files) {
 }
 
 /**
- * Pick up a card that is already on the server -- "Resume upload" from the
- * volunteer's home, or a reload part-way through the wizard. A reload loses
+ * Pick up a card that is already on the server -- "Resume upload" on the
+ * volunteer's cards, or a reload part-way through the wizard. A reload loses
  * the card's files, so unless this tab is already sending the card, the
  * volunteer chooses the card again to carry on.
  */
@@ -171,6 +171,16 @@ export async function adopt(reference) {
     status: unfinished ? "interrupted" : "done",
   });
   return upload;
+}
+
+/**
+ * "Resume upload": pick a card up, and say where its upload carries on. A card
+ * this tab is already sending goes on where it is; any other needs the card
+ * chosen again at step 1, so the server can say what's missing.
+ */
+export async function resume(reference) {
+  await adopt(reference);
+  return state.files.length ? "/app/upload/progress" : "/app/upload";
 }
 
 /** The card the pages should show, after a reload if need be. */
@@ -394,7 +404,7 @@ async function report(reference, status) {
     const { upload } = await api.reportProgress(reference, { status });
     if (state.upload?.reference === reference && state.status !== "done") set({ upload });
   } catch {
-    // Only the chip on the volunteer's home page reads this. The files have
+    // Only the chip on the volunteer's list of cards reads this. The files have
     // their own retries, and are what matters.
   }
 }

@@ -4,6 +4,7 @@ import { clock, dateAtTime, longDate, shortDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
 import { navigate } from "../router.js";
+import * as session from "../session.js";
 import "./bs-chip.js";
 import "./bs-spectrogram.js";
 
@@ -23,8 +24,8 @@ import "./bs-spectrogram.js";
  * pauses the clip, unless focus is somewhere those keys already mean something.
  *
  * Attributes: reference, the card; detection, the detection's id; list, present
- * when it was opened from the list of every detection, holding that list's
- * query string.
+ * when it was opened from the list of every detection, holding that list's URL
+ * with its query string (/app/detections?species=Strix+varia).
  */
 
 class DetectionDetail extends BaseElement {
@@ -144,23 +145,26 @@ class DetectionDetail extends BaseElement {
     this.#renderReview();
   }
 
-  /** The list's query string, with its "?", or "" -- when opened from the list of every detection. */
-  get #listSearch() {
-    const search = this.getAttribute("list") ?? "";
-    return search ? `?${search}` : "";
+  /** The list of every detection it was opened from, as {path, search}, or null. search keeps its "?". */
+  get #list() {
+    if (!this.hasAttribute("list")) return null;
+    const url = new URL(this.getAttribute("list"), location.origin);
+    return { path: url.pathname, search: url.search };
   }
 
   #href(id) {
     const ref = encodeURIComponent(this.reference);
-    return this.hasAttribute("list")
-      ? `/admin/detections/${ref}/${encodeURIComponent(id)}${this.#listSearch}`
+    const list = this.#list;
+    return list
+      ? `${list.path}/${ref}/${encodeURIComponent(id)}${list.search}`
       : `/admin/uploads/${ref}/detections/${encodeURIComponent(id)}`;
   }
 
   render() {
     const { status, error } = this.#state;
-    const back = this.hasAttribute("list")
-      ? { href: `/admin/detections${this.#listSearch}`, label: "All detections" }
+    const list = this.#list;
+    const back = list
+      ? { href: `${list.path}${list.search}`, label: "All detections" }
       : { href: `/admin/uploads/${encodeURIComponent(this.reference)}`, label: this.reference };
 
     this.shadowRoot.innerHTML = `
@@ -271,7 +275,11 @@ class DetectionDetail extends BaseElement {
           <dd>${escapeHTML(shortDate(file.night))}</dd>
           <dt>Card</dt>
           <dd>
-            <a class="path" href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a>
+            ${
+              session.isAdmin()
+                ? `<a class="path" href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a>`
+                : `<span class="path">${escapeHTML(upload.reference)}</span>`
+            }
             <small>${escapeHTML(upload.volunteerName)}, pulled ${escapeHTML(longDate(upload.pulledOn))}</small>
           </dd>
         </dl>

@@ -352,7 +352,7 @@ func TestADatabaseFailureIsA500WithoutTheDetail(t *testing.T) {
 
 func TestVolunteerRoutesNeedASession(t *testing.T) {
 	mux, _ := newTestMux(t)
-	for _, path := range []string{"/api/v1/uploads", "/api/v1/stations"} {
+	for _, path := range []string{"/api/v1/uploads", "/api/v1/stations", "/api/v1/detections"} {
 		if rec := do(t, mux, http.MethodGet, path, "", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s anonymous = %d, want %d", path, rec.Code, http.StatusUnauthorized)
 		}

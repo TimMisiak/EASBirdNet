@@ -4,7 +4,6 @@ import * as session from "../session.js";
 import "./bs-site-header.js";
 import "./bs-site-footer.js";
 import "./bs-app-header.js";
-import "./bs-upload-steps.js";
 
 /**
  * <bs-app> is the shell: it picks the page for the current route, wraps it in
@@ -16,11 +15,16 @@ import "./bs-upload-steps.js";
 const ROUTES = [
   { path: "/", tag: "bs-home-page", chrome: "public" },
   { path: "/signin", tag: "bs-signin-page", chrome: "bare" },
-  { path: "/app", tag: "bs-volunteer-home", chrome: "app", auth: true },
-  { path: "/app/upload", tag: "bs-upload-details", chrome: "app", auth: true, step: 1 },
-  { path: "/app/upload/check", tag: "bs-upload-check", chrome: "app", auth: true, step: 2 },
-  { path: "/app/upload/progress", tag: "bs-upload-progress", chrome: "app", auth: true, step: 3 },
-  { path: "/app/upload/done", tag: "bs-upload-done", chrome: "app", auth: true, step: 4 },
+  { path: "/app", redirect: "/app/upload" },
+  // The volunteer's tabs. Upload holds the four steps of sending a card.
+  { path: "/app/upload", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  { path: "/app/upload/check", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  { path: "/app/upload/progress", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  { path: "/app/upload/done", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  { path: "/app/uploads", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  { path: "/app/detections", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
+  { path: "/app/detections/", prefix: true, tag: "bs-volunteer-page", chrome: "app", auth: true },
   { path: "/admin", redirect: "/admin/people" },
   { path: "/admin/people", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
   { path: "/admin/recorders", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
@@ -110,7 +114,6 @@ class BirdsenseApp extends BaseElement {
     }
     return `
       <bs-app-header></bs-app-header>
-      ${route.step ? `<bs-upload-steps step="${route.step}"></bs-upload-steps>` : ""}
       <main class="app"><${route.tag}></${route.tag}></main>
     `;
   }

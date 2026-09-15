@@ -1,10 +1,12 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, typography } from "../shared-styles.js";
-import { byteSize, count, longDate } from "../format.js";
+import { byteSize, count, longDate, percent } from "../format.js";
+import { isUnfinished } from "../upload-status.js";
 import { navigate } from "../router.js";
 import * as api from "../api.js";
 import * as flow from "../upload-flow.js";
 import { CancelledError, scanCard } from "../card-scan.js";
+import "./bs-progress-bar.js";
 
 /**
  * <bs-upload-details> -- step 1. Four questions, none of which the volunteer
@@ -14,6 +16,9 @@ import { CancelledError, scanCard } from "../card-scan.js";
  * Choosing the card happens at the end of this step rather than the start,
  * because the folder picker is the one moment a volunteer can get stuck, and
  * it's easier to recover from with the context already filled in.
+ *
+ * A volunteer lands here, so a card they left unfinished is offered above a new
+ * one: an abandoned card is the thing that costs the program a season of audio.
  *
  * Finishing a card that is already on the server starts here too. Its station
  * and pull date are what make it that card, so they are shown rather than
@@ -29,6 +34,8 @@ class UploadDetails extends BaseElement {
   #error = null;
   /** {card, missing}: a folder without some of the files already uploaded, until the volunteer decides. */
   #mismatch = null;
+  /** The volunteer's newest unfinished card, offered above a new upload. */
+  #unfinished = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -44,6 +51,7 @@ class UploadDetails extends BaseElement {
       pulled: (el) => flow.setDetails({ pulledOn: el.value }),
       notes: (el) => flow.setDetails({ notes: el.value }),
       choose: () => this.#choose(),
+      resume: (el) => this.#work(async () => navigate(await flow.resume(el.dataset.reference))),
       anyway: () => {
         const { card } = this.#mismatch;
         this.#work(() => this.#register(card));
@@ -61,8 +69,16 @@ class UploadDetails extends BaseElement {
   async #load() {
     try {
       // A reload part-way through finishing a card picks the card back up.
-      const [{ stations }] = await Promise.all([api.fetchStations(), flow.current()]);
+      // The unfinished card is only an offer, so the page goes on without it.
+      const [{ stations }, , mine] = await Promise.all([
+        api.fetchStations(),
+        flow.current(),
+        api.fetchMyUploads().catch(() => null),
+      ]);
+      // A card that was received is done with; coming back here starts another.
+      if (flow.get().status === "done") flow.reset();
       this.#stations = stations;
+      this.#unfinished = mine?.uploads.find(isUnfinished) ?? null;
       if (!flow.get().stationId && stations.length) {
         flow.setDetails({ stationId: stations[0].id });
       }
@@ -118,6 +134,19 @@ class UploadDetails extends BaseElement {
       <style>
         h1 { margin-bottom: 0.375rem; }
         .intro { margin-bottom: 2.125rem; max-width: 70ch; }
+        .callout {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 1.75rem;
+          flex-wrap: wrap;
+          margin-bottom: 2.125rem;
+        }
+        .callout-body { min-width: 0; }
+        .callout .eyebrow { color: var(--bs-amber-ink); margin-bottom: var(--bs-space-2); }
+        .callout-title { font-family: var(--bs-font-display); font-size: 1.5rem; margin-bottom: 0.375rem; }
+        .callout bs-progress-bar { margin-top: 0.875rem; width: 320px; max-width: 100%; }
+        @media (max-width: 720px) { .callout .btn { width: 100%; } }
         .columns {
           display: grid;
           grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
@@ -151,6 +180,7 @@ class UploadDetails extends BaseElement {
     const station = this.#stations.find((s) => s.id === stationId);
 
     return `
+      ${this.#unfinished && !flow.get().upload ? this.#unfinishedCard(this.#unfinished) : ""}
       <h1>Upload an SD card</h1>
       <p class="lede intro">
         Put the SD card in your reader and leave it there. Files upload straight from the
@@ -202,7 +232,7 @@ class UploadDetails extends BaseElement {
           <div class="panel">
             <h3>If it gets interrupted</h3>
             <p>
-              No problem. Come back to your cards, pick this one and choose the card again,
+              No problem. Come back to My uploads, resume this card and choose the card again,
               and we upload only what's missing. Keep the card until you get the confirmation email.
             </p>
           </div>
@@ -212,6 +242,24 @@ class UploadDetails extends BaseElement {
       <div class="step-footer">
         <span class="note">Next you'll point us at the card.</span>
         ${this.#chooseButton(!station)}
+      </div>
+    `;
+  }
+
+  #unfinishedCard(upload) {
+    return `
+      <div class="panel panel--notice callout">
+        <div class="callout-body">
+          <div class="eyebrow">Unfinished upload</div>
+          <div class="callout-title">${escapeHTML(upload.stationName)} · ${escapeHTML(upload.stationId)}</div>
+          <p>
+            ${count(upload.filesUploaded)} of ${count(upload.fileCount)} files uploaded ·
+            card pulled ${escapeHTML(longDate(upload.pulledOn))}
+          </p>
+          <bs-progress-bar value="${percent(upload.filesUploaded, upload.fileCount)}" label="Files uploaded so far"></bs-progress-bar>
+        </div>
+        <button class="btn btn--primary" data-action="resume" data-reference="${escapeHTML(upload.reference)}"
+                ${this.#busy ? "disabled" : ""}>Resume upload →</button>
       </div>
     `;
   }

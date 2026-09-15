@@ -25,7 +25,7 @@ class UploadDone extends BaseElement {
     return {
       home: () => {
         flow.reset();
-        navigate("/app");
+        navigate("/app/uploads");
       },
       again: () => {
         flow.reset();
@@ -103,7 +103,7 @@ class UploadDone extends BaseElement {
       </div>
 
       <div class="row">
-        <button class="btn btn--forest" data-action="home">Back to my cards</button>
+        <button class="btn btn--forest" data-action="home">See my uploads</button>
         <button class="btn btn--quiet" data-action="again">Upload another card</button>
       </div>
     `;

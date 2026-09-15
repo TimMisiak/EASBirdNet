@@ -112,13 +112,13 @@ GET    POST /api/v1/uploads               your cards; register a card and its fi
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
+GET    /api/v1/detections                 every card's detections: filtered, sorted, a page at a time
+GET    /api/v1/detections/{reference}?file=        what was heard on a card, or in one of its files
+GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
+GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
+PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
 GET    /api/v1/admin/uploads              every card, admin only
 GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it
-GET    /api/v1/admin/detections           every card's detections: filtered, sorted, a page at a time
-GET    /api/v1/admin/uploads/{reference}/files/{id}/detections   what was heard in a file
-GET    /api/v1/admin/uploads/{reference}/detections/{id}          one detection, with its card and file
-GET    /api/v1/admin/uploads/{reference}/detections/{id}/clip     its clip, as a WAV
-PUT    /api/v1/admin/uploads/{reference}/detections/{id}/review   confirm, discard, or undo
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
@@ -131,17 +131,21 @@ there). It registers the `/dev/*` routes, and `GET /session` reports it as
 `dev`, so the sign-in page offers a picker of everyone on the roster.
 
 A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
-anyone else, and the `/admin/*` routes 403 for a volunteer. A card's counts are
+anyone else, and the `/admin/*` routes 403 for a volunteer.
+Detections are not a card's: anyone signed in hears and reviews every card's,
+under `/detections`. A card's counts are
 the server's own tally of the files it has received (`tallyFiles`), never
 reported by the client, so a retried chunk can't count twice, and a card moves
 to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
-**Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
-`/admin/people`, `/admin/uploads/{reference}`,
-`/admin/uploads/{reference}/detections/{id}`, `/admin/detections`, and the same
-detection opened from that list, `/admin/detections/{reference}/{id}`. A page
-may keep its view in the query string (`/admin/detections?species=Strix+varia`):
+**Routes are paths, not hashes.** `/`, `/signin`, a volunteer's tabs
+(`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
+`/app/detections`), `/admin/people`, `/admin/uploads/{reference}`,
+`/admin/uploads/{reference}/detections/{id}`, `/admin/detections`, and a
+detection opened from either detections list, `/app/detections/{reference}/{id}`
+or `/admin/detections/{reference}/{id}`. A page
+may keep its view in the query string (`/app/detections?species=Strix+varia`):
 the router carries it through links, `replaceQuery` rewrites it without a
 history entry, and the detection page carries the list's back with it.
 `internal/web` already falls back to index.html for
@@ -377,9 +381,13 @@ and the analysis queue runs BirdNET over it in the server process, writing
 `unreviewed` detections, each with a clip. The coordinator's card page
 (`/admin/uploads/{ref}`) shows each file's status and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
-Discard. The Detections tab (`/admin/detections`) lists every card's detections,
+Discard. The Detections tab (`/admin/detections`, and `/app/detections` on a
+volunteer's page) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
-minimum confidence and the days heard, and opens the same detection page. Reviewing is admin-only for now. Nothing moves a card from `in_review`
+minimum confidence and the days heard, and opens the same detection page. Anyone signed in can review. A volunteer's page
+(`<bs-volunteer-page>`) has tabs like the coordinator's: Upload, the default,
+holding the card upload's four steps; My uploads, their own cards, where an
+unfinished one is resumed; and Detections. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged; nothing backfills them.
 Nothing cleans up abandoned partial uploads, short of deleting their card.

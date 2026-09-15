@@ -235,3 +235,28 @@ export const panels = sheet(`
   .confirm p { color: var(--bs-chip-attention-text); margin: 0; }
   .confirm .row { gap: var(--bs-space-2); }
 `);
+
+/**
+ * A page's tabs, which are routes: the coordinator's and the volunteer's pages
+ * both open with a row of them. The current one carries aria-current="page".
+ */
+export const tabs = sheet(`
+  .tabs {
+    display: flex;
+    gap: var(--bs-space-1);
+    border-bottom: 1px solid var(--bs-border);
+    margin-bottom: 2.125rem;
+    overflow-x: auto;
+  }
+  .tab {
+    border-bottom: 2px solid transparent;
+    color: var(--bs-text-muted);
+    padding: 0.625rem var(--bs-space-4);
+    margin-bottom: -1px;
+    font-size: 0.90625rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .tab:hover { color: var(--bs-text); }
+  .tab[aria-current="page"] { border-bottom-color: var(--bs-amber); color: var(--bs-text); }
+`);
