@@ -16,12 +16,12 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │   └── internal/
 │       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
 │       ├── api/        JSON handlers under /api/v1/
-│       ├── birdnet/    Runs analyzer/analyze.py, returns detections
+│       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── devseed/    Placeholder program written into an empty dev database
-│       ├── storage/    Card audio: a tusd data store on disk (dev) or Azure Blob Storage
+│       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
-├── analyzer/           analyze.py + pinned requirements.txt: BirdNET in Python
+├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
 ├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
@@ -115,6 +115,9 @@ POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
 GET    /api/v1/admin/uploads/{reference}  one card, with every file and its status
 GET    /api/v1/admin/uploads/{reference}/files/{id}/detections   what was heard in a file
+GET    /api/v1/admin/uploads/{reference}/detections/{id}          one detection, with its card and file
+GET    /api/v1/admin/uploads/{reference}/detections/{id}/clip     its clip, as a WAV
+PUT    /api/v1/admin/uploads/{reference}/detections/{id}/review   confirm, discard, or undo
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
@@ -134,7 +137,8 @@ to `processing` only once every file on its list is in. The roster always keeps 
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
-`/admin/people`, `/admin/uploads/{reference}`. `internal/web` already falls back to index.html for
+`/admin/people`, `/admin/uploads/{reference}`,
+`/admin/uploads/{reference}/detections/{id}`. `internal/web` already falls back to index.html for
 extension-less paths, so a reload mid-wizard lands on the same screen, and a
 coordinator can send a colleague a link to one admin tab. `js/router.js` is the
 whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
@@ -201,7 +205,9 @@ that means dev data has outgrown it, not that it needs indexing.
 **BirdNET runs as a Python subprocess.** BirdNET's maintained runtime is the
 `birdnet` Python package, so `internal/birdnet` runs `analyzer/analyze.py`
 with a batch of files and parses the one JSON object it prints, rather than
-binding a TFLite runtime into Go through cgo. The model loads once per batch, so
+binding a TFLite runtime into Go through cgo. Clips are cut the same way, by
+`analyzer/clip.py` with soundfile, which is what birdnet reads audio with, so a
+file BirdNET could analyze can be cut. The model loads once per batch, so
 hand it a night of files, not one at a time. The package uses BirdNET v2.4 on
 LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 - The runtime image is Debian (`python:3.12-slim-bookworm`), not Alpine,
@@ -218,11 +224,14 @@ there is no separate queue to keep in step with the documents, and nothing in
 memory to lose. `Queue.Run` takes one file at a time, oldest card first: it
 copies the file out of `internal/storage` to a temp file (keeping its
 extension, which birdnet picks a decoder by), runs BirdNET with the recorder's
-position and week, upserts the detections, marks the file `analyzed`, and
-recounts the card. The API only calls `Enqueue` to wake it when a card's last
+position and week, merges each species' consecutive windows into one detection
+at the highest confidence (`merge.go`), cuts a clip of each with `clip.py` (the
+run and 1 s either side, at most 30 s around its best window) into storage at
+`clips/{card}/{detection}.wav`, upserts the detections, marks the file
+`analyzed`, and recounts the card. The API only calls `Enqueue` to wake it when a card's last
 file lands. At startup it resumes whatever was left, including a file cut off
 mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
-A file BirdNET can't read fails at once; a crashed run is retried twice, 30 s
+A file BirdNET can't read fails at once; a crashed run (of either script) is retried twice, 30 s
 apart and growing, and then fails, so one file can't wedge the queue. The last
 file moves the card to `in_review`, or `needs_attention` if any failed. If the
 server's Python can't `import birdnet` at startup it logs a warning and doesn't
@@ -238,6 +247,13 @@ enough, not before.
 *Revisit when:* analysis moves to its own Container Apps job (see
 DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
 the job's image, and `Queue.Run` is what the job runs.
+
+**Spectrograms are drawn in the browser.** `<bs-spectrogram>` fetches a
+detection's clip once, plays it from a blob URL, decodes it with Web Audio and
+runs its own FFT onto a canvas, in the paper and ink tokens. The clip is the
+only thing stored, and there is no image library or frontend package.
+*Revisit when:* a spectrogram has to appear without JavaScript (an email), or
+another page needs the same picture of a whole file.
 
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
@@ -321,9 +337,10 @@ cd backend && gofmt -l . && go vet ./... && go test ./...
 skipped unless `BIRDSENSE_TEST_AZURITE` names its endpoint (the command is in
 the test). Set it when changing `internal/storage` or the tusd version.
 
-`TestAnalyzeOsprey` runs the real model and is skipped unless
-`BIRDSENSE_BIRDNET_PYTHON` names a Python with `analyzer/requirements.txt`
-installed. Set it when changing `internal/birdnet`, `analyze.py`, or the pins.
+`TestAnalyzeOsprey` runs the real model, and `TestCutOsprey` the real
+`clip.py`; both are skipped unless `BIRDSENSE_BIRDNET_PYTHON` names a Python
+with `analyzer/requirements.txt` installed. Set it when changing
+`internal/birdnet`, `analyze.py`, `clip.py`, or the pins.
 
 BirdNET in the image, on the test clip:
 
@@ -350,7 +367,10 @@ match. The Blob Storage backend has run against Azurite with a shared key, not
 against Azure with a managed identity (DEPLOYMENT.md lists what to check).
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
 and the analysis queue runs BirdNET over it in the server process, writing
-`unreviewed` detections. The coordinator's card page (`/admin/uploads/{ref}`)
-shows each file's status and what was heard in it. There is no review screen
-yet, so nothing moves a card from `in_review` to `results_sent`, and no email.
+`unreviewed` detections, each with a clip. The coordinator's card page
+(`/admin/uploads/{ref}`) shows each file's status and what was heard in it, and
+each detection has its own page with its clip, a spectrogram, and Confirm and
+Discard. Reviewing is admin-only for now. Nothing moves a card from `in_review`
+to `results_sent` yet, and there is no email. Detections stored before clips
+were cut have no clip and weren't merged; nothing backfills them.
 Nothing cleans up abandoned partial uploads.

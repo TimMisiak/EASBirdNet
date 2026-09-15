@@ -9,7 +9,7 @@ import "./bs-progress-bar.js";
 /**
  * <bs-admin-upload-detail reference="OWL-20260914-SR03"> -- one card, file by
  * file: where each is in being sent and analyzed, and, opened, everything
- * BirdNET heard in it. While the card is still moving the page looks again
+ * BirdNET heard in it, each linked to its own page for review. While the card is still moving the page looks again
  * every few seconds, keeping the filter and the open files as they were.
  *
  * Attribute: reference, the card.
@@ -346,7 +346,7 @@ class AdminUploadDetail extends BaseElement {
             <tr>
               <td class="num nowrap" style="text-align: left;">${clock(d.startSec)}–${clock(d.endSec)}</td>
               <td class="nowrap">${escapeHTML(dateAtTime(d.detectedAt))}</td>
-              <td>${escapeHTML(d.commonName)}${
+              <td><a href="${escapeHTML(`/admin/uploads/${encodeURIComponent(upload.reference)}/detections/${encodeURIComponent(d.id)}`)}">${escapeHTML(d.commonName)}</a>${
                 d.scientificName && d.scientificName !== d.commonName
                   ? ` <span class="sci">${escapeHTML(d.scientificName)}</span>`
                   : ""
@@ -366,7 +366,7 @@ function reviewChip(status) {
   const chips = {
     unreviewed: ["neutral", "Unreviewed"],
     confirmed: ["done", "Confirmed"],
-    rejected: ["attention", "Rejected"],
+    rejected: ["attention", "Discarded"],
   };
   const [kind, label] = chips[status] ?? ["neutral", status];
   return `<bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip>`;

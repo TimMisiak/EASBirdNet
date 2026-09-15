@@ -111,16 +111,33 @@ type AudioFile struct {
 	DetectionCount int        `json:"detectionCount"`
 }
 
-// Detection is one thing BirdNET heard in a file.
+// Detection is one thing BirdNET heard in a file: a species over a run of
+// consecutive windows, at the confidence of the best of them.
 type Detection struct {
 	ID             string    `json:"id"`
+	AudioFileID    string    `json:"audioFileId"`
 	StartSec       float64   `json:"startSec"`
 	EndSec         float64   `json:"endSec"`
 	DetectedAt     time.Time `json:"detectedAt"`
 	ScientificName string    `json:"scientificName"`
 	CommonName     string    `json:"commonName"`
 	Confidence     float64   `json:"confidence"`
-	ReviewStatus   string    `json:"reviewStatus"`
+	// Clip is the stretch of the file that can be played, when one was cut.
+	Clip         *Clip   `json:"clip,omitempty"`
+	ReviewStatus string  `json:"reviewStatus"` // db.ReviewUnreviewed, db.ReviewConfirmed or db.ReviewRejected
+	Review       *Review `json:"review,omitempty"`
+}
+
+// Clip is where a detection's clip sits in its file, in seconds.
+type Clip struct {
+	StartSec float64 `json:"startSec"`
+	EndSec   float64 `json:"endSec"`
+}
+
+// Review is who gave a detection its review status, and when.
+type Review struct {
+	By string    `json:"by"`
+	At time.Time `json:"at"`
 }
 
 // CardFile is one audio file on a card. The browser lists them when it
@@ -203,11 +220,18 @@ func audioFileOf(f db.AudioFile) AudioFile {
 }
 
 func detectionOf(d db.Detection) Detection {
-	return Detection{
-		ID: d.ID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
+	out := Detection{
+		ID: d.ID, AudioFileID: d.AudioFileID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
 		ScientificName: d.ScientificName, CommonName: d.CommonName,
 		Confidence: d.Confidence, ReviewStatus: d.ReviewStatus,
 	}
+	if d.Clip != nil {
+		out.Clip = &Clip{StartSec: d.Clip.StartSec, EndSec: d.Clip.EndSec}
+	}
+	if d.Review != nil {
+		out.Review = &Review{By: d.Review.UserName, At: d.Review.At}
+	}
+	return out
 }
 
 func cardFileOf(f db.AudioFile) CardFile {

@@ -136,12 +136,14 @@ Holds the audio. At ~128 GB per card, this is where the money goes (see *Cost*).
 | blob_properties.cors_rule | *unset* | Browsers never talk to the storage account. |
 
 **Blob container** — `azurerm_storage_container`: name `audio`, access type
-`private`. Blob names follow `uploads/{uploadId}/{random}`, each with a
-`.info` blob beside it (SCHEMA.md). The app tries to create the container at
+`private`. Card audio is at `uploads/{uploadId}/{random}`, each with a
+`.info` blob beside it, and the clips the server cuts for review are at
+`clips/{uploadId}/{detectionId}.wav`, a few MB each at most (SCHEMA.md). The app tries to create the container at
 startup and carries on if it exists; Terraform should still own it.
 
 **Lifecycle** — `azurerm_storage_management_policy`, one rule on prefix
-`audio/uploads/`. The day counts are placeholders until the retention question
+`audio/uploads/`. It deliberately leaves `audio/clips/` in the hot tier, since
+reviewers play clips on demand. The day counts are placeholders until the retention question
 below is answered:
 
 | Action | After |
@@ -304,7 +306,8 @@ What it needs, beyond resources 7 and 8:
   before staging it. The browser sends at most 50 MB a request and one file at
   a time, so that is 50 MB per volunteer uploading at once, against the
   replica's ephemeral storage allowance. Analysis downloads one whole file at a
-  time to temp storage (a few hundred MB) and deletes it after.
+  time to temp storage (a few hundred MB), cuts its clips beside it, and
+  deletes both after.
 - **Request time.** The Container Apps ingress ends a request after 240 s. At
   50 MB a request that holds down to about 2 Mb/s of upstream; for slower links,
   lower `CHUNK_BYTES` in `frontend/js/upload-flow.js`.

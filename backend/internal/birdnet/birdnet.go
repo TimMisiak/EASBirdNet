@@ -36,6 +36,9 @@ type Analyzer struct {
 	Python string
 	// Script is the path to analyzer/analyze.py.
 	Script string
+	// ClipScript is the path to analyzer/clip.py, which Cut runs. Empty means
+	// clip.py in the same directory as Script.
+	ClipScript string
 	// Stderr, if set, receives the script's logs as they are written. The tail
 	// of them is included in the error when a run fails either way.
 	Stderr io.Writer
@@ -260,12 +263,14 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 
 func (t *tailBuffer) String() string { return string(bytes.TrimSpace(t.buf)) }
 
-// Check reports whether Analyze can run: the script is there, and the Python
-// can import the birdnet package. It loads no model, so it takes a second, not
+// Check reports whether Analyze and Cut can run: the scripts are there, and the
+// Python can import the birdnet package. It loads no model, so it takes a second, not
 // the minute a real run can.
 func (a Analyzer) Check(ctx context.Context) error {
-	if _, err := os.Stat(a.Script); err != nil {
-		return fmt.Errorf("birdnet: %w", err)
+	for _, script := range []string{a.Script, a.clipScript()} {
+		if _, err := os.Stat(script); err != nil {
+			return fmt.Errorf("birdnet: %w", err)
+		}
 	}
 	var stderr tailBuffer
 	stderr.max = 1 << 10

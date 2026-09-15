@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
@@ -60,6 +61,35 @@ func testStore(t *testing.T, s Store) {
 
 	if _, err := s.Open(ctx, Name("OWL-20260907-SR02/missing")); !errors.Is(err, ErrNotFound) {
 		t.Errorf("open a missing file: err = %v, want ErrNotFound", err)
+	}
+
+	// A clip the server cut is written whole, and a second cut replaces it.
+	clip := ClipName("OWL-20260907-SR02", "det_"+t.Name())
+	for _, want := range []string{"RIFF a longer first clip", "RIFF second"} {
+		if err := s.Put(ctx, clip, strings.NewReader(want)); err != nil {
+			t.Fatalf("put %s: %v", clip, err)
+		}
+		r, err := s.Open(ctx, clip)
+		if err != nil {
+			t.Fatalf("open %s: %v", clip, err)
+		}
+		got, _ := io.ReadAll(r)
+		r.Close()
+		if string(got) != want {
+			t.Errorf("clip = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestClipName(t *testing.T) {
+	for _, c := range []struct{ upload, det, want string }{
+		{"OWL-20260907-SR02", "det_9c41", "clips/OWL-20260907-SR02/det_9c41.wav"},
+		{"OWL-20260907-SR/../x", "det_1", "clips/OWL-20260907-SR_.._x/det_1.wav"},
+		{"..", "det_1", "clips/__/det_1.wav"},
+	} {
+		if got := ClipName(c.upload, c.det); got != c.want {
+			t.Errorf("ClipName(%q, %q) = %q, want %q", c.upload, c.det, got, c.want)
+		}
 	}
 }
 

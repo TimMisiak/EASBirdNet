@@ -76,6 +76,15 @@ export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComp
 /** What BirdNET heard in one file of a card, in the order it was heard. */
 export const fetchFileDetections = (reference, fileId) =>
   get(`/admin/uploads/${encodeURIComponent(reference)}/files/${encodeURIComponent(fileId)}/detections`);
+/** One detection, with the card and the file it was heard in. */
+export const fetchDetection = (reference, id) =>
+  get(`/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}`);
+/** Where a detection's clip plays from: a WAV, a few seconds either side of what was heard. */
+export const clipURL = (reference, id) =>
+  `${BASE}/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}/clip`;
+/** Record a verdict on a detection: "confirmed", "rejected", or back to "unreviewed". */
+export const reviewDetection = (reference, id, status) =>
+  request("PUT", `/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}/review`, { status });
 export const fetchPeople = () => get("/admin/people");
 export const addPerson = (body) => request("POST", "/admin/people", body);
 /** Replace someone's name, email and role. */

@@ -4,7 +4,8 @@
 // Storage in production. Config.Backend picks between them.
 //
 // Both lay files out the same way. An upload's bytes are at Name(id), and tusd
-// keeps its own record of the upload beside them, at Name(id) + ".info".
+// keeps its own record of the upload beside them, at Name(id) + ".info". Files
+// the server cuts from that audio, detection clips, are under ClipName.
 package storage
 
 import (
@@ -31,8 +32,11 @@ type Store interface {
 	// UseIn makes this store the data store of a tusd handler, with a lock
 	// per upload so a retried request can't write over one still running.
 	UseIn(composer *tushandler.StoreComposer)
-	// Open reads a stored file by name, as Name gave it.
+	// Open reads a stored file by name, as Name or ClipName gave it.
 	Open(ctx context.Context, name string) (io.ReadCloser, error)
+	// Put stores a file the server made itself, a detection clip, replacing
+	// anything under that name. Card audio only ever arrives over tus.
+	Put(ctx context.Context, name string, body io.ReadSeeker) error
 }
 
 // prefix is where every upload goes, so the card's audio and nothing else is
@@ -44,6 +48,33 @@ const prefix = "uploads"
 // so a card's files share a prefix.
 func Name(uploadID string) string {
 	return prefix + "/" + uploadID
+}
+
+// clipPrefix is where detection clips go: beside the card audio rather than
+// inside it, so a lifecycle rule that tiers or deletes originals leaves the
+// clips reviewers listen to alone.
+const clipPrefix = "clips"
+
+// ClipName is where a detection's clip is stored. A card's clips share a
+// prefix, like its audio.
+func ClipName(uploadID, detectionID string) string {
+	return clipPrefix + "/" + segment(uploadID) + "/" + segment(detectionID) + ".wav"
+}
+
+// segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a
+// level to a name or climb out of one.
+func segment(id string) string {
+	id = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, id)
+	if strings.Trim(id, ".") == "" {
+		return strings.Repeat("_", max(len(id), 1))
+	}
+	return id
 }
 
 // Backends.
@@ -118,6 +149,36 @@ func (s *local) Open(_ context.Context, name string) (io.ReadCloser, error) {
 	return f, err
 }
 
+func (s *local) Put(_ context.Context, name string, body io.ReadSeeker) error {
+	if !fs.ValidPath(name) {
+		return fmt.Errorf("storage: invalid name %q", name)
+	}
+	dst := filepath.Join(s.dir, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o775); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	// Write beside it and rename, so a reader never gets half a file.
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".put-*")
+	if err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	_, err = io.Copy(tmp, body)
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o664)
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), dst)
+	}
+	if err != nil {
+		return fmt.Errorf("storage: writing %s: %w", name, err)
+	}
+	return nil
+}
+
 // --- Azure Blob Storage ---
 
 type azure struct {
@@ -171,4 +232,21 @@ func (s *azure) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 	return r, err
+}
+
+// Put writes a block blob in one block: tusd's blob stages what it is given as
+// a block, and committing the list makes the blob. A name ending in ".info"
+// would be taken for tusd's own record, which ClipName never gives.
+func (s *azure) Put(ctx context.Context, name string, body io.ReadSeeker) error {
+	blob, err := s.service.NewBlob(ctx, name)
+	if err == nil {
+		err = blob.Upload(ctx, body)
+	}
+	if err == nil {
+		err = blob.Commit(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("storage: writing %s: %w", name, err)
+	}
+	return nil
 }
