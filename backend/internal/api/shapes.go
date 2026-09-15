@@ -128,6 +128,22 @@ type Detection struct {
 	Review       *Review `json:"review,omitempty"`
 }
 
+// ListedDetection is a detection in the list of every card's detections, with
+// the card it is on and where that card was recorded.
+type ListedDetection struct {
+	Detection
+	Reference   string `json:"reference"`
+	StationName string `json:"stationName"`
+	Night       string `json:"night"` // YYYY-MM-DD
+}
+
+// SpeciesCount is one species BirdNET labelled detections with, and how many.
+type SpeciesCount struct {
+	ScientificName string `json:"scientificName"`
+	CommonName     string `json:"commonName"`
+	Detections     int    `json:"detections"`
+}
+
 // Clip is where a detection's clip sits in its file, in seconds.
 type Clip struct {
 	StartSec float64 `json:"startSec"`

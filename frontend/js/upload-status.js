@@ -72,3 +72,16 @@ export function fileChip(file, upload) {
 /** True when the volunteer still has work to do on this card. */
 export const isUnfinished = (upload) =>
   upload.status === "in_progress" || upload.status === "interrupted";
+
+const REVIEWS = {
+  unreviewed: { kind: "neutral", label: "Unreviewed" },
+  confirmed: { kind: "done", label: "Confirmed" },
+  rejected: { kind: "attention", label: "Discarded" },
+};
+
+/**
+ * How a detection's review reads on screen. "rejected" is stored, but the
+ * button that sets it says Discard, so that is what the chip says too.
+ * @returns {{kind: string, label: string}} for <bs-chip>.
+ */
+export const reviewChip = (status) => REVIEWS[status] ?? { kind: "neutral", label: status };

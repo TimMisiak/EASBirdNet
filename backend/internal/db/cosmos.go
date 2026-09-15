@@ -290,9 +290,10 @@ func (s *cosmosStore) GetDetection(ctx context.Context, uploadID, id string) (De
 }
 
 // ListDetections is a single-partition query when f.UploadID is set and a
-// cross-partition one otherwise (the public overview). Timestamps are compared
-// as RFC 3339 strings, which only order correctly to the whole second, so the
-// query widens Since by a second and the shared filter trims the result.
+// cross-partition one otherwise (the public overview, the list of every
+// detection). Timestamps are compared as RFC 3339 strings, which only order
+// correctly to the whole second, so the query widens Since and Until by a second
+// and the shared filter trims the result.
 func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error) {
 	var w where
 	if f.AudioFileID != "" {
@@ -304,6 +305,13 @@ func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]
 	if !f.Since.IsZero() {
 		since := f.Since.UTC().Truncate(time.Second).Add(-time.Second)
 		w.add("c.detectedAt >= @since", "@since", since.Format(time.RFC3339))
+	}
+	if !f.Until.IsZero() {
+		until := f.Until.UTC().Truncate(time.Second).Add(time.Second)
+		w.add("c.detectedAt <= @until", "@until", until.Format(time.RFC3339))
+	}
+	if f.MinConfidence > 0 {
+		w.add("c.confidence >= @minConfidence", "@minConfidence", f.MinConfidence)
 	}
 	found, err := queryDocs[Detection](ctx, s.detections, f.UploadID, "SELECT * FROM c"+w.sql(), w.params...)
 	if err != nil {

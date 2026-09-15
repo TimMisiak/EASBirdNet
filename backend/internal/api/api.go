@@ -71,6 +71,7 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
 	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.deleteUpload))
+	mux.HandleFunc("GET /api/v1/admin/detections", h.requireRole(db.RoleAdmin, h.listDetections))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/files/{file}/detections", h.requireRole(db.RoleAdmin, h.listFileDetections))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}", h.requireRole(db.RoleAdmin, h.getDetection))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}/clip", h.requireRole(db.RoleAdmin, h.getClip))

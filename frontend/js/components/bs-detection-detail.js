@@ -1,6 +1,7 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, typography } from "../shared-styles.js";
 import { clock, dateAtTime, longDate, shortDate } from "../format.js";
+import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
 import "./bs-chip.js";
 import "./bs-spectrogram.js";
@@ -10,20 +11,21 @@ import "./bs-spectrogram.js";
  * detection, for review: its clip to hear and see, and Confirm or Discard.
  * Previous and next step through the other detections in the same file.
  *
+ * It is opened from a card's page, and goes back there, or from the list of
+ * every detection, which it goes back to with that list's filters. Its links
+ * stay under whichever it was opened from.
+ *
  * The page is rendered whole once the detection loads. A verdict redraws only
  * the review panel and the chip, so a clip that is playing keeps playing.
  *
- * Attributes: reference, the card; detection, the detection's id.
+ * Attributes: reference, the card; detection, the detection's id; list, present
+ * when it was opened from the list of every detection, holding that list's
+ * query string.
  */
-const REVIEW_CHIPS = {
-  unreviewed: ["neutral", "Unreviewed"],
-  confirmed: ["done", "Confirmed"],
-  rejected: ["attention", "Discarded"],
-};
 
 class DetectionDetail extends BaseElement {
   static styles = [typography, controls, panels];
-  static observedAttributes = ["reference", "detection"];
+  static observedAttributes = ["reference", "detection", "list"];
 
   /** {status, upload, file, detection, siblings, error}; siblings are the file's detections, in order. */
   #state = { status: "loading" };
@@ -97,13 +99,24 @@ class DetectionDetail extends BaseElement {
     this.#renderReview();
   }
 
+  /** The list's query string, with its "?", or "" -- when opened from the list of every detection. */
+  get #listSearch() {
+    const search = this.getAttribute("list") ?? "";
+    return search ? `?${search}` : "";
+  }
+
   #href(id) {
-    return `/admin/uploads/${encodeURIComponent(this.reference)}/detections/${encodeURIComponent(id)}`;
+    const ref = encodeURIComponent(this.reference);
+    return this.hasAttribute("list")
+      ? `/admin/detections/${ref}/${encodeURIComponent(id)}${this.#listSearch}`
+      : `/admin/uploads/${ref}/detections/${encodeURIComponent(id)}`;
   }
 
   render() {
     const { status, error } = this.#state;
-    const cardHref = `/admin/uploads/${encodeURIComponent(this.reference)}`;
+    const back = this.hasAttribute("list")
+      ? { href: `/admin/detections${this.#listSearch}`, label: "All detections" }
+      : { href: `/admin/uploads/${encodeURIComponent(this.reference)}`, label: this.reference };
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -144,7 +157,7 @@ class DetectionDetail extends BaseElement {
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
       </style>
 
-      <a class="back" href="${escapeHTML(cardHref)}">← ${escapeHTML(this.reference)}</a>
+      <a class="back" href="${escapeHTML(back.href)}">← ${escapeHTML(back.label)}</a>
       ${
         status === "loading"
           ? `<p class="empty">Loading the detection…</p>`
@@ -214,7 +227,10 @@ class DetectionDetail extends BaseElement {
           <dt>Night</dt>
           <dd>${escapeHTML(shortDate(file.night))}</dd>
           <dt>Card</dt>
-          <dd>${escapeHTML(upload.volunteerName)}, pulled ${escapeHTML(longDate(upload.pulledOn))}</dd>
+          <dd>
+            <a class="path" href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a>
+            <small>${escapeHTML(upload.volunteerName)}, pulled ${escapeHTML(longDate(upload.pulledOn))}</small>
+          </dd>
         </dl>
         <section class="panel review" aria-live="polite">${this.#reviewPanel(next)}</section>
       </div>
@@ -222,7 +238,7 @@ class DetectionDetail extends BaseElement {
   }
 
   #chip() {
-    const [kind, label] = REVIEW_CHIPS[this.#state.detection.reviewStatus] ?? ["neutral", this.#state.detection.reviewStatus];
+    const { kind, label } = reviewChip(this.#state.detection.reviewStatus);
     return `<bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip>`;
   }
 

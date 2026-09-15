@@ -265,7 +265,7 @@ func TestJSONFileListFilters(t *testing.T) {
 	base := time.Date(2026, 9, 10, 2, 0, 0, 0, time.UTC)
 	mk := func(upload string, at time.Duration, species, review string) Detection {
 		return Detection{AudioFileID: "af_" + upload, RecorderID: r.ID, DetectedAt: base.Add(at), StartSec: at.Seconds(),
-			ScientificName: species, ReviewStatus: review}
+			ScientificName: species, Confidence: 0.5 + at.Hours()/10, ReviewStatus: review}
 	}
 	if err := s.UpsertDetections(ctx, first.ID, []Detection{
 		mk(first.ID, 0, "Strix varia", ReviewConfirmed),
@@ -287,6 +287,14 @@ func TestJSONFileListFilters(t *testing.T) {
 	onFirst, _ := s.ListDetections(ctx, DetectionFilter{UploadID: first.ID})
 	if len(onFirst) != 2 || !onFirst[0].DetectedAt.Before(onFirst[1].DetectedAt) {
 		t.Errorf("detections on %s = %d, want 2 in the order heard", first.ID, len(onFirst))
+	}
+	window, _ := s.ListDetections(ctx, DetectionFilter{Since: base.Add(time.Hour), Until: base.Add(3 * time.Hour)})
+	if len(window) != 2 || window[0].ScientificName != "Bubo virginianus" || window[1].UploadID != later.ID {
+		t.Errorf("heard from 1 h to before 3 h = %d detections, want the horned owl and the later barred owl", len(window))
+	}
+	confident, _ := s.ListDetections(ctx, DetectionFilter{MinConfidence: 0.7})
+	if len(confident) != 2 || confident[0].Confidence != 0.7 {
+		t.Errorf("at 70%% or more = %d detections, want the last two", len(confident))
 	}
 	unreviewed, _ := s.ListDetections(ctx, DetectionFilter{ReviewStatus: ReviewUnreviewed})
 	if len(unreviewed) != 1 || unreviewed[0].ScientificName != "Tyto alba" {

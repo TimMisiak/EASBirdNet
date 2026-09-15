@@ -27,6 +27,9 @@ const ROUTES = [
   { path: "/admin/uploads", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
   // One card: /admin/uploads/OWL-20260914-SR03.
   { path: "/admin/uploads/", prefix: true, tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/detections", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  // One detection, opened from that list: /admin/detections/OWL-20260914-SR03/det_….
+  { path: "/admin/detections/", prefix: true, tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
 ];
 
 /** The route for a path: an exact match, or a prefix route with something after the prefix. */

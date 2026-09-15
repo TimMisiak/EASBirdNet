@@ -9,10 +9,27 @@ export function path() {
   return location.pathname.replace(/\/+$/, "") || "/";
 }
 
+/** Go to a path, with a query string if it has one. */
 export function navigate(to, { replace = false } = {}) {
-  if (to === path()) return;
-  history[replace ? "replaceState" : "pushState"](null, "", to);
+  const url = new URL(to, location.href);
+  if (url.pathname.replace(/\/+$/, "") === location.pathname.replace(/\/+$/, "") && url.search === location.search) return;
+  history[replace ? "replaceState" : "pushState"](null, "", url.pathname + url.search);
   announce();
+}
+
+/** The current query string's parameters. */
+export function query() {
+  return new URLSearchParams(location.search);
+}
+
+/**
+ * Rewrite the query string in place, without a history entry or telling
+ * anyone: for a page keeping its own filters in the URL, so a reload or a
+ * link lands on the same view, while the page stays as it is.
+ */
+export function replaceQuery(params) {
+  const search = new URLSearchParams(params).toString();
+  history.replaceState(null, "", `${location.pathname}${search ? `?${search}` : ""}`);
 }
 
 export function onNavigate(listener) {
@@ -40,5 +57,5 @@ document.addEventListener("click", (event) => {
   if (url.origin !== location.origin) return;
 
   event.preventDefault();
-  navigate(url.pathname);
+  navigate(url.pathname + url.search);
 });

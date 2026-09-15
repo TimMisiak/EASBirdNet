@@ -95,8 +95,12 @@ type DetectionFilter struct {
 	// query stays in the card's partition.
 	AudioFileID  string
 	ReviewStatus string
-	// Since keeps detections heard at or after this instant.
+	// Since keeps detections heard at or after this instant, and Until those
+	// heard before it.
 	Since time.Time
+	Until time.Time
+	// MinConfidence keeps detections at or above it.
+	MinConfidence float64
 }
 
 // Backends.
@@ -155,7 +159,9 @@ func (f DetectionFilter) match(d Detection) bool {
 	return (f.UploadID == "" || d.UploadID == f.UploadID) &&
 		(f.AudioFileID == "" || d.AudioFileID == f.AudioFileID) &&
 		(f.ReviewStatus == "" || d.ReviewStatus == f.ReviewStatus) &&
-		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since))
+		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since)) &&
+		(f.Until.IsZero() || d.DetectedAt.Before(f.Until)) &&
+		d.Confidence >= f.MinConfidence
 }
 
 func sortUsers(us []User) {

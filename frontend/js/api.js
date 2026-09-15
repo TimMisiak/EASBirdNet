@@ -76,6 +76,15 @@ export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComp
 /** Delete a card for good: its audio, its files and every detection in them. */
 export const deleteUpload = (reference) =>
   request("DELETE", `/admin/uploads/${encodeURIComponent(reference)}`);
+/**
+ * Every card's detections, a page at a time, with the species among them:
+ * {detections, total, species}. params are the API's, all optional: since,
+ * until, status, minConfidence, species, sort, order, limit, offset.
+ */
+export const fetchDetections = (params) => {
+  const search = new URLSearchParams(params).toString();
+  return get(`/admin/detections${search ? `?${search}` : ""}`);
+};
 /** What BirdNET heard in one file of a card, in the order it was heard. */
 export const fetchFileDetections = (reference, fileId) =>
   get(`/admin/uploads/${encodeURIComponent(reference)}/files/${encodeURIComponent(fileId)}/detections`);

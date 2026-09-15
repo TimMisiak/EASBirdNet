@@ -1,7 +1,7 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
 import { byteSize, clock, count, dateAtTime, longDate, percent, shortDate } from "../format.js";
-import { analyzedSoFar, fileChip, isMoving, statusChip } from "../upload-status.js";
+import { analyzedSoFar, fileChip, isMoving, reviewChip, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
 import "./bs-chip.js";
 import "./bs-progress-bar.js";
@@ -352,7 +352,7 @@ class AdminUploadDetail extends BaseElement {
                   : ""
               }</td>
               <td class="num">${Math.round(d.confidence * 100)}%</td>
-              <td>${reviewChip(d.reviewStatus)}</td>
+              <td>${reviewChipHTML(d.reviewStatus)}</td>
             </tr>`,
             )
             .join("")}
@@ -362,13 +362,8 @@ class AdminUploadDetail extends BaseElement {
   }
 }
 
-function reviewChip(status) {
-  const chips = {
-    unreviewed: ["neutral", "Unreviewed"],
-    confirmed: ["done", "Confirmed"],
-    rejected: ["attention", "Discarded"],
-  };
-  const [kind, label] = chips[status] ?? ["neutral", status];
+function reviewChipHTML(status) {
+  const { kind, label } = reviewChip(status);
   return `<bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip>`;
 }
 

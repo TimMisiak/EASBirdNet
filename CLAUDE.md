@@ -114,6 +114,7 @@ POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
 GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it
+GET    /api/v1/admin/detections           every card's detections: filtered, sorted, a page at a time
 GET    /api/v1/admin/uploads/{reference}/files/{id}/detections   what was heard in a file
 GET    /api/v1/admin/uploads/{reference}/detections/{id}          one detection, with its card and file
 GET    /api/v1/admin/uploads/{reference}/detections/{id}/clip     its clip, as a WAV
@@ -138,7 +139,12 @@ demoting the last one is a 409, and so is an admin removing themselves.
 
 **Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
 `/admin/people`, `/admin/uploads/{reference}`,
-`/admin/uploads/{reference}/detections/{id}`. `internal/web` already falls back to index.html for
+`/admin/uploads/{reference}/detections/{id}`, `/admin/detections`, and the same
+detection opened from that list, `/admin/detections/{reference}/{id}`. A page
+may keep its view in the query string (`/admin/detections?species=Strix+varia`):
+the router carries it through links, `replaceQuery` rewrites it without a
+history entry, and the detection page carries the list's back with it.
+`internal/web` already falls back to index.html for
 extension-less paths, so a reload mid-wizard lands on the same screen, and a
 coordinator can send a colleague a link to one admin tab. `js/router.js` is the
 whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
@@ -371,7 +377,9 @@ and the analysis queue runs BirdNET over it in the server process, writing
 `unreviewed` detections, each with a clip. The coordinator's card page
 (`/admin/uploads/{ref}`) shows each file's status and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
-Discard. Reviewing is admin-only for now. Nothing moves a card from `in_review`
+Discard. The Detections tab (`/admin/detections`) lists every card's detections,
+sortable by when, species or confidence and filtered by review, species,
+minimum confidence and the days heard, and opens the same detection page. Reviewing is admin-only for now. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged; nothing backfills them.
 Nothing cleans up abandoned partial uploads, short of deleting their card.
