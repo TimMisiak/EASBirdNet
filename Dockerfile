@@ -53,7 +53,7 @@ COPY --from=birdnet /opt/birdnet/models /opt/birdnet/models
 
 WORKDIR /app
 COPY --from=build /out/birdsense /out/birdsense-analyze /app/
-COPY analyzer/analyze.py /app/analyzer/analyze.py
+COPY analyzer/analyze.py analyzer/clip.py /app/analyzer/
 # The frontend has no build step, so the source files are the shipped files.
 COPY frontend/ /app/frontend/
 

@@ -4,8 +4,10 @@
 // The queue is the database. A card whose last file has landed is
 // "processing", and each of its files in "uploaded" status is waiting for
 // BirdNET. Queue.Run works through them one file at a time, oldest card first:
-// it copies the file out of storage, runs internal/birdnet over it, writes a
-// detection for everything above the threshold, and marks the file analyzed.
+// it copies the file out of storage, runs internal/birdnet over it, merges
+// the consecutive windows in which one species was heard (merge.go), cuts a
+// clip of each detection into storage, writes the detections, and marks the
+// file analyzed.
 // When no file on a card is left, the card moves on to in_review, or to
 // needs_attention if BirdNET couldn't read some of it.
 //
@@ -36,9 +38,11 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
-// Analyzer is what runs BirdNET: birdnet.Analyzer, or a fake in tests.
+// Analyzer is what runs BirdNET and cuts clips: birdnet.Analyzer, or a fake in
+// tests.
 type Analyzer interface {
 	Analyze(ctx context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error)
+	Cut(ctx context.Context, source string, clips []birdnet.Clip) (birdnet.Recording, error)
 }
 
 // Settings every card is analyzed with. They are recorded on the card
@@ -269,20 +273,42 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 		// Without a time in the name, the night is all that is known.
 		start = night
 	}
-	found := res.Files[0].Detections
+	found := merge(res.Files[0].Detections)
 	detections := make([]db.Detection, len(found))
+	clips := make([]birdnet.Clip, len(found))
 	for i, d := range found {
 		detections[i] = db.Detection{
+			// Set here rather than by the store, because the clip is named by it.
+			ID:          db.DetectionID(f.ID, int64(d.StartSec*1000), d.ScientificName),
 			AudioFileID: f.ID, RecorderID: card.RecorderID,
 			DetectedAt: start.Add(time.Duration(d.StartSec * float64(time.Second))).UTC().Truncate(time.Millisecond),
 			Night:      f.Night, StartSec: d.StartSec, EndSec: d.EndSec,
 			ScientificName: d.ScientificName, CommonName: d.CommonName, Confidence: d.Confidence,
 			ReviewStatus: db.ReviewUnreviewed,
 		}
+		clipStart, clipEnd := clipSpan(d)
+		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.wav", i)), StartSec: clipStart, EndSec: clipEnd}
 	}
-	// BirdNET takes minutes over a file, long enough for its card to be deleted.
+	// Cut even a file with nothing heard in it, for its duration and sample rate.
+	recording, err := q.analyzer.Cut(ctx, local, clips)
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil:
+		return q.retryOrFail(ctx, f, fmt.Errorf("cutting clips: %w", err))
+	}
+	// BirdNET and cutting clips take minutes over a file, long enough for its
+	// card to be deleted. Checking before anything is stored keeps a deleted
+	// card's clips out of storage.
 	if _, err := q.store.GetAudioFile(ctx, card.ID, f.ID); err != nil {
 		return err
+	}
+	for i, c := range recording.Clips {
+		name := storage.ClipName(card.ID, detections[i].ID)
+		if err := q.putFile(ctx, name, c.Path); err != nil {
+			return err
+		}
+		detections[i].Clip = &db.Clip{BlobName: name, StartSec: c.StartSec, EndSec: c.EndSec}
 	}
 	if len(detections) > 0 {
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {
@@ -293,6 +319,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
 		f.Status, f.StatusDetail = db.AudioAnalyzed, ""
 		f.AnalyzedAt, f.DetectionCount = &analyzed, len(detections)
+		f.DurationSec, f.SampleRate = recording.DurationSec, recording.SampleRate
 		if f.RecordedAt == nil && startKnown {
 			t := start.UTC()
 			f.RecordedAt = &t
@@ -347,6 +374,16 @@ func (q *Queue) fetch(ctx context.Context, f db.AudioFile) (string, func(), erro
 		return "", cleanup, err
 	}
 	return local, cleanup, dst.Close()
+}
+
+// putFile copies a file from local disk into file storage.
+func (q *Queue) putFile(ctx context.Context, name, local string) error {
+	src, err := os.Open(local)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	return q.files.Put(ctx, name, src)
 }
 
 // retryOrFail puts a file back in the queue and pauses the queue, unless the

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
@@ -62,8 +63,25 @@ func testStore(t *testing.T, s Store) {
 		t.Errorf("open a missing file: err = %v, want ErrNotFound", err)
 	}
 
-	// Deleting a card's audio takes its unfinished files too, and nothing of a
-	// card whose reference only starts the same way.
+	// A clip the server cut is written whole, and a second cut replaces it.
+	clip := ClipName("OWL-20260907-SR02", "det_"+t.Name())
+	for _, want := range []string{"RIFF a longer first clip", "RIFF second"} {
+		if err := s.Put(ctx, clip, strings.NewReader(want)); err != nil {
+			t.Fatalf("put %s: %v", clip, err)
+		}
+		r, err := s.Open(ctx, clip)
+		if err != nil {
+			t.Fatalf("open %s: %v", clip, err)
+		}
+		got, _ := io.ReadAll(r)
+		r.Close()
+		if string(got) != want {
+			t.Errorf("clip = %q, want %q", got, want)
+		}
+	}
+
+	// Deleting a card's audio takes its unfinished files and its clips too, and
+	// nothing of a card whose reference only starts the same way.
 	partial := "OWL-20260907-SR02/" + t.Name() + "-partial"
 	up, err = composer.Core.NewUpload(ctx, tushandler.FileInfo{ID: partial, Size: 100})
 	if err != nil {
@@ -83,20 +101,28 @@ func testStore(t *testing.T, s Store) {
 	if err := up.FinishUpload(ctx); err != nil {
 		t.Fatal(err)
 	}
+	neighbourClip := ClipName("OWL-20260907-SR020", "det_"+t.Name())
+	if err := s.Put(ctx, neighbourClip, strings.NewReader("RIFF neighbour")); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := s.DeleteAll(ctx, "OWL-20260907-SR02"); err != nil {
 		t.Fatalf("delete the card's audio: %v", err)
 	}
-	if _, err := s.Open(ctx, Name(id)); !errors.Is(err, ErrNotFound) {
-		t.Errorf("open a deleted file: err = %v, want ErrNotFound", err)
+	for _, gone := range []string{Name(id), clip} {
+		if _, err := s.Open(ctx, gone); !errors.Is(err, ErrNotFound) {
+			t.Errorf("open deleted %s: err = %v, want ErrNotFound", gone, err)
+		}
 	}
 	if _, err := composer.Core.GetUpload(ctx, partial); err == nil {
 		t.Error("the unfinished upload is still there")
 	}
-	if r, err := s.Open(ctx, Name(neighbour)); err != nil {
-		t.Errorf("the other card's file went too: %v", err)
-	} else {
-		r.Close()
+	for _, kept := range []string{Name(neighbour), neighbourClip} {
+		if r, err := s.Open(ctx, kept); err != nil {
+			t.Errorf("the other card's %s went too: %v", kept, err)
+		} else {
+			r.Close()
+		}
 	}
 	if err := s.DeleteAll(ctx, "OWL-20260907-SR02"); err != nil {
 		t.Errorf("delete again: %v", err)
@@ -104,6 +130,18 @@ func testStore(t *testing.T, s Store) {
 	for _, bad := range []string{"", ".", "..", "OWL-20260907-SR02/x"} {
 		if err := s.DeleteAll(ctx, bad); err == nil {
 			t.Errorf("DeleteAll(%q) was allowed", bad)
+		}
+	}
+}
+
+func TestClipName(t *testing.T) {
+	for _, c := range []struct{ upload, det, want string }{
+		{"OWL-20260907-SR02", "det_9c41", "clips/OWL-20260907-SR02/det_9c41.wav"},
+		{"OWL-20260907-SR/../x", "det_1", "clips/OWL-20260907-SR_.._x/det_1.wav"},
+		{"..", "det_1", "clips/__/det_1.wav"},
+	} {
+		if got := ClipName(c.upload, c.det); got != c.want {
+			t.Errorf("ClipName(%q, %q) = %q, want %q", c.upload, c.det, got, c.want)
 		}
 	}
 }

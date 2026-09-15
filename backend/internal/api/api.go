@@ -7,10 +7,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -70,6 +72,9 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
 	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.deleteUpload))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/files/{file}/detections", h.requireRole(db.RoleAdmin, h.listFileDetections))
+	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}", h.requireRole(db.RoleAdmin, h.getDetection))
+	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}/clip", h.requireRole(db.RoleAdmin, h.getClip))
+	mux.HandleFunc("PUT /api/v1/admin/uploads/{reference}/detections/{id}/review", h.requireRole(db.RoleAdmin, h.reviewDetection))
 	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.listPeople))
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.addPerson))
 	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(db.RoleAdmin, h.updatePerson))
@@ -681,10 +686,10 @@ func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, _ db.Use
 	}
 }
 
-// deleteAudio removes everything storage holds for a card, finished files or
-// not, which is everything under its prefix. storagePrefix can spell two
-// references the same, so if another card shares the prefix the audio is left
-// where it is, rather than taking that card's with it.
+// deleteAudio removes everything storage holds for a card: its files, finished
+// or not, and its clips, which is everything under its prefix. storagePrefix
+// can spell two references the same, so if another card shares the prefix the
+// audio is left where it is, rather than taking that card's with it.
 func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
 	prefix := storagePrefix(u.ID)
 	all, err := h.store.ListUploads(ctx, db.UploadFilter{})
@@ -693,7 +698,7 @@ func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
 	}
 	for _, other := range all {
 		if other.ID != u.ID && storagePrefix(other.ID) == prefix {
-			h.log.Warn("deleting a card: leaving its audio in storage, another card shares its prefix",
+			h.log.Warn("deleting a card: leaving its audio and clips in storage, another card shares its prefix",
 				"upload", u.ID, "other", other.ID, "prefix", storage.Name(prefix))
 			return nil
 		}
@@ -718,6 +723,110 @@ func (h *handlers) listFileDetections(w http.ResponseWriter, r *http.Request, _ 
 		h.fail(w, r, err)
 	default:
 		h.json(w, http.StatusOK, map[string]any{"detections": mapAll(found, detectionOf)})
+	}
+}
+
+const msgNoSuchDetection = "no such detection on that card"
+
+// getDetection is one detection, with the card and the file it was heard in,
+// for the detection's own page.
+func (h *handlers) getDetection(w http.ResponseWriter, r *http.Request, _ db.User) {
+	ctx := r.Context()
+	ref := r.PathValue("reference")
+	d, err := h.store.GetDetection(ctx, ref, r.PathValue("id"))
+	var u db.Upload
+	var f db.AudioFile
+	if err == nil {
+		u, err = h.store.GetUpload(ctx, ref)
+	}
+	if err == nil {
+		f, err = h.store.GetAudioFile(ctx, ref, d.AudioFileID)
+	}
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, msgNoSuchDetection)
+	case err != nil:
+		h.fail(w, r, err)
+	default:
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "file": audioFileOf(f), "detection": detectionOf(d)})
+	}
+}
+
+// maxClipBytes is the most of a clip getClip will read. The analysis queue
+// cuts at most 30 s of mono 16-bit audio, which is under 6 MB even at 96 kHz.
+const maxClipBytes = 16 << 20
+
+// getClip serves a detection's clip as a WAV. The clip is read whole so that
+// http.ServeContent can answer range requests: browsers ask for audio in
+// ranges, and Safari won't play a file served without them.
+func (h *handlers) getClip(w http.ResponseWriter, r *http.Request, _ db.User) {
+	ctx := r.Context()
+	d, err := h.store.GetDetection(ctx, r.PathValue("reference"), r.PathValue("id"))
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, msgNoSuchDetection)
+		return
+	case err != nil:
+		h.fail(w, r, err)
+		return
+	case d.Clip == nil:
+		h.problem(w, http.StatusNotFound, "this detection has no clip; it was analyzed before clips were cut")
+		return
+	}
+	audio, err := h.files.Open(ctx, d.Clip.BlobName)
+	if errors.Is(err, storage.ErrNotFound) {
+		h.problem(w, http.StatusNotFound, "this detection's clip isn't in storage")
+		return
+	}
+	var body []byte
+	if err == nil {
+		body, err = io.ReadAll(io.LimitReader(audio, maxClipBytes+1))
+		audio.Close()
+	}
+	if err == nil && len(body) > maxClipBytes {
+		err = fmt.Errorf("clip %s is over %d bytes", d.Clip.BlobName, maxClipBytes)
+	}
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	// Analyzing a file again cuts its clips again, under the same names.
+	w.Header().Set("Cache-Control", "private, no-cache")
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+}
+
+// reviewDetection records a verdict on a detection: confirmed, rejected (the
+// page's "Discard"), or back to unreviewed. A review replaces the one before.
+func (h *handlers) reviewDetection(w http.ResponseWriter, r *http.Request, me db.User) {
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := decode(r, &body); err != nil {
+		h.problem(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch body.Status {
+	case db.ReviewConfirmed, db.ReviewRejected, db.ReviewUnreviewed:
+	default:
+		h.problem(w, http.StatusBadRequest, "status must be confirmed, rejected or unreviewed")
+		return
+	}
+	at := h.stamp()
+	d, err := h.store.UpdateDetection(r.Context(), r.PathValue("reference"), r.PathValue("id"), func(d *db.Detection) error {
+		d.ReviewStatus, d.Review = body.Status, nil
+		if body.Status != db.ReviewUnreviewed {
+			d.Review = &db.Review{UserID: me.ID, UserName: me.Name, At: at}
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, msgNoSuchDetection)
+	case err != nil:
+		h.fail(w, r, err)
+	default:
+		h.json(w, http.StatusOK, map[string]any{"detection": detectionOf(d)})
 	}
 }
 

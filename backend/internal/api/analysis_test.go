@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
 // recordingQueue is an analysis queue that only notes what it was told.
@@ -115,6 +117,114 @@ func TestAdminCardPageShowsEachFileAndWhatWasHeard(t *testing.T) {
 	for _, path := range []string{"/api/v1/admin/uploads/" + ref, "/api/v1/admin/uploads/" + ref + "/files/" + fileB + "/detections"} {
 		if rec := do(t, mux, http.MethodGet, path, "", vol); rec.Code != http.StatusForbidden {
 			t.Errorf("volunteer GET %s = %d, want 403", path, rec.Code)
+		}
+	}
+}
+
+type detectionBody struct {
+	Upload    Upload    `json:"upload"`
+	File      AudioFile `json:"file"`
+	Detection Detection `json:"detection"`
+}
+
+func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
+	store, files := newTestStore(t), testFiles(t)
+	mux := muxFor(store, files, false)
+	ctx := t.Context()
+	ref := "OWL-20260913-SR05"
+	if err := store.UpsertAudioFiles(ctx, ref, []db.AudioFile{
+		{Path: "DATA/b.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, DetectionCount: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fileID := db.AudioFileID(ref, "DATA/b.wav")
+	owl := db.Detection{
+		ID: db.DetectionID(fileID, 12_000, "Strix varia"), AudioFileID: fileID, DetectedAt: testNow,
+		StartSec: 12, EndSec: 21, ScientificName: "Strix varia", CommonName: "Barred Owl", Confidence: 0.91,
+	}
+	owl.Clip = &db.Clip{BlobName: storage.ClipName(ref, owl.ID), StartSec: 11, EndSec: 22}
+	// Analyzed before clips were cut.
+	older := db.Detection{
+		ID: db.DetectionID(fileID, 72_000, "Bubo virginianus"), AudioFileID: fileID, DetectedAt: testNow.Add(time.Minute),
+		StartSec: 72, EndSec: 75, ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl", Confidence: 0.4,
+	}
+	if err := store.UpsertDetections(ctx, ref, []db.Detection{owl, older}); err != nil {
+		t.Fatal(err)
+	}
+	const wav = "RIFF$\x00\x00\x00WAVEfmt not much of a clip"
+	if err := files.Put(ctx, owl.Clip.BlobName, strings.NewReader(wav)); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	base := "/api/v1/admin/uploads/" + ref + "/detections/"
+	rec := do(t, mux, http.MethodGet, base+owl.ID, "", admin)
+	if body := decodeInto[detectionBody](t, rec); rec.Code != http.StatusOK || body.Upload.Reference != ref ||
+		body.File.Path != "DATA/b.wav" || body.Detection.AudioFileID != fileID || body.Detection.EndSec != 21 ||
+		body.Detection.Clip == nil || body.Detection.Clip.StartSec != 11 || body.Detection.Clip.EndSec != 22 ||
+		body.Detection.ReviewStatus != db.ReviewUnreviewed || body.Detection.Review != nil {
+		t.Errorf("GET detection = %d %s; want it with its card, file and clip", rec.Code, rec.Body)
+	}
+
+	// The clip, whole and by range: browsers fetch audio in ranges.
+	rec = do(t, mux, http.MethodGet, base+owl.ID+"/clip", "", admin)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/wav" || rec.Body.String() != wav {
+		t.Errorf("GET clip = %d %s %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+	}
+	req := httptest.NewRequest(http.MethodGet, base+owl.ID+"/clip", nil)
+	req.AddCookie(admin)
+	req.Header.Set("Range", "bytes=0-3")
+	ranged := httptest.NewRecorder()
+	mux.ServeHTTP(ranged, req)
+	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "RIFF" {
+		t.Errorf("GET clip bytes=0-3 = %d %q; want 206 RIFF", ranged.Code, ranged.Body)
+	}
+
+	// Confirm, then discard, then undo.
+	dana := userByEmail(t, store, "dana@eastsideaudubon.org")
+	for _, status := range []string{db.ReviewConfirmed, db.ReviewRejected, db.ReviewUnreviewed} {
+		rec := do(t, mux, http.MethodPut, base+owl.ID+"/review", `{"status":"`+status+`"}`, admin)
+		got := decodeInto[struct {
+			Detection Detection `json:"detection"`
+		}](t, rec).Detection
+		reviewed := status != db.ReviewUnreviewed
+		if rec.Code != http.StatusOK || got.ReviewStatus != status || (got.Review != nil) != reviewed ||
+			(reviewed && (got.Review.By != "Dana Coordinator" || !got.Review.At.Equal(testNow))) {
+			t.Errorf("PUT review %s = %d %s", status, rec.Code, rec.Body)
+		}
+		stored, err := store.GetDetection(ctx, ref, owl.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.ReviewStatus != status || (reviewed && stored.Review.UserID != dana.ID) || stored.Clip == nil {
+			t.Errorf("after %s, stored = %+v", status, stored)
+		}
+	}
+
+	other := "/api/v1/admin/uploads/OWL-20260821-SR03/detections/" + owl.ID
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{http.MethodGet, base + older.ID + "/clip", "", http.StatusNotFound},
+		{http.MethodGet, base + "det_nope", "", http.StatusNotFound},
+		{http.MethodGet, other, "", http.StatusNotFound},
+		{http.MethodGet, other + "/clip", "", http.StatusNotFound},
+		{http.MethodPut, other + "/review", `{"status":"confirmed"}`, http.StatusNotFound},
+		{http.MethodPut, base + owl.ID + "/review", `{"status":"maybe"}`, http.StatusBadRequest},
+	} {
+		if rec := do(t, mux, c.method, c.path, c.body, admin); rec.Code != c.want {
+			t.Errorf("%s %s = %d, want %d (%s)", c.method, c.path, rec.Code, c.want, rec.Body)
+		}
+	}
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, base + owl.ID, ""},
+		{http.MethodGet, base + owl.ID + "/clip", ""},
+		{http.MethodPut, base + owl.ID + "/review", `{"status":"confirmed"}`},
+	} {
+		if rec := do(t, mux, c.method, c.path, c.body, vol); rec.Code != http.StatusForbidden {
+			t.Errorf("volunteer %s %s = %d, want 403", c.method, c.path, rec.Code)
 		}
 	}
 }

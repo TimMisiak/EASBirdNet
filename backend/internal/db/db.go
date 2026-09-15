@@ -70,6 +70,7 @@ type Store interface {
 	UpsertAudioFiles(ctx context.Context, uploadID string, files []AudioFile) error
 	UpdateAudioFile(ctx context.Context, uploadID, id string, mutate func(*AudioFile) error) (AudioFile, error)
 
+	GetDetection(ctx context.Context, uploadID, id string) (Detection, error)
 	// ListDetections returns matching detections in the order they were heard.
 	ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error)
 	// UpsertDetections writes whole documents, creating or replacing each. A

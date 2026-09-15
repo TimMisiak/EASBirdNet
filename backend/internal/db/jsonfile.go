@@ -315,6 +315,16 @@ func (s *jsonFile) UpdateAudioFile(_ context.Context, uploadID, id string, mutat
 
 // --- detections ---
 
+func (s *jsonFile) GetDetection(_ context.Context, uploadID, id string) (Detection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := get(s.data.Detections, id)
+	if err == nil && d.UploadID != uploadID {
+		return Detection{}, ErrNotFound
+	}
+	return d, err
+}
+
 func (s *jsonFile) ListDetections(_ context.Context, f DetectionFilter) ([]Detection, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

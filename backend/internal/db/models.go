@@ -195,8 +195,10 @@ const (
 	ReviewRejected   = "rejected"
 )
 
-// Detection is one BirdNET result above the analysis threshold: a species heard
-// in one window of one audio file.
+// Detection is BirdNET hearing one species in one audio file, above the
+// analysis threshold, over a run of consecutive 3-second windows. The analysis
+// queue merges the windows, so StartSec and EndSec span the run and Confidence
+// is the highest of its windows.
 type Detection struct {
 	ID          string `json:"id"`
 	UploadID    string `json:"uploadId"`
@@ -210,10 +212,24 @@ type Detection struct {
 	ScientificName string    `json:"scientificName"`
 	CommonName     string    `json:"commonName"`
 	Confidence     float64   `json:"confidence"`
-	ReviewStatus   string    `json:"reviewStatus"`
-	Review         *Review   `json:"review,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	// Clip is the stretch of the recording stored on its own for review. It is
+	// absent for a detection stored before clips were cut.
+	Clip         *Clip     `json:"clip,omitempty"`
+	ReviewStatus string    `json:"reviewStatus"`
+	Review       *Review   `json:"review,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// Clip is a few seconds of a recording around a detection, stored as its own
+// small WAV so a reviewer can hear it without the whole file.
+type Clip struct {
+	// BlobName is where the clip is stored (storage.ClipName).
+	BlobName string `json:"blobName"`
+	// StartSec and EndSec are seconds into the audio file: the detection, a
+	// little either side, and no longer than the analysis queue's cap.
+	StartSec float64 `json:"startSec"`
+	EndSec   float64 `json:"endSec"`
 }
 
 // Review is a trained volunteer's verdict on a detection. A confirmed

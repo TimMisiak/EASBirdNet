@@ -3,11 +3,13 @@ package analysis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,9 @@ type fakeBirdNET struct {
 	calls []call
 	// answer returns the result for one file's audio, or an error for the run.
 	answer func(audio string) (birdnet.File, error)
+	// cuts are the clips asked for, a slice per file; cutErr fails every cut.
+	cuts   [][]birdnet.Clip
+	cutErr error
 }
 
 type call struct {
@@ -54,6 +59,30 @@ func (f *fakeBirdNET) Analyze(_ context.Context, paths []string, opts birdnet.Op
 		res.Files = append(res.Files, file)
 	}
 	return res, nil
+}
+
+// Cut writes each clip as its source's audio and its span, and reports every
+// recording as an hour at 48 kHz.
+func (f *fakeBirdNET) Cut(_ context.Context, source string, clips []birdnet.Clip) (birdnet.Recording, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cuts = append(f.cuts, clips)
+	if f.cutErr != nil {
+		return birdnet.Recording{}, f.cutErr
+	}
+	audio, err := os.ReadFile(source)
+	if err != nil {
+		return birdnet.Recording{}, err
+	}
+	rec := birdnet.Recording{DurationSec: 3600, SampleRate: 48000}
+	for _, c := range clips {
+		c.EndSec = min(c.EndSec, rec.DurationSec)
+		if err := os.WriteFile(c.Path, fmt.Appendf(nil, "%s %g-%g", audio, c.StartSec, c.EndSec), 0o644); err != nil {
+			return birdnet.Recording{}, err
+		}
+		rec.Clips = append(rec.Clips, c)
+	}
+	return rec, nil
 }
 
 type fixture struct {
@@ -127,6 +156,18 @@ func (f *fixture) file(p string) db.AudioFile {
 	return file
 }
 
+// stored is what file storage holds under a name.
+func (f *fixture) stored(name string) string {
+	f.t.Helper()
+	r, err := f.files.Open(f.t.Context(), name)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer r.Close()
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
 func (f *fixture) upload() db.Upload {
 	f.t.Helper()
 	u, err := f.store.GetUpload(f.t.Context(), ref)
@@ -198,6 +239,17 @@ func TestACardIsAnalyzedFileByFile(t *testing.T) {
 		d.ReviewStatus != db.ReviewUnreviewed || d.EndSec != 735 || d.Confidence == 0 {
 		t.Errorf("detection = %+v; want heard at %v, unreviewed, on the file's night", d, want)
 	}
+	// Each detection's clip is cut around it and stored under its id.
+	for _, d := range dets {
+		if c := d.Clip; c == nil || c.StartSec != 731 || c.EndSec != 736 || c.BlobName != storage.ClipName(ref, d.ID) {
+			t.Errorf("%s clip = %+v; want 731-736 s, named by the detection", d.CommonName, c)
+		} else if got := f.stored(c.BlobName); got != owlFile+" 731-736" {
+			t.Errorf("%s stored clip = %q", d.CommonName, got)
+		}
+	}
+	if owl.DurationSec != 3600 || owl.SampleRate != 48000 {
+		t.Errorf("owl file is %v s at %d Hz; want what the cut read", owl.DurationSec, owl.SampleRate)
+	}
 
 	if quiet := f.file(quietFile); quiet.Status != db.AudioAnalyzed || quiet.DetectionCount != 0 ||
 		!quiet.RecordedAt.Equal(time.Date(2026, time.September, 13, 7, 0, 0, 0, time.UTC)) {
@@ -221,6 +273,95 @@ func TestACardIsAnalyzedFileByFile(t *testing.T) {
 	// Nothing is left, so another pass runs nothing.
 	if err := f.queue.drain(t.Context()); err != nil || len(f.bird.calls) != 3 {
 		t.Errorf("second pass: %v, %d runs", err, len(f.bird.calls))
+	}
+}
+
+func TestConsecutiveWindowsAreOneDetection(t *testing.T) {
+	f := newFixture(t)
+	window := func(start float64, scientific, common string, confidence float64) birdnet.Detection {
+		return birdnet.Detection{StartSec: start, EndSec: start + 3, ScientificName: scientific, CommonName: common, Confidence: confidence}
+	}
+	f.bird.answer = func(string) (birdnet.File, error) {
+		return birdnet.File{Detections: []birdnet.Detection{
+			window(0, "Strix varia", "Barred Owl", 0.4),
+			window(3, "Strix varia", "Barred Owl", 0.8),
+			window(3, "Bubo virginianus", "Great Horned Owl", 0.3),
+			window(6, "Strix varia", "Barred Owl", 0.5),
+			// A window without it in between: heard again, not still.
+			window(12, "Strix varia", "Barred Owl", 0.3),
+		}}, nil
+	}
+	f.card(db.StatusProcessing, quietFile)
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	file := f.file(quietFile)
+	dets, err := f.store.ListDetections(t.Context(), db.DetectionFilter{UploadID: ref, AudioFileID: file.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range dets {
+		got = append(got, fmt.Sprintf("%s %g-%g at %g, clip %g-%g", d.CommonName, d.StartSec, d.EndSec, d.Confidence, d.Clip.StartSec, d.Clip.EndSec))
+	}
+	want := []string{
+		"Barred Owl 0-9 at 0.8, clip 0-10",
+		"Great Horned Owl 3-6 at 0.3, clip 2-7",
+		"Barred Owl 12-15 at 0.3, clip 11-16",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("detections:\n got  %q\n want %q", got, want)
+	}
+	if dets[0].ID != db.DetectionID(file.ID, 0, "Strix varia") {
+		t.Errorf("merged id = %s; want it derived from the run's start, so a re-run overwrites it", dets[0].ID)
+	}
+	if file.DetectionCount != 3 || f.upload().DetectionCount != 3 {
+		t.Errorf("file counts %d, card %d; want the 3 merged detections", file.DetectionCount, f.upload().DetectionCount)
+	}
+}
+
+func TestClipSpan(t *testing.T) {
+	run := func(start, end, peak float64) heard {
+		return heard{Detection: birdnet.Detection{StartSec: start, EndSec: end}, PeakStartSec: peak, PeakEndSec: peak + 3}
+	}
+	cases := []struct {
+		name       string
+		run        heard
+		start, end float64
+	}{
+		{"one window, a second either side", run(732, 735, 732), 731, 736},
+		{"at the start of the file", run(0, 3, 0), 0, 4},
+		{"a long run is cut around its peak", run(0, 300, 150), 136.5, 166.5},
+		{"a peak near the start of a long run", run(60, 300, 60), 59, 89},
+		{"a peak at the end of a long run", run(0, 300, 297), 271, 301},
+	}
+	for _, c := range cases {
+		if start, end := clipSpan(c.run); start != c.start || end != c.end {
+			t.Errorf("%s: clip %g-%g, want %g-%g", c.name, start, end, c.start, c.end)
+		}
+	}
+}
+
+func TestCuttingFailingIsRetriedThenTheFileFails(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.bird.cutErr = errors.New("birdnet: clip.py: exit status 1\nLibsndfileError")
+	f.card(db.StatusProcessing, owlFile)
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		if err := f.queue.drain(t.Context()); !errors.Is(err, errRetry) {
+			t.Fatalf("attempt %d: err = %v, want a pause to retry", attempt, err)
+		}
+	}
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	owl := f.file(owlFile)
+	if owl.Status != db.AudioFailed || !strings.Contains(owl.StatusDetail, "cutting clips") {
+		t.Errorf("file = %s (%q); want failed while cutting clips", owl.Status, owl.StatusDetail)
+	}
+	if dets, _ := f.store.ListDetections(t.Context(), db.DetectionFilter{UploadID: ref}); len(dets) != 0 {
+		t.Errorf("stored %d detections with no clips", len(dets))
 	}
 }
 
@@ -363,6 +504,9 @@ func TestACardDeletedDuringAnalysisLeavesNothingBehind(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(f *fixture)
+		// clipsGone is whether the card's clips are kept out of storage too. A
+		// delete between the queue's check and its writes can leave them.
+		clipsGone bool
 	}{
 		{"while BirdNET runs", func(f *fixture) {
 			f.bird.answer = func(audio string) (birdnet.File, error) {
@@ -371,11 +515,11 @@ func TestACardDeletedDuringAnalysisLeavesNothingBehind(t *testing.T) {
 				}
 				return owls(audio)
 			}
-		}},
+		}, true},
 		{"while its detections are stored", func(f *fixture) {
 			f.bird.answer = owls
 			f.queue.store = deletedMidWrite{f.store}
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -395,6 +539,9 @@ func TestACardDeletedDuringAnalysisLeavesNothingBehind(t *testing.T) {
 			found, _ := f.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref})
 			if len(files) != 0 || len(found) != 0 {
 				t.Errorf("left behind %d audio files and %d detections", len(files), len(found))
+			}
+			if clips, _ := filepath.Glob(filepath.Join(f.dir, "clips", ref, "*")); tc.clipsGone && len(clips) != 0 {
+				t.Errorf("left %d clips in storage", len(clips))
 			}
 		})
 	}

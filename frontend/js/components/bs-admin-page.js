@@ -6,12 +6,14 @@ import "./bs-admin-people.js";
 import "./bs-admin-recorders.js";
 import "./bs-admin-uploads.js";
 import "./bs-admin-upload-detail.js";
+import "./bs-detection-detail.js";
 
 /**
  * <bs-admin-page> is the coordinator's shell. The three tabs are routes, not
  * local state, so a coordinator can link a colleague straight to the uploads
  * table -- and so the back button works the way it looks like it should. A
- * card's own page, /admin/uploads/{reference}, sits under the uploads tab.
+ * card's own page, /admin/uploads/{reference}, sits under the uploads tab, and
+ * so does each detection's, /admin/uploads/{reference}/detections/{id}.
  */
 const CARD_PREFIX = "/admin/uploads/";
 const TABS = [
@@ -40,7 +42,9 @@ class AdminPage extends BaseElement {
   render() {
     const here = path();
     const tab = TABS.find((t) => here === t.path || here.startsWith(`${t.path}/`)) ?? TABS[0];
-    const card = here.startsWith(CARD_PREFIX) ? decodeURIComponent(here.slice(CARD_PREFIX.length)) : "";
+    const [card = "", section = "", detection = ""] = here.startsWith(CARD_PREFIX)
+      ? here.slice(CARD_PREFIX.length).split("/").map(decodeURIComponent)
+      : [];
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -89,7 +93,9 @@ class AdminPage extends BaseElement {
       </nav>
 
       ${
-        card
+        card && section === "detections" && detection
+          ? `<bs-detection-detail reference="${escapeHTML(card)}" detection="${escapeHTML(detection)}"></bs-detection-detail>`
+          : card
           ? `<bs-admin-upload-detail reference="${escapeHTML(card)}"></bs-admin-upload-detail>`
           : `<${tab.tag}></${tab.tag}>`
       }

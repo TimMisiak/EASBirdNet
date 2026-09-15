@@ -285,6 +285,10 @@ func (s *cosmosStore) UpdateAudioFile(ctx context.Context, uploadID, id string, 
 
 // --- detections ---
 
+func (s *cosmosStore) GetDetection(ctx context.Context, uploadID, id string) (Detection, error) {
+	return readDoc[Detection](ctx, s.detections, uploadID, id)
+}
+
 // ListDetections is a single-partition query when f.UploadID is set and a
 // cross-partition one otherwise (the public overview). Timestamps are compared
 // as RFC 3339 strings, which only order correctly to the whole second, so the

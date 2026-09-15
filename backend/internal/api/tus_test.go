@@ -344,6 +344,10 @@ func TestDeleteUpload(t *testing.T) {
 	if err := s.store.UpsertDetections(ctx, ref, []db.Detection{{AudioFileID: stored.ID, ScientificName: "Strix varia", CommonName: "Barred Owl"}}); err != nil {
 		t.Fatal(err)
 	}
+	clip := storage.ClipName(ref, "det_owl")
+	if err := s.files.Put(ctx, clip, strings.NewReader("RIFF clip")); err != nil {
+		t.Fatal(err)
+	}
 	path := "/api/v1/admin/uploads/" + ref
 
 	if rec := do(t, s.mux, http.MethodDelete, path, "", jane); rec.Code != http.StatusForbidden {
@@ -362,8 +366,10 @@ func TestDeleteUpload(t *testing.T) {
 	if len(files) != 0 || len(found) != 0 {
 		t.Errorf("left behind %d audio files and %d detections", len(files), len(found))
 	}
-	if _, err := s.files.Open(ctx, stored.BlobName); !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("stored audio after delete: err = %v, want ErrNotFound", err)
+	for _, name := range []string{stored.BlobName, clip} {
+		if _, err := s.files.Open(ctx, name); !errors.Is(err, storage.ErrNotFound) {
+			t.Errorf("stored %s after delete: err = %v, want ErrNotFound", name, err)
+		}
 	}
 	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
 		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)

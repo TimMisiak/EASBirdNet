@@ -19,7 +19,7 @@ One database, `birdsense`, with one container per entity:
 | `recorders`  | listening stations (device + location)  | `/id`         | printed on the unit, e.g. `SW-02`      |
 | `uploads`    | one SD card's trip into storage         | `/id`         | the card reference, `OWL-YYYYMMDD-SRnn` |
 | `audioFiles` | one recording from a card               | `/uploadId`   | `af_` + hash of upload id and path     |
-| `detections` | one BirdNET result in one recording     | `/uploadId`   | `det_` + hash of file, start, species  |
+| `detections` | one species heard in one recording      | `/uploadId`   | `det_` + hash of file, start, species  |
 
 ```mermaid
 erDiagram
@@ -51,7 +51,7 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
 - **Ids are immutable**, and so is `uploadId` on the two child containers. An
   update cannot change them.
 - **Only cards are hard-deleted**, by a coordinator, and a card takes its
-  `audioFiles`, `detections` and stored audio with it. People leave the roster
+  `audioFiles`, `detections`, stored audio and clips with it. People leave the roster
   via `removedAt` and recorders leave the field via `retiredAt`, because cards
   point at both.
 
@@ -232,8 +232,8 @@ interruption produces the same ids instead of duplicates.
 | `sizeBytes`      | integer | |
 | `night`          | date    | The evening the recording's night began. |
 | `recordedAt?`    | instant | Recording start, when known. The analysis queue fills it in from the file name (`20260723_160624`, local time, with an optional `(-0700)` offset; Pacific without one). |
-| `durationSec?`   | number  | Filled in by processing. Not yet: the analyzer doesn't report it. |
-| `sampleRate?`    | integer | Hz, filled in by processing. |
+| `durationSec?`   | number  | Filled in by the analysis queue, which reads it while cutting clips. |
+| `sampleRate?`    | integer | Hz, filled in the same way. |
 | `sha256?`        | string  | Hex checksum, to tell a corrupt transfer from a corrupt card. |
 | `blobName?`      | string  | Where the audio is stored, set when its last byte lands; see [Blob naming](#blob-naming). |
 | `status`         | string  | `pending` → `uploaded` → `analyzing` → `analyzed`, or `failed`. |
@@ -275,10 +275,13 @@ interruption produces the same ids instead of duplicates.
 
 ## `detections`
 
-One BirdNET result above the analysis threshold: a species heard in one window
-of one recording, plus a volunteer's review of it. The id is derived from the
-file, the window start (in milliseconds) and the species, so re-ingesting the
-same BirdNET output overwrites rather than duplicates.
+A species BirdNET heard above the analysis threshold in one recording, over a
+run of consecutive 3-second windows, plus a volunteer's review of it. The
+analysis queue merges the windows: a species heard in the windows at 0–3 s,
+3–6 s and 6–9 s is one detection from 0 to 9 s, at the highest confidence of the
+three, and a window without it ends the run. The id is derived from the file,
+the run's start (in milliseconds) and the species, so analyzing a file again
+overwrites rather than duplicates.
 
 | Field            | Type    | Notes |
 |------------------|---------|-------|
@@ -288,11 +291,12 @@ same BirdNET output overwrites rather than duplicates.
 | `recorderId`     | string  | → `recorders.id` |
 | `detectedAt`     | instant | Recording start (`audioFiles.recordedAt`) + `startSec`. For a file whose name has no time, midnight Pacific at the start of its `night`. |
 | `night`          | date    | The evening the night began. |
-| `startSec`       | number  | Window start, seconds into the file. |
-| `endSec`         | number  | Window end. |
+| `startSec`       | number  | Start of the run's first window, seconds into the file. |
+| `endSec`         | number  | End of its last window. |
 | `scientificName` | string  | As BirdNET labelled it, e.g. `Strix varia`. |
 | `commonName`     | string  | e.g. `Barred Owl`. |
-| `confidence`     | number  | 0–1. |
+| `confidence`     | number  | 0–1, the highest of the run's windows. |
+| `clip?`          | object  | The stretch of the recording stored for review; see below. Absent on detections stored before clips were cut. |
 | `reviewStatus`   | string  | `unreviewed`, `confirmed` or `rejected`. Top-level so it can be filtered on. |
 | `review?`        | object  | The review; see below. Absent while unreviewed. |
 | `createdAt`      | instant | |
@@ -308,6 +312,16 @@ same BirdNET output overwrites rather than duplicates.
 | `correctedScientificName?` | string  | Set on a confirmed detection whose species BirdNET got wrong. |
 | `correctedCommonName?`     | string  | |
 | `note?`                    | string  | |
+
+**`clip`**, a few seconds of the recording stored as its own WAV (mono, 16-bit,
+at the recording's sample rate), so a reviewer can hear the detection without
+the whole file:
+
+| Field      | Type   | Notes |
+|------------|--------|-------|
+| `blobName` | string | Where it is stored; see [Blob naming](#blob-naming). |
+| `startSec` | number | Seconds into the audio file: the detection's start less 1 s, clamped to the file. |
+| `endSec`   | number | The detection's end plus 1 s, clamped to the file. A run too long for a 30 s clip gets the 30 s centred on its most confident window instead. |
 
 The **species a detection counts as** is the correction if there is one,
 otherwise BirdNET's label (`Detection.Species()`). **Only `confirmed`
@@ -327,6 +341,7 @@ they are what a threshold or model change gets measured against.
   "scientificName": "Strix varia",
   "commonName": "Barred Owl",
   "confidence": 0.91,
+  "clip": { "blobName": "clips/OWL-20260907-SR02/det_9c41d7e2a0b35f86c1e4a7d20b9f3e65.wav", "startSec": 731, "endSec": 736 },
   "reviewStatus": "confirmed",
   "review": { "userId": "usr_8d02e6f1a4c97b35", "userName": "Ellen Park", "at": "2026-09-14T02:05:31Z" },
   "createdAt": "2026-09-13T09:41:17Z",
@@ -361,6 +376,7 @@ Every read the API needs, and what it costs in Cosmos:
 | Files on a card (registering, counting, the admin card page, analysis) | `ListAudioFiles` | `audioFiles` | single partition |
 | Analysis queue: cards with files waiting | `ListUploads{Status: processing}` | `uploads` | cross-partition |
 | A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
+| One detection (its page, its clip, a review) | `GetDetection` | `detections` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
 | What was heard in one file (admin card page) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
@@ -418,6 +434,18 @@ card is one prefix, so lifecycle rules and clean-up can act on one card at a
 time. In the prefix, anything but letters, digits, `-`, `_` and `.` becomes `_`,
 since an upload id has to be URL-safe.
 
+Detection clips are cut by the server rather than uploaded, and go under their
+own prefix:
+
+```
+clips/{uploadId}/{detectionId}.wav
+```
+
+A clip is named by its detection, so analyzing a file again replaces its clips
+instead of adding more. They are outside `uploads/`, so a lifecycle rule that
+tiers or deletes the originals leaves what reviewers listen to alone. The same
+characters are replaced in both parts of the name.
+
 Beside each file, tusd keeps `{name}.info`: a small JSON record of the upload,
 with its size and the metadata the server set (`reference`, `path`,
 `audioFileId`, `userId`). In Azure a file is a block blob whose block list is
@@ -425,7 +453,7 @@ committed when the last byte lands, so the blob only appears once it is whole;
 until then the blocks are uncommitted, and Azure discards them after 7 days. A
 local file grows in place. Nothing deletes `.info` records, or what's left of
 uploads that never finished, until the card is deleted, which removes
-everything under its prefix.
+everything under its prefix, and under its `clips/` prefix too.
 
 ## API mapping
 
@@ -444,6 +472,8 @@ public summary), following these rules:
 | `files[].bytes` (`POST /uploads`) | `audioFiles.sizeBytes`; `files[].path` is `path`, normalized by `db.CardPath` |
 | `upload.stationName` | `uploads.recorder.name` (the copy, not the live recorder) |
 | `upload.volunteerName` | `uploads.userName` |
+| `detection.review` | `{by, at}`: `review.userName` and `review.at`; absent while unreviewed |
+| `detection.clip` | `{startSec, endSec}` of `clip`; the blob name isn't sent |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
 | `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `nights` = distinct `night`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
 | `program.recorders` | recorders with no `retiredAt` |
@@ -463,7 +493,10 @@ What the write routes do to documents:
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list. |
 | `GET /admin/uploads/{ref}/files/{id}/detections` | Answers that file's detections, in the order heard. |
-| `DELETE /admin/uploads/{ref}` | Deletes the card in any status: first every blob under its prefix, finished or not, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio is left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
+| `GET /admin/uploads/{ref}/detections/{id}` | Answers the detection, its card and its audio file. |
+| `GET /admin/uploads/{ref}/detections/{id}/clip` | Serves `clip.blobName` from file storage as `audio/wav`, answering range requests. 404 for a detection with no clip. |
+| `PUT /admin/uploads/{ref}/detections/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
+| `DELETE /admin/uploads/{ref}` | Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
@@ -476,9 +509,9 @@ What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 |------|--------|
 | First file on a card | Sets `analysis` (settings, `startedAt`). |
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
-| BirdNET answers | Upserts a `detections` document per result, `unreviewed`; sets the file `analyzed` with `analyzedAt`, `detectionCount` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
-| BirdNET fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
-| Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever it stored for it after the delete swept past. It checks the file is still there before storing detections. |
+| BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.wav`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
+| BirdNET or `clip.py` fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
+| Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever documents it stored for it after the delete swept past. It checks the file is still there before storing clips and detections, so only a delete landing in the moment between that check and the writes can leave that file's clips in storage. |
 | After each file | Recounts `filesAnalyzed`, `filesFailed` and `detectionCount`. When nothing on the card is waiting, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |
 
 ## Local JSON file
