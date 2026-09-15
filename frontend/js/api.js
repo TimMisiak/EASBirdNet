@@ -70,12 +70,8 @@ export const createUpload = (body) => request("POST", "/uploads", body);
 export const reportProgress = (reference, body) =>
   request("POST", `/uploads/${encodeURIComponent(reference)}/progress`, body);
 
-export const fetchAllUploads = () => get("/admin/uploads");
-/** One card and every file on it, with where each is in upload and analysis. */
-export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComponent(reference)}`);
-/** Delete a card for good: its audio, its files and every detection in them. */
-export const deleteUpload = (reference) =>
-  request("DELETE", `/admin/uploads/${encodeURIComponent(reference)}`);
+// Detections are anyone's to hear and review once signed in, on every card.
+
 /**
  * Every card's detections, a page at a time, with the species among them:
  * {detections, total, species}. params are the API's, all optional: since,
@@ -83,20 +79,27 @@ export const deleteUpload = (reference) =>
  */
 export const fetchDetections = (params) => {
   const search = new URLSearchParams(params).toString();
-  return get(`/admin/detections${search ? `?${search}` : ""}`);
+  return get(`/detections${search ? `?${search}` : ""}`);
 };
 /** What BirdNET heard in one file of a card, in the order it was heard. */
 export const fetchFileDetections = (reference, fileId) =>
-  get(`/admin/uploads/${encodeURIComponent(reference)}/files/${encodeURIComponent(fileId)}/detections`);
+  get(`/detections/${encodeURIComponent(reference)}?file=${encodeURIComponent(fileId)}`);
 /** One detection, with the card and the file it was heard in. */
 export const fetchDetection = (reference, id) =>
-  get(`/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}`);
+  get(`/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}`);
 /** Where a detection's clip plays from: a WAV, a few seconds either side of what was heard. */
 export const clipURL = (reference, id) =>
-  `${BASE}/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}/clip`;
+  `${BASE}/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/clip`;
 /** Record a verdict on a detection: "confirmed", "rejected", or back to "unreviewed". */
 export const reviewDetection = (reference, id, status) =>
-  request("PUT", `/admin/uploads/${encodeURIComponent(reference)}/detections/${encodeURIComponent(id)}/review`, { status });
+  request("PUT", `/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/review`, { status });
+
+export const fetchAllUploads = () => get("/admin/uploads");
+/** One card and every file on it, with where each is in upload and analysis. */
+export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComponent(reference)}`);
+/** Delete a card for good: its audio, its files and every detection in them. */
+export const deleteUpload = (reference) =>
+  request("DELETE", `/admin/uploads/${encodeURIComponent(reference)}`);
 export const fetchPeople = () => get("/admin/people");
 export const addPerson = (body) => request("POST", "/admin/people", body);
 /** Replace someone's name, email and role. */

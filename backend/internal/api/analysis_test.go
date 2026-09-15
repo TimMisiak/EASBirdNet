@@ -97,7 +97,7 @@ func TestAdminCardPageShowsEachFileAndWhatWasHeard(t *testing.T) {
 		t.Errorf("card page = %s; want the two listed files, by path", rec.Body)
 	}
 
-	rec = do(t, mux, http.MethodGet, "/api/v1/admin/uploads/"+ref+"/files/"+fileB+"/detections", "", admin)
+	rec = do(t, mux, http.MethodGet, "/api/v1/detections/"+ref+"?file="+fileB, "", admin)
 	// The seeded program has other detections on this card, in other files.
 	if dets := decodeInto[detectionsBody](t, rec).Detections; rec.Code != http.StatusOK || len(dets) != 1 ||
 		dets[0].CommonName != "Barred Owl" || dets[0].StartSec != 12 || dets[0].ReviewStatus != db.ReviewUnreviewed {
@@ -105,19 +105,28 @@ func TestAdminCardPageShowsEachFileAndWhatWasHeard(t *testing.T) {
 	}
 
 	for path, want := range map[string]int{
-		"/api/v1/admin/uploads/OWL-20990101-SR01":                                http.StatusNotFound,
-		"/api/v1/admin/uploads/" + ref + "/files/af_nope/detections":             http.StatusNotFound,
-		"/api/v1/admin/uploads/OWL-20260821-SR03/files/" + fileB + "/detections": http.StatusNotFound,
+		"/api/v1/admin/uploads/OWL-20990101-SR01":            http.StatusNotFound,
+		"/api/v1/detections/OWL-20990101-SR01":               http.StatusNotFound,
+		"/api/v1/detections/" + ref + "?file=af_nope":        http.StatusNotFound,
+		"/api/v1/detections/OWL-20260821-SR03?file=" + fileB: http.StatusNotFound,
 	} {
 		if rec := do(t, mux, http.MethodGet, path, "", admin); rec.Code != want {
 			t.Errorf("GET %s = %d, want %d", path, rec.Code, want)
 		}
 	}
+	// The card page is a coordinator's, but what was heard is anyone's to hear.
 	vol := signedIn(t, mux, db.RoleVolunteer)
-	for _, path := range []string{"/api/v1/admin/uploads/" + ref, "/api/v1/admin/uploads/" + ref + "/files/" + fileB + "/detections"} {
-		if rec := do(t, mux, http.MethodGet, path, "", vol); rec.Code != http.StatusForbidden {
-			t.Errorf("volunteer GET %s = %d, want 403", path, rec.Code)
-		}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/uploads/"+ref, "", vol); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer GET card = %d, want 403", rec.Code)
+	}
+	rec = do(t, mux, http.MethodGet, "/api/v1/detections/"+ref+"?file="+fileB, "", vol)
+	if dets := decodeInto[detectionsBody](t, rec).Detections; rec.Code != http.StatusOK || len(dets) != 1 {
+		t.Errorf("volunteer GET file detections = %d %s; want the one barred owl", rec.Code, rec.Body)
+	}
+	// Without a file, the whole card: seedProgram's five and this one.
+	rec = do(t, mux, http.MethodGet, "/api/v1/detections/"+ref, "", vol)
+	if dets := decodeInto[detectionsBody](t, rec).Detections; rec.Code != http.StatusOK || len(dets) != 6 {
+		t.Errorf("card detections = %d, %d of them; want 6", rec.Code, len(dets))
 	}
 }
 
@@ -157,7 +166,7 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 	}
 
 	admin := signedIn(t, mux, db.RoleAdmin)
-	base := "/api/v1/admin/uploads/" + ref + "/detections/"
+	base := "/api/v1/detections/" + ref + "/"
 	rec := do(t, mux, http.MethodGet, base+owl.ID, "", admin)
 	if body := decodeInto[detectionBody](t, rec); rec.Code != http.StatusOK || body.Upload.Reference != ref ||
 		body.File.Path != "DATA/b.wav" || body.Detection.AudioFileID != fileID || body.Detection.EndSec != 21 ||
@@ -201,7 +210,7 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 		}
 	}
 
-	other := "/api/v1/admin/uploads/OWL-20260821-SR03/detections/" + owl.ID
+	other := "/api/v1/detections/OWL-20260821-SR03/" + owl.ID
 	for _, c := range []struct {
 		method, path, body string
 		want               int
@@ -217,14 +226,23 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 			t.Errorf("%s %s = %d, want %d (%s)", c.method, c.path, rec.Code, c.want, rec.Body)
 		}
 	}
-	vol := signedIn(t, mux, db.RoleVolunteer)
+	// Anyone signed in hears and reviews, on anyone's card: this one is Marcus's,
+	// and Jane reviews it. Someone not signed in can do neither.
+	jane := signedIn(t, mux, db.RoleVolunteer)
 	for _, c := range []struct{ method, path, body string }{
 		{http.MethodGet, base + owl.ID, ""},
 		{http.MethodGet, base + owl.ID + "/clip", ""},
 		{http.MethodPut, base + owl.ID + "/review", `{"status":"confirmed"}`},
 	} {
-		if rec := do(t, mux, c.method, c.path, c.body, vol); rec.Code != http.StatusForbidden {
-			t.Errorf("volunteer %s %s = %d, want 403", c.method, c.path, rec.Code)
+		if rec := do(t, mux, c.method, c.path, c.body, jane); rec.Code != http.StatusOK {
+			t.Errorf("volunteer %s %s = %d, want 200 (%s)", c.method, c.path, rec.Code, rec.Body)
 		}
+		if rec := do(t, mux, c.method, c.path, c.body, nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("anonymous %s %s = %d, want 401", c.method, c.path, rec.Code)
+		}
+	}
+	if stored, err := store.GetDetection(ctx, ref, owl.ID); err != nil || stored.ReviewStatus != db.ReviewConfirmed ||
+		stored.Review == nil || stored.Review.UserName != "Jane Volunteer" {
+		t.Errorf("after Jane's review, stored = %+v (%v)", stored, err)
 	}
 }

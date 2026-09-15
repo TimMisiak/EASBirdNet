@@ -25,7 +25,7 @@ const (
 	maxDetectionsLimit     = 500
 )
 
-// detectionQuery is what GET /admin/detections was asked for.
+// detectionQuery is what GET /detections was asked for.
 type detectionQuery struct {
 	filter  db.DetectionFilter
 	species string // scientific name, as BirdNET labelled it
@@ -104,7 +104,7 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 	h.json(w, http.StatusOK, map[string]any{"detections": rows, "total": len(matched), "species": species})
 }
 
-// parseDetectionQuery reads GET /admin/detections' parameters, or says what is
+// parseDetectionQuery reads GET /detections' parameters, or says what is
 // wrong with them. Every one is optional:
 //
 //	since, until   RFC 3339 instants; heard at or after since, and before until

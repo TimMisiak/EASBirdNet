@@ -39,7 +39,7 @@ func TestListEveryDetection(t *testing.T) {
 	admin := signedIn(t, mux, db.RoleAdmin)
 	list := func(query string) listedBody {
 		t.Helper()
-		rec := do(t, mux, http.MethodGet, "/api/v1/admin/detections"+query, "", admin)
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections"+query, "", admin)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET detections%s = %d %s", query, rec.Code, rec.Body)
 		}
@@ -111,7 +111,7 @@ func TestListEveryDetection(t *testing.T) {
 		page.Detections[1].Confidence != 0.97 {
 		t.Errorf("page 2 by species = %d: %s", page.Total, commonNames(page.Detections))
 	}
-	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/detections?offset=100", "", admin); !strings.Contains(rec.Body.String(), `"detections":[]`) {
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections?offset=100", "", admin); !strings.Contains(rec.Body.String(), `"detections":[]`) {
 		t.Errorf("past the end = %s, want an empty list", rec.Body)
 	}
 
@@ -119,12 +119,17 @@ func TestListEveryDetection(t *testing.T) {
 		"?since=yesterday", "?until=2026-09-13", "?status=maybe", "?minConfidence=1.5", "?minConfidence=high",
 		"?sort=loudness", "?order=up", "?limit=0", "?limit=501", "?offset=-1",
 	} {
-		if rec := do(t, mux, http.MethodGet, "/api/v1/admin/detections"+query, "", admin); rec.Code != http.StatusBadRequest {
+		if rec := do(t, mux, http.MethodGet, "/api/v1/detections"+query, "", admin); rec.Code != http.StatusBadRequest {
 			t.Errorf("GET detections%s = %d, want 400 (%s)", query, rec.Code, rec.Body)
 		}
 	}
+	// Every card's, for anyone signed in.
 	vol := signedIn(t, mux, db.RoleVolunteer)
-	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/detections", "", vol); rec.Code != http.StatusForbidden {
-		t.Errorf("volunteer GET detections = %d, want 403", rec.Code)
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections", "", vol); rec.Code != http.StatusOK ||
+		decodeInto[listedBody](t, rec).Total != 8 {
+		t.Errorf("volunteer GET detections = %d %s, want all 8", rec.Code, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous GET detections = %d, want 401", rec.Code)
 	}
 }

@@ -2,17 +2,22 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, tables, typography } from "../shared-styles.js";
 import { count, dateAtTime } from "../format.js";
 import { reviewChip } from "../upload-status.js";
-import { query, replaceQuery } from "../router.js";
+import { path, query, replaceQuery } from "../router.js";
 import * as api from "../api.js";
+import * as session from "../session.js";
 import "./bs-chip.js";
 
 /**
- * <bs-admin-detections> -- everything BirdNET has heard, on every card: sorted
+ * <bs-detections> -- everything BirdNET has heard, on every card: sorted
  * by when, species or confidence, and filtered by review, species, confidence
  * and the days it was heard. A row opens the detection's own page, to hear it
  * and review it, and that page comes back here with the filters as they were.
  *
- * The filters live in the query string (/admin/detections?species=Strix+varia),
+ * Volunteers and coordinators see the same list, at /app/detections and
+ * /admin/detections, and a row opens the detection under whichever it's on.
+ * Only a coordinator's card column links to the card's page.
+ *
+ * The filters live in the query string (/app/detections?species=Strix+varia),
  * so a reload or a link to a colleague shows the same list. The server filters,
  * sorts and pages; this only asks.
  *
@@ -75,7 +80,7 @@ function startOfDay(date, addDays = 0) {
   return d;
 }
 
-class AdminDetections extends BaseElement {
+class Detections extends BaseElement {
   static styles = [typography, controls, forms, tables];
 
   #view = viewFrom(query());
@@ -209,8 +214,9 @@ class AdminDetections extends BaseElement {
         tbody tr:hover .species a { text-decoration: underline; }
         .sci { font-style: italic; color: var(--bs-text-muted); font-size: 0.8125rem; }
         .station { color: var(--bs-text-body); }
+        .ref { font-family: var(--bs-font-mono); font-size: 0.78125rem; white-space: nowrap; }
         /* Above the species link, so the card opens the card. */
-        .ref a { position: relative; z-index: 1; font-family: var(--bs-font-mono); font-size: 0.78125rem; white-space: nowrap; }
+        .ref a { position: relative; z-index: 1; }
 
         .pager { display: flex; align-items: center; justify-content: space-between; gap: var(--bs-space-4); margin-top: var(--bs-space-5); flex-wrap: wrap; }
         .pager .row { display: flex; gap: var(--bs-space-2); }
@@ -333,7 +339,7 @@ class AdminDetections extends BaseElement {
   #row(d) {
     const { kind, label } = reviewChip(d.reviewStatus);
     const ref = encodeURIComponent(d.reference);
-    const href = `/admin/detections/${ref}/${encodeURIComponent(d.id)}${location.search}`;
+    const href = `${path()}/${ref}/${encodeURIComponent(d.id)}${location.search}`;
     return `
       <tr>
         <td class="nowrap">${escapeHTML(dateAtTime(d.detectedAt))}</td>
@@ -343,7 +349,7 @@ class AdminDetections extends BaseElement {
         </td>
         <td class="num">${Math.round(d.confidence * 100)}%</td>
         <td class="station">${escapeHTML(d.stationName)}</td>
-        <td class="ref"><a href="/admin/uploads/${ref}">${escapeHTML(d.reference)}</a></td>
+        <td class="ref">${session.isAdmin() ? `<a href="/admin/uploads/${ref}">${escapeHTML(d.reference)}</a>` : escapeHTML(d.reference)}</td>
         <td><bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip></td>
       </tr>
     `;
@@ -367,4 +373,4 @@ class AdminDetections extends BaseElement {
   }
 }
 
-customElements.define("bs-admin-detections", AdminDetections);
+customElements.define("bs-detections", Detections);

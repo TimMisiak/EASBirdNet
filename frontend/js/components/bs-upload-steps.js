@@ -2,7 +2,7 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 import * as flow from "../upload-flow.js";
 
 /**
- * <bs-upload-steps step="2"> -- the band under the header during the card
+ * <bs-upload-steps step="2"> -- the row atop the Upload tab during the card
  * upload, showing where in the four steps the volunteer is and which card this
  * is. It reads the reference from the flow so the volunteer always has the
  * string they'd quote in an email in front of them.
@@ -30,11 +30,11 @@ class UploadSteps extends BaseElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; background: var(--bs-surface-band); border-bottom: 1px solid var(--bs-border); }
+        :host { display: block; margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-6); }
         .band {
-          max-width: var(--bs-measure);
-          margin: 0 auto;
-          padding: var(--bs-space-3) var(--bs-space-6);
+          list-style: none;
+          margin: 0;
+          padding: 0;
           display: flex;
           align-items: center;
           gap: var(--bs-space-2);
@@ -59,7 +59,6 @@ class UploadSteps extends BaseElement {
           font-size: 0.71875rem;
           color: var(--bs-text-muted);
         }
-        @media (max-width: 720px) { .band { padding: var(--bs-space-3) var(--bs-space-4); } }
       </style>
       <ol class="band" aria-label="Upload steps">
         ${STEPS.map((label, i) => {
@@ -71,9 +70,6 @@ class UploadSteps extends BaseElement {
         ${reference ? `<span class="reference">${escapeHTML(reference)}</span>` : ""}
       </ol>
     `;
-    // The band is a list; strip the marker without fighting the reset.
-    this.$("ol").style.listStyle = "none";
-    this.$("ol").style.margin = "0";
   }
 }
 

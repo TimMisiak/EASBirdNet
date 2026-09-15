@@ -63,6 +63,12 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/uploads", h.requireSession(h.createUpload))
 	mux.HandleFunc("GET /api/v1/uploads/{reference}", h.requireSession(h.getUpload))
 	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", h.requireSession(h.recordProgress))
+	// Detections are anyone's to hear and review once signed in, on every card.
+	mux.HandleFunc("GET /api/v1/detections", h.requireSession(h.listDetections))
+	mux.HandleFunc("GET /api/v1/detections/{reference}", h.requireSession(h.listCardDetections))
+	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", h.requireSession(h.getDetection))
+	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", h.requireSession(h.getClip))
+	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", h.requireSession(h.reviewDetection))
 	// Card audio, one tus upload per file (see tus.go). tusd routes POST, HEAD
 	// and PATCH itself, so the pattern has no method.
 	mux.Handle(tusPath, h.tusEndpoint())
@@ -71,11 +77,6 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
 	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.deleteUpload))
-	mux.HandleFunc("GET /api/v1/admin/detections", h.requireRole(db.RoleAdmin, h.listDetections))
-	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/files/{file}/detections", h.requireRole(db.RoleAdmin, h.listFileDetections))
-	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}", h.requireRole(db.RoleAdmin, h.getDetection))
-	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/detections/{id}/clip", h.requireRole(db.RoleAdmin, h.getClip))
-	mux.HandleFunc("PUT /api/v1/admin/uploads/{reference}/detections/{id}/review", h.requireRole(db.RoleAdmin, h.reviewDetection))
 	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.listPeople))
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.addPerson))
 	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(db.RoleAdmin, h.updatePerson))
@@ -707,19 +708,28 @@ func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
 	return h.files.DeleteAll(ctx, prefix)
 }
 
-// listFileDetections is everything BirdNET heard in one file, in the order it
-// was heard.
-func (h *handlers) listFileDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
+// listCardDetections is everything BirdNET heard on a card, or with ?file= in
+// one of its files, in the order it was heard.
+func (h *handlers) listCardDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
 	ctx := r.Context()
 	ref := r.PathValue("reference")
-	f, err := h.store.GetAudioFile(ctx, ref, r.PathValue("file"))
+	filter := db.DetectionFilter{UploadID: ref}
+	missing := "no such card"
+	var err error
+	if id := r.URL.Query().Get("file"); id != "" {
+		var f db.AudioFile
+		f, err = h.store.GetAudioFile(ctx, ref, id)
+		filter.AudioFileID, missing = f.ID, "no such file on that card"
+	} else {
+		_, err = h.store.GetUpload(ctx, ref)
+	}
 	var found []db.Detection
 	if err == nil {
-		found, err = h.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref, AudioFileID: f.ID})
+		found, err = h.store.ListDetections(ctx, filter)
 	}
 	switch {
 	case errors.Is(err, db.ErrNotFound):
-		h.problem(w, http.StatusNotFound, "no such file on that card")
+		h.problem(w, http.StatusNotFound, missing)
 	case err != nil:
 		h.fail(w, r, err)
 	default:
