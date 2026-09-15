@@ -399,7 +399,9 @@ can't be changed in place.
   `az acr build` needs outbound network.
 - **Upload clean-up**: when to delete `.info` blobs and abandoned partial
   uploads (a job after a card is processed, or a lifecycle rule once retention
-  is decided).
+  is decided). A coordinator deleting a card already removes everything under
+  its prefix; soft delete keeps those blobs for 7 days, but the card's Cosmos
+  documents are gone at once.
 - **Email**: the upload flow promises "card received" and "results" emails,
   which needs Azure Communication Services or an external provider.
 

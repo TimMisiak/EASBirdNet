@@ -142,7 +142,18 @@ func (q *Queue) drain(ctx context.Context) error {
 	// First come, first analyzed.
 	slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
 	for _, card := range cards {
-		if err := q.processCard(ctx, card); err != nil {
+		err := q.processCard(ctx, card)
+		if errors.Is(err, db.ErrNotFound) {
+			// Only deleting a card removes its documents, so one that has gone
+			// from under the queue is a card being deleted. Detections stored
+			// for it after the delete swept past them go now.
+			q.log.Info("analysis: card deleted while being analyzed", "upload", card.ID)
+			if err := q.store.DeleteUpload(ctx, card.ID); err != nil && !errors.Is(err, db.ErrNotFound) {
+				return err
+			}
+			continue
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -268,6 +279,10 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 			ScientificName: d.ScientificName, CommonName: d.CommonName, Confidence: d.Confidence,
 			ReviewStatus: db.ReviewUnreviewed,
 		}
+	}
+	// BirdNET takes minutes over a file, long enough for its card to be deleted.
+	if _, err := q.store.GetAudioFile(ctx, card.ID, f.ID); err != nil {
+		return err
 	}
 	if len(detections) > 0 {
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {

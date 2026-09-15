@@ -61,6 +61,51 @@ func testStore(t *testing.T, s Store) {
 	if _, err := s.Open(ctx, Name("OWL-20260907-SR02/missing")); !errors.Is(err, ErrNotFound) {
 		t.Errorf("open a missing file: err = %v, want ErrNotFound", err)
 	}
+
+	// Deleting a card's audio takes its unfinished files too, and nothing of a
+	// card whose reference only starts the same way.
+	partial := "OWL-20260907-SR02/" + t.Name() + "-partial"
+	up, err = composer.Core.NewUpload(ctx, tushandler.FileInfo{ID: partial, Size: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := up.WriteChunk(ctx, 0, bytes.NewReader(data[:10])); err != nil {
+		t.Fatal(err)
+	}
+	neighbour := "OWL-20260907-SR020/" + t.Name()
+	up, err = composer.Core.NewUpload(ctx, tushandler.FileInfo{ID: neighbour, Size: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := up.WriteChunk(ctx, 0, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.FinishUpload(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteAll(ctx, "OWL-20260907-SR02"); err != nil {
+		t.Fatalf("delete the card's audio: %v", err)
+	}
+	if _, err := s.Open(ctx, Name(id)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("open a deleted file: err = %v, want ErrNotFound", err)
+	}
+	if _, err := composer.Core.GetUpload(ctx, partial); err == nil {
+		t.Error("the unfinished upload is still there")
+	}
+	if r, err := s.Open(ctx, Name(neighbour)); err != nil {
+		t.Errorf("the other card's file went too: %v", err)
+	} else {
+		r.Close()
+	}
+	if err := s.DeleteAll(ctx, "OWL-20260907-SR02"); err != nil {
+		t.Errorf("delete again: %v", err)
+	}
+	for _, bad := range []string{"", ".", "..", "OWL-20260907-SR02/x"} {
+		if err := s.DeleteAll(ctx, bad); err == nil {
+			t.Errorf("DeleteAll(%q) was allowed", bad)
+		}
+	}
 }
 
 func TestLocal(t *testing.T) {

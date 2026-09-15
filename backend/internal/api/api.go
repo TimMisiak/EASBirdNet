@@ -68,6 +68,7 @@ func register(mux *http.ServeMux, h *handlers) {
 	// Admin.
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
+	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.deleteUpload))
 	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/files/{file}/detections", h.requireRole(db.RoleAdmin, h.listFileDetections))
 	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.listPeople))
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.addPerson))
@@ -651,6 +652,53 @@ func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.Use
 		}
 		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "files": out})
 	}
+}
+
+// deleteUpload removes a card for good: its audio, its audio files, the
+// detections BirdNET found in them, and the card itself. The audio goes first
+// and the card last, so a delete that fails part way leaves the card listed to
+// be deleted again.
+func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, _ db.User) {
+	ctx := r.Context()
+	u, err := h.store.GetUpload(ctx, r.PathValue("reference"))
+	if err == nil {
+		err = h.deleteAudio(ctx, u)
+	}
+	// Not found by now means the analysis queue, finding the card going, got to
+	// the end of deleting it first.
+	if err == nil {
+		if err = h.store.DeleteUpload(ctx, u.ID); errors.Is(err, db.ErrNotFound) {
+			err = nil
+		}
+	}
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, "no such card")
+	case err != nil:
+		h.fail(w, r, err)
+	default:
+		h.json(w, http.StatusOK, map[string]string{"removed": u.ID})
+	}
+}
+
+// deleteAudio removes everything storage holds for a card, finished files or
+// not, which is everything under its prefix. storagePrefix can spell two
+// references the same, so if another card shares the prefix the audio is left
+// where it is, rather than taking that card's with it.
+func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
+	prefix := storagePrefix(u.ID)
+	all, err := h.store.ListUploads(ctx, db.UploadFilter{})
+	if err != nil {
+		return err
+	}
+	for _, other := range all {
+		if other.ID != u.ID && storagePrefix(other.ID) == prefix {
+			h.log.Warn("deleting a card: leaving its audio in storage, another card shares its prefix",
+				"upload", u.ID, "other", other.ID, "prefix", storage.Name(prefix))
+			return nil
+		}
+	}
+	return h.files.DeleteAll(ctx, prefix)
 }
 
 // listFileDetections is everything BirdNET heard in one file, in the order it

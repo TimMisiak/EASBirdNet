@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -318,5 +322,101 @@ func TestReRegisteringACardKeepsTheFilesAlreadyIn(t *testing.T) {
 	}
 	if r := s.create(jane, ref, reg.Files[0].Path, 100); r.status != http.StatusBadRequest {
 		t.Errorf("uploading the unlisted file = %d, want 400", r.status)
+	}
+}
+
+func TestDeleteUpload(t *testing.T) {
+	s := newTusServer(t)
+	ctx := t.Context()
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 2, 1))
+	ref := reg.Upload.Reference
+	s.send(jane, ref, reg.Files[0].Path, audio(1), 100)
+	// The second file is only part way in.
+	partial := s.create(jane, ref, reg.Files[1].Path, 100).header.Get("Location")
+	if r := s.patch(jane, partial, 0, audio(2)[:40]); r.status != http.StatusNoContent {
+		t.Fatalf("patch = %d (%s)", r.status, r.body)
+	}
+	stored, err := s.store.GetAudioFile(ctx, ref, db.AudioFileID(ref, reg.Files[0].Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.UpsertDetections(ctx, ref, []db.Detection{{AudioFileID: stored.ID, ScientificName: "Strix varia", CommonName: "Barred Owl"}}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/admin/uploads/" + ref
+
+	if rec := do(t, s.mux, http.MethodDelete, path, "", jane); rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	admin := signedIn(t, s.mux, db.RoleAdmin)
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	}
+
+	if _, err := s.store.GetUpload(ctx, ref); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
+	}
+	files, _ := s.store.ListAudioFiles(ctx, ref)
+	found, _ := s.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref})
+	if len(files) != 0 || len(found) != 0 {
+		t.Errorf("left behind %d audio files and %d detections", len(files), len(found))
+	}
+	if _, err := s.files.Open(ctx, stored.BlobName); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("stored audio after delete: err = %v, want ErrNotFound", err)
+	}
+	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
+		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)
+	}
+	for _, u := range decodeInto[uploadsBody](t, do(t, s.mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)).Uploads {
+		if u.Reference == ref {
+			t.Error("deleted card is still listed")
+		}
+	}
+	// Other cards keep their detections.
+	if others, _ := s.store.ListDetections(ctx, db.DetectionFilter{UploadID: "OWL-20260913-SR05"}); len(others) != 5 {
+		t.Errorf("another card has %d detections, want its 5", len(others))
+	}
+
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// Two references can share a storage prefix, and deleting one card mustn't
+// take the other's audio.
+func TestDeleteUploadLeavesAudioSharedWithAnotherCard(t *testing.T) {
+	store, dir := newTestStore(t), t.TempDir()
+	files, err := storage.OpenLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := muxFor(store, files, false)
+	ctx := t.Context()
+	for _, ref := range []string{"OWL-20260914-SRA B", "OWL-20260914-SRA_B"} {
+		if _, err := store.CreateUpload(ctx, db.Upload{ID: ref, Status: db.StatusInReview}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blob := storage.Name(storagePrefix("OWL-20260914-SRA_B") + "/x")
+	local := filepath.Join(dir, filepath.FromSlash(blob))
+	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, audio(1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+url.PathEscape("OWL-20260914-SRA B"), "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d (%s)", rec.Code, rec.Body)
+	}
+	if _, err := store.GetUpload(ctx, "OWL-20260914-SRA B"); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
+	}
+	if r, err := files.Open(ctx, blob); err != nil {
+		t.Errorf("the other card's audio went: %v", err)
+	} else {
+		r.Close()
 	}
 }

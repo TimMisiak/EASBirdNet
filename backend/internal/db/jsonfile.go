@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -234,6 +235,30 @@ func (s *jsonFile) UpdateUpload(_ context.Context, id string, mutate func(*Uploa
 	})
 }
 
+func (s *jsonFile) DeleteUpload(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	upload, had := s.data.Uploads[id]
+	files := take(s.data.AudioFiles, func(f AudioFile) bool { return f.UploadID == id })
+	detections := take(s.data.Detections, func(d Detection) bool { return d.UploadID == id })
+	delete(s.data.Uploads, id)
+	if had || len(files) > 0 || len(detections) > 0 {
+		// One write for the lot, so the file never holds half a card.
+		if err := s.save(); err != nil {
+			maps.Copy(s.data.AudioFiles, files)
+			maps.Copy(s.data.Detections, detections)
+			if had {
+				s.data.Uploads[id] = upload
+			}
+			return err
+		}
+	}
+	if !had {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- audio files ---
 
 func (s *jsonFile) GetAudioFile(_ context.Context, uploadID, id string) (AudioFile, error) {
@@ -346,6 +371,18 @@ func list[T any](m map[string]T, keep func(T) bool) []T {
 	for _, v := range m {
 		if keep(v) {
 			out = append(out, clone(v))
+		}
+	}
+	return out
+}
+
+// take removes the entries matching drop from m and returns them.
+func take[T any](m map[string]T, drop func(T) bool) map[string]T {
+	out := map[string]T{}
+	for id, v := range m {
+		if drop(v) {
+			out[id] = v
+			delete(m, id)
 		}
 	}
 	return out

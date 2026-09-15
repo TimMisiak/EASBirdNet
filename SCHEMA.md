@@ -50,8 +50,10 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
   Cosmos, ignored on read and never written by the app.
 - **Ids are immutable**, and so is `uploadId` on the two child containers. An
   update cannot change them.
-- **Nothing is hard-deleted** today. People leave the roster via `removedAt`;
-  recorders leave the field via `retiredAt`.
+- **Only cards are hard-deleted**, by a coordinator, and a card takes its
+  `audioFiles`, `detections` and stored audio with it. People leave the roster
+  via `removedAt` and recorders leave the field via `retiredAt`, because cards
+  point at both.
 
 ## `users`
 
@@ -362,6 +364,7 @@ Every read the API needs, and what it costs in Cosmos:
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
 | What was heard in one file (admin card page) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
+| Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
 the Cosmos gateway can serve them. So cross-partition queries are limited to
@@ -421,7 +424,8 @@ with its size and the metadata the server set (`reference`, `path`,
 committed when the last byte lands, so the blob only appears once it is whole;
 until then the blocks are uncommitted, and Azure discards them after 7 days. A
 local file grows in place. Nothing deletes `.info` records, or what's left of
-uploads that never finished.
+uploads that never finished, until the card is deleted, which removes
+everything under its prefix.
 
 ## API mapping
 
@@ -459,6 +463,7 @@ What the write routes do to documents:
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list. |
 | `GET /admin/uploads/{ref}/files/{id}/detections` | Answers that file's detections, in the order heard. |
+| `DELETE /admin/uploads/{ref}` | Deletes the card in any status: first every blob under its prefix, finished or not, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio is left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
@@ -473,6 +478,7 @@ What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
 | BirdNET answers | Upserts a `detections` document per result, `unreviewed`; sets the file `analyzed` with `analyzedAt`, `detectionCount` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
 | BirdNET fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
+| Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever it stored for it after the delete swept past. It checks the file is still there before storing detections. |
 | After each file | Recounts `filesAnalyzed`, `filesFailed` and `detectionCount`. When nothing on the card is waiting, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |
 
 ## Local JSON file

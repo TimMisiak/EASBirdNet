@@ -348,6 +348,58 @@ func TestACardWithNoFilesOnRecordIsLeftAlone(t *testing.T) {
 	}
 }
 
+// deletedMidWrite deletes the card just before the queue stores its detections,
+// after the queue has checked the card is still there.
+type deletedMidWrite struct{ db.Store }
+
+func (s deletedMidWrite) UpsertDetections(ctx context.Context, uploadID string, ds []db.Detection) error {
+	if err := s.Store.DeleteUpload(ctx, uploadID); err != nil {
+		return err
+	}
+	return s.Store.UpsertDetections(ctx, uploadID, ds)
+}
+
+func TestACardDeletedDuringAnalysisLeavesNothingBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fixture)
+	}{
+		{"while BirdNET runs", func(f *fixture) {
+			f.bird.answer = func(audio string) (birdnet.File, error) {
+				if err := f.store.DeleteUpload(context.Background(), ref); err != nil {
+					return birdnet.File{}, err
+				}
+				return owls(audio)
+			}
+		}},
+		{"while its detections are stored", func(f *fixture) {
+			f.bird.answer = owls
+			f.queue.store = deletedMidWrite{f.store}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.card(db.StatusProcessing, owlFile, quietFile)
+			tc.setup(f)
+			if err := f.queue.drain(t.Context()); err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			if n := len(f.bird.calls); n != 1 {
+				t.Errorf("BirdNET ran %d times, want once, for the file it was on", n)
+			}
+			ctx := t.Context()
+			if _, err := f.store.GetUpload(ctx, ref); !errors.Is(err, db.ErrNotFound) {
+				t.Errorf("card: err = %v, want ErrNotFound", err)
+			}
+			files, _ := f.store.ListAudioFiles(ctx, ref)
+			found, _ := f.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref})
+			if len(files) != 0 || len(found) != 0 {
+				t.Errorf("left behind %d audio files and %d detections", len(files), len(found))
+			}
+		})
+	}
+}
+
 func TestRecordedAt(t *testing.T) {
 	cases := map[string]string{
 		"DATA/Marymoor_20260723_160624(-0700).wav": "2026-07-23T23:06:24Z",

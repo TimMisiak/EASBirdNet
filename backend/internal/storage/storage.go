@@ -17,6 +17,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/tus/tusd/v2/pkg/azurestore"
 	"github.com/tus/tusd/v2/pkg/filestore"
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
@@ -33,6 +38,10 @@ type Store interface {
 	UseIn(composer *tushandler.StoreComposer)
 	// Open reads a stored file by name, as Name gave it.
 	Open(ctx context.Context, name string) (io.ReadCloser, error)
+	// DeleteAll removes every upload whose id starts with prefix + "/",
+	// finished or not, with tusd's records of them. A prefix with nothing
+	// stored under it is not an error.
+	DeleteAll(ctx context.Context, prefix string) error
 }
 
 // prefix is where every upload goes, so the card's audio and nothing else is
@@ -44,6 +53,15 @@ const prefix = "uploads"
 // so a card's files share a prefix.
 func Name(uploadID string) string {
 	return prefix + "/" + uploadID
+}
+
+// under is the start of every name stored for uploads whose ids start with
+// prefix + "/". The prefix is one path element, so it can't reach outside.
+func under(prefix string) (string, error) {
+	if strings.Contains(prefix, "/") || !fs.ValidPath(prefix) || prefix == "." {
+		return "", fmt.Errorf("storage: invalid prefix %q", prefix)
+	}
+	return Name(prefix) + "/", nil
 }
 
 // Backends.
@@ -118,12 +136,25 @@ func (s *local) Open(_ context.Context, name string) (io.ReadCloser, error) {
 	return f, err
 }
 
+func (s *local) DeleteAll(_ context.Context, prefix string) error {
+	name, err := under(prefix)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(s.dir, filepath.FromSlash(name))); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
+}
+
 // --- Azure Blob Storage ---
 
 type azure struct {
 	service azurestore.AzService
-	tus     *azurestore.AzureStore
-	locker  *memorylocker.MemoryLocker
+	// container lists and deletes blobs, which tusd's AzService can't.
+	container *container.Client
+	tus       *azurestore.AzureStore
+	locker    *memorylocker.MemoryLocker
 }
 
 // OpenAzure stores files as block blobs, using tusd's azurestore: each PATCH
@@ -149,10 +180,31 @@ func OpenAzure(cfg Config) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: connecting to blob container %s: %w", cfg.AzureContainer, err)
 	}
+	client, err := containerClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("storage: connecting to blob container %s: %w", cfg.AzureContainer, err)
+	}
 	tus := azurestore.New(service)
 	tus.ObjectPrefix = prefix
 	tus.Container = cfg.AzureContainer
-	return &azure{service: service, tus: tus, locker: memorylocker.New()}, nil
+	return &azure{service: service, container: client, tus: tus, locker: memorylocker.New()}, nil
+}
+
+// containerClient signs in the same way tusd's AzService does.
+func containerClient(cfg Config) (*container.Client, error) {
+	url := strings.TrimSuffix(cfg.AzureEndpoint, "/") + "/" + cfg.AzureContainer
+	if cfg.AzureAccountKey != "" {
+		cred, err := container.NewSharedKeyCredential(cfg.AzureAccountName, cfg.AzureAccountKey)
+		if err != nil {
+			return nil, err
+		}
+		return container.NewClientWithSharedKeyCredential(url, cred, nil)
+	}
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return nil, err
+	}
+	return container.NewClient(url, cred, nil)
 }
 
 func (s *azure) UseIn(composer *tushandler.StoreComposer) {
@@ -171,4 +223,34 @@ func (s *azure) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 	return r, err
+}
+
+// DeleteAll deletes one blob at a time: a card is a few hundred files, which
+// is seconds of requests inside Azure.
+func (s *azure) DeleteAll(ctx context.Context, prefix string) error {
+	name, err := under(prefix)
+	if err != nil {
+		return err
+	}
+	// A file that was never finished is uncommitted blocks, which are only
+	// listed when asked for.
+	pager := s.container.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix:  &name,
+		Include: container.ListBlobsInclude{UncommittedBlobs: true},
+	})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("storage: listing %s: %w", name, err)
+		}
+		for _, item := range page.Segment.BlobItems {
+			_, err := s.container.NewBlobClient(*item.Name).Delete(ctx, &blob.DeleteOptions{
+				DeleteSnapshots: to.Ptr(blob.DeleteSnapshotsOptionTypeInclude),
+			})
+			if err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
+				return fmt.Errorf("storage: deleting %s: %w", *item.Name, err)
+			}
+		}
+	}
+	return nil
 }

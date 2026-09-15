@@ -294,6 +294,75 @@ func TestJSONFileListFilters(t *testing.T) {
 	}
 }
 
+func TestJSONFileDeleteUpload(t *testing.T) {
+	s, path := openTemp(t)
+	ctx := context.Background()
+	_, _, card := seedCard(t, s)
+	other := "OWL-20260821-SR03"
+	if _, err := s.CreateUpload(ctx, Upload{ID: other, Status: StatusInReview}); err != nil {
+		t.Fatal(err)
+	}
+	stock := func(id string) {
+		t.Helper()
+		if err := s.UpsertAudioFiles(ctx, id, []AudioFile{{Path: "DATA/a.wav"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertDetections(ctx, id, []Detection{{AudioFileID: AudioFileID(id, "DATA/a.wav"), ScientificName: "Strix varia"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	left := func(s Store, id string) int {
+		t.Helper()
+		files, err := s.ListAudioFiles(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found, err := s.ListDetections(ctx, DetectionFilter{UploadID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(files) + len(found)
+	}
+	stock(card.ID)
+	stock(other)
+
+	if err := s.DeleteUpload(ctx, card.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get deleted card: err = %v, want ErrNotFound", err)
+	}
+	if n := left(s, card.ID); n != 0 {
+		t.Errorf("%d documents left under the deleted card", n)
+	}
+	if n := left(s, other); n != 2 {
+		t.Errorf("the other card has %d documents, want its 2", n)
+	}
+	if err := s.DeleteUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("delete again: err = %v, want ErrNotFound", err)
+	}
+
+	// Documents written under a card after it went are still swept up.
+	stock(card.ID)
+	if err := s.DeleteUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("delete leftovers: err = %v, want ErrNotFound", err)
+	}
+	if n := left(s, card.ID); n != 0 {
+		t.Errorf("%d leftover documents not swept", n)
+	}
+
+	reopened, err := OpenJSONFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.GetUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleted card is back after reopening: err = %v", err)
+	}
+	if _, err := reopened.GetUpload(ctx, other); err != nil || left(reopened, other) != 2 {
+		t.Errorf("the other card after reopening: err = %v, %d documents", err, left(reopened, other))
+	}
+}
+
 func TestDetectionSpeciesPrefersTheCorrection(t *testing.T) {
 	d := Detection{ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl"}
 	if sci, _ := d.Species(); sci != "Bubo virginianus" {

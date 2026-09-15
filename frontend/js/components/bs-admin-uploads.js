@@ -1,5 +1,5 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
-import { controls, tables, typography } from "../shared-styles.js";
+import { controls, forms, panels, tables, typography } from "../shared-styles.js";
 import { count } from "../format.js";
 import { isMoving, isUnfinished, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
@@ -10,6 +10,9 @@ import "./bs-chip.js";
  * find the two that are stuck, so the filters lead with that and the count of
  * cards needing attention is stated rather than left to be counted. A row
  * opens the card's own page, with every file and what BirdNET heard in it.
+ *
+ * The bin at the end of a row deletes the card for good, after a confirmation
+ * that says what goes with it: its audio and every detection in it.
  */
 const POLL_MS = 10_000;
 
@@ -22,11 +25,24 @@ const FILTERS = [
 ];
 
 class AdminUploads extends BaseElement {
-  static styles = [typography, controls, tables];
+  static styles = [typography, controls, forms, panels, tables];
 
   #state = { status: "loading", uploads: [], error: null };
   #filter = "all";
   #timer = 0;
+
+  /** The reference of the row asking "delete this card?". */
+  #confirming = null;
+  /** A failed delete, shown under that row: {reference, message}. */
+  #rowError = null;
+  #busy = false;
+
+  constructor() {
+    super();
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.#confirming) this.actions.cancel();
+    });
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -43,6 +59,34 @@ class AdminUploads extends BaseElement {
         this.#filter = el.dataset.filter;
         this.render();
       },
+
+      askDelete: (el) => {
+        this.#confirming = el.dataset.reference;
+        this.#rowError = null;
+        this.render();
+        // Focus the safe choice, so an Enter doesn't delete anything.
+        this.$('[data-action="cancel"]')?.focus();
+      },
+      cancel: () => {
+        this.#confirming = null;
+        this.#rowError = null;
+        this.render();
+      },
+      confirmDelete: async () => {
+        const reference = this.#confirming;
+        if (!reference || this.#busy) return;
+        this.#busy = true;
+        this.render();
+        try {
+          await api.deleteUpload(reference);
+        } catch (error) {
+          this.#rowError = { reference, message: error.message };
+        } finally {
+          this.#confirming = null;
+          this.#busy = false;
+        }
+        await this.#load();
+      },
     };
   }
 
@@ -55,7 +99,8 @@ class AdminUploads extends BaseElement {
       if (this.#state.status !== "ready") this.#state = { status: "error", uploads: [], error };
     }
     if (!this.isConnected) return;
-    this.render();
+    // A refresh would take the focus off an open confirmation; it shows when that closes.
+    if (!this.#confirming) this.render();
     // Cards being sent or analyzed change by the minute; look again while any are.
     clearTimeout(this.#timer);
     if (this.#state.uploads.some(isMoving)) this.#timer = setTimeout(() => this.#load(), POLL_MS);
@@ -94,6 +139,23 @@ class AdminUploads extends BaseElement {
         tbody tr:hover .ref a { text-decoration: underline; }
         .note-cell { font-size: 0.84375rem; color: var(--bs-text-muted); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
+
+        .visually-hidden {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip-path: inset(50%);
+          white-space: nowrap;
+        }
+        td.actions { width: 1%; text-align: right; padding-top: 0.625rem; padding-bottom: 0.625rem; }
+        /* Above the reference's link, which covers the rest of the row. */
+        .bin { position: relative; z-index: 1; padding: 0.4375rem; border-color: transparent; }
+        .bin svg { display: block; }
+        tbody tr.sub { border-top: 0; }
+        tbody tr.sub:hover { background: none; }
+        tr.sub td { padding-top: 0; }
+        .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
       </style>
 
       <div class="filters">
@@ -126,21 +188,70 @@ class AdminUploads extends BaseElement {
                          <th scope="col" style="text-align: right;">Detections</th>
                          <th scope="col">Status</th>
                          <th scope="col">Note</th>
+                         <th scope="col"><span class="visually-hidden">Actions</span></th>
                        </tr>
                      </thead>
-                     <tbody>${shown.map(row).join("")}</tbody>
+                     <tbody>${shown.map((upload) => this.#row(upload)).join("")}</tbody>
                    </table>
                  </div>`
       }
     `;
   }
+
+  /** One card's row, plus the confirmation or error row under it if any. */
+  #row(upload) {
+    const main = row(upload);
+    if (this.#confirming === upload.reference) return main + this.#confirmRow(upload);
+    if (this.#rowError?.reference === upload.reference) {
+      return `${main}
+        <tr class="sub">
+          <td colspan="${COLUMNS}"><p class="error" role="alert">${escapeHTML(this.#rowError.message)}</p></td>
+        </tr>`;
+    }
+    return main;
+  }
+
+  #confirmRow(upload) {
+    const files = upload.filesUploaded ?? 0;
+    const lost = [`${count(files)} audio ${files === 1 ? "file" : "files"}`];
+    if (upload.analysis) {
+      lost.push(`${count(upload.detectionCount)} ${upload.detectionCount === 1 ? "detection" : "detections"}`);
+    }
+    const sending = isUnfinished(upload) ? " The volunteer's upload stops, and they would have to send the card again." : "";
+    return `
+      <tr class="sub">
+        <td colspan="${COLUMNS}">
+          <div class="confirm" role="alertdialog" aria-labelledby="confirm-text">
+            <p id="confirm-text">
+              Delete <strong>${escapeHTML(upload.reference)}</strong> for good?
+              Its ${lost.join(" and ")} are deleted with it.${sending}
+            </p>
+            <span class="row">
+              <button type="button" class="btn btn--tiny btn--danger-solid" data-action="confirmDelete"
+                      ${this.#busy ? "disabled" : ""}>${this.#busy ? "Deleting…" : "Delete"}</button>
+              <button type="button" class="btn btn--quiet btn--tiny" data-action="cancel">Keep</button>
+            </span>
+          </div>
+        </td>
+      </tr>
+    `;
+  }
 }
+
+const COLUMNS = 9;
+
+const BIN = `
+  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"
+       stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.5 4h11M6.25 4V2.5h3.5V4M3.75 4l.75 9.5h7l.75-9.5M6.5 6.75v4.5M9.5 6.75v4.5" />
+  </svg>`;
 
 function row(upload) {
   const chip = statusChip(upload);
+  const reference = escapeHTML(upload.reference);
   return `
     <tr>
-      <td class="ref"><a href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a></td>
+      <td class="ref"><a href="/admin/uploads/${encodeURIComponent(upload.reference)}">${reference}</a></td>
       <td class="who">${escapeHTML(upload.volunteerName)}</td>
       <td style="color: var(--bs-text-body);">${escapeHTML(upload.stationName)}</td>
       <td class="num" style="font-size: 0.84375rem;">${upload.nights?.length ?? 0}</td>
@@ -148,6 +259,10 @@ function row(upload) {
       <td class="num muted" style="font-size: 0.84375rem;">${upload.analysis ? count(upload.detectionCount) : "—"}</td>
       <td><bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip></td>
       <td class="note-cell">${escapeHTML(upload.notes ?? "")}</td>
+      <td class="actions">
+        <button type="button" class="btn btn--quiet btn--danger bin" data-action="askDelete"
+                data-reference="${reference}" aria-label="Delete card ${reference}" title="Delete card">${BIN}</button>
+      </td>
     </tr>
   `;
 }

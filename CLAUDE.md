@@ -113,7 +113,7 @@ GET    /api/v1/uploads/{reference}       one of your cards, with its files and t
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
-GET    /api/v1/admin/uploads/{reference}  one card, with every file and its status
+GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it
 GET    /api/v1/admin/uploads/{reference}/files/{id}/detections   what was heard in a file
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
@@ -338,7 +338,8 @@ Every handler reads and writes through `db.Store`; there is no in-memory data
 left in `internal/api`. The API's JSON shapes live in `internal/api/shapes.go`
 and differ from the stored documents in a few names. SCHEMA.md's *API mapping*
 section is the rulebook for both the fields and what each write route does
-(DELETE sets `removedAt`/`retiredAt`; nothing is hard-deleted).
+(DELETE on people and stations sets `removedAt`/`retiredAt`; deleting a card
+is the one hard delete, and takes its audio and detections with it).
 `internal/api` tests build their own small fixed-date program in the JSON
 backend, deliberately not the dev seed.
 
@@ -353,4 +354,4 @@ and the analysis queue runs BirdNET over it in the server process, writing
 `unreviewed` detections. The coordinator's card page (`/admin/uploads/{ref}`)
 shows each file's status and what was heard in it. There is no review screen
 yet, so nothing moves a card from `in_review` to `results_sent`, and no email.
-Nothing cleans up abandoned partial uploads.
+Nothing cleans up abandoned partial uploads, short of deleting their card.

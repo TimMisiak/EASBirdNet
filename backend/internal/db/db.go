@@ -56,6 +56,11 @@ type Store interface {
 	// CreateUpload requires an id. ErrConflict if it is taken.
 	CreateUpload(ctx context.Context, u Upload) (Upload, error)
 	UpdateUpload(ctx context.Context, id string, mutate func(*Upload) error) (Upload, error)
+	// DeleteUpload removes a card for good, with its audio files and
+	// detections. The card goes last, so a delete that fails part way leaves
+	// it listed to be deleted again. ErrNotFound if there is no such card;
+	// anything still stored under its id is removed all the same.
+	DeleteUpload(ctx context.Context, id string) error
 
 	GetAudioFile(ctx context.Context, uploadID, id string) (AudioFile, error)
 	// ListAudioFiles returns a card's files sorted by path.

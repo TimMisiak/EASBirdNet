@@ -32,8 +32,8 @@ const (
 const (
 	// maxUpdateAttempts bounds the ETag retry loop in updateDoc.
 	maxUpdateAttempts = 5
-	// upsertWorkers is how many upserts a batch runs at once.
-	upsertWorkers = 8
+	// batchWorkers is how many writes a batch runs at once.
+	batchWorkers = 8
 )
 
 type cosmosStore struct {
@@ -227,6 +227,28 @@ func (s *cosmosStore) UpdateUpload(ctx context.Context, id string, mutate func(*
 	})
 }
 
+// DeleteUpload is not atomic: there is no transaction across containers. Audio
+// files go before detections, because the analysis queue treats its file going
+// missing as the card being deleted, and sweeps up detections it stored after
+// this had listed them (internal/analysis).
+func (s *cosmosStore) DeleteUpload(ctx context.Context, id string) error {
+	_, err := readDoc[Upload](ctx, s.uploads, id, id)
+	missing := errors.Is(err, ErrNotFound)
+	if err != nil && !missing {
+		return err
+	}
+	for _, c := range []*azcosmos.ContainerClient{s.audioFiles, s.detections} {
+		if err := deletePartition(ctx, c, id); err != nil {
+			return err
+		}
+	}
+	if missing {
+		return ErrNotFound
+	}
+	_, err = s.uploads.DeleteItem(ctx, azcosmos.NewPartitionKeyString(id), id, nil)
+	return cosmosErr(err)
+}
+
 // --- audio files ---
 
 func (s *cosmosStore) GetAudioFile(ctx context.Context, uploadID, id string) (AudioFile, error) {
@@ -372,27 +394,56 @@ func updateDoc[T any](ctx context.Context, c *azcosmos.ContainerClient, partitio
 	return zero, fmt.Errorf("%w: %s kept changing underneath the update", ErrConflict, id)
 }
 
-// upsertAll writes a batch a few documents at a time and stops at the first
-// failure. It is not atomic: documents written before the failure stay written,
-// which is safe because every batch id is deterministic and a retry overwrites.
+// upsertAll writes a batch a few documents at a time. It is not atomic:
+// documents written before a failure stay written, which is safe because every
+// batch id is deterministic and a retry overwrites.
 func upsertAll[T any](ctx context.Context, c *azcosmos.ContainerClient, partition string, docs []T) error {
 	pk := azcosmos.NewPartitionKeyString(partition)
+	return inParallel(ctx, docs, func(ctx context.Context, doc T) error {
+		b, err := json.Marshal(doc)
+		if err == nil {
+			_, err = c.UpsertItem(ctx, pk, b, nil)
+		}
+		return cosmosErr(err)
+	})
+}
+
+type docID struct {
+	ID string `json:"id"`
+}
+
+// deletePartition deletes every document in one logical partition, a few at a
+// time. A document that is already gone counts as deleted.
+func deletePartition(ctx context.Context, c *azcosmos.ContainerClient, partition string) error {
+	docs, err := queryDocs[docID](ctx, c, partition, "SELECT c.id FROM c")
+	if err != nil {
+		return err
+	}
+	pk := azcosmos.NewPartitionKeyString(partition)
+	return inParallel(ctx, docs, func(ctx context.Context, doc docID) error {
+		_, err := c.DeleteItem(ctx, pk, doc.ID, nil)
+		if hasStatus(err, http.StatusNotFound) {
+			return nil
+		}
+		return cosmosErr(err)
+	})
+}
+
+// inParallel runs do over items, batchWorkers at a time, and stops at the
+// first failure.
+func inParallel[T any](ctx context.Context, items []T, do func(context.Context, T) error) error {
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	jobs := make(chan T)
 	firstErr := make(chan error, 1)
 	var wg sync.WaitGroup
-	for range upsertWorkers {
+	for range batchWorkers {
 		wg.Go(func() {
-			for doc := range jobs {
-				b, err := json.Marshal(doc)
-				if err == nil {
-					_, err = c.UpsertItem(workCtx, pk, b, nil)
-				}
-				if err != nil {
+			for item := range jobs {
+				if err := do(workCtx, item); err != nil {
 					select {
-					case firstErr <- cosmosErr(err):
+					case firstErr <- err:
 						cancel()
 					default:
 					}
@@ -401,9 +452,9 @@ func upsertAll[T any](ctx context.Context, c *azcosmos.ContainerClient, partitio
 		})
 	}
 feed:
-	for _, doc := range docs {
+	for _, item := range items {
 		select {
-		case jobs <- doc:
+		case jobs <- item:
 		case <-workCtx.Done():
 			break feed
 		}

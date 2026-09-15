@@ -73,6 +73,9 @@ export const reportProgress = (reference, body) =>
 export const fetchAllUploads = () => get("/admin/uploads");
 /** One card and every file on it, with where each is in upload and analysis. */
 export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComponent(reference)}`);
+/** Delete a card for good: its audio, its files and every detection in them. */
+export const deleteUpload = (reference) =>
+  request("DELETE", `/admin/uploads/${encodeURIComponent(reference)}`);
 /** What BirdNET heard in one file of a card, in the order it was heard. */
 export const fetchFileDetections = (reference, fileId) =>
   get(`/admin/uploads/${encodeURIComponent(reference)}/files/${encodeURIComponent(fileId)}/detections`);
