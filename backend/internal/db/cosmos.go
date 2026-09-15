@@ -269,6 +269,9 @@ func (s *cosmosStore) UpdateAudioFile(ctx context.Context, uploadID, id string, 
 // query widens Since by a second and the shared filter trims the result.
 func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error) {
 	var w where
+	if f.AudioFileID != "" {
+		w.add("c.audioFileId = @audioFileId", "@audioFileId", f.AudioFileID)
+	}
 	if f.ReviewStatus != "" {
 		w.add("c.reviewStatus = @reviewStatus", "@reviewStatus", f.ReviewStatus)
 	}

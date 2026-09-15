@@ -68,11 +68,13 @@ type Recorder struct {
 }
 
 // Upload statuses. A card moves down this list; needs_attention is a side
-// branch a coordinator resolves by hand.
+// branch a coordinator resolves by hand. in_review is a card BirdNET has been
+// over, every file of it, waiting for its detections to be reviewed.
 const (
 	StatusInProgress     = "in_progress"
 	StatusInterrupted    = "interrupted"
 	StatusProcessing     = "processing"
+	StatusInReview       = "in_review"
 	StatusNeedsAttention = "needs_attention"
 	StatusResultsSent    = "results_sent"
 )
@@ -97,6 +99,12 @@ type Upload struct {
 	TotalBytes    int64 `json:"totalBytes"`
 	FilesUploaded int   `json:"filesUploaded"`
 	BytesUploaded int64 `json:"bytesUploaded"`
+	// FilesAnalyzed and FilesFailed count the card's listed files that BirdNET
+	// has finished with, and DetectionCount what it found in them. Like the
+	// uploaded counts, the server recounts them from the audio files.
+	FilesAnalyzed  int `json:"filesAnalyzed"`
+	FilesFailed    int `json:"filesFailed"`
+	DetectionCount int `json:"detectionCount"`
 
 	Status       string `json:"status"`
 	StatusDetail string `json:"statusDetail,omitempty"`
@@ -139,13 +147,20 @@ type Analysis struct {
 	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
 }
 
-// Audio file statuses.
+// Audio file statuses. An uploaded file on a card that is processing is
+// queued for BirdNET: the audio files are the analysis queue.
 const (
-	AudioPending  = "pending"  // registered from the card, not yet in storage
-	AudioUploaded = "uploaded" // in blob storage, not yet analyzed
-	AudioAnalyzed = "analyzed" // BirdNET has run over it
-	AudioFailed   = "failed"   // unreadable, bad checksum, or analysis failed
+	AudioPending   = "pending"   // registered from the card, not yet in storage
+	AudioUploaded  = "uploaded"  // in blob storage, not yet analyzed
+	AudioAnalyzing = "analyzing" // BirdNET is running over it
+	AudioAnalyzed  = "analyzed"  // BirdNET has run over it
+	AudioFailed    = "failed"    // unreadable, bad checksum, or analysis failed
 )
+
+// AudioDetailNotOnCard is the StatusDetail of a failed file that was on a
+// card's list, but not on the list the card was registered with again. It is
+// no longer part of the card, so nothing counts or analyzes it.
+const AudioDetailNotOnCard = "not on the card when it was registered again"
 
 // AudioFile is one recording from a card.
 type AudioFile struct {

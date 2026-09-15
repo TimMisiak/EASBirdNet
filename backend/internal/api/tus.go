@@ -100,10 +100,6 @@ func (h *handlers) tusAccess(uploads tushandler.DataStore, next http.Handler) ht
 	})
 }
 
-// detailNotOnCard marks an audio file that was on a card's list but not on the
-// list the card was registered with again (see registerFiles).
-const detailNotOnCard = "not on the card when it was registered again"
-
 // beforeFileUpload decides whether a file may be sent: its card is the
 // caller's and still taking files, and the file is on the card's list, at the
 // size it was listed, and not already in. The server then names the upload
@@ -136,7 +132,7 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 
 	file, err := h.store.GetAudioFile(ctx, ref, db.AudioFileID(ref, cardPath))
 	switch {
-	case errors.Is(err, db.ErrNotFound) || (err == nil && file.StatusDetail == detailNotOnCard):
+	case errors.Is(err, db.ErrNotFound) || (err == nil && file.StatusDetail == db.AudioDetailNotOnCard):
 		return resp, none, tushandler.NewError("ERR_FILE_NOT_ON_CARD",
 			"that file isn't on the card's list; choose the card again", http.StatusBadRequest)
 	case err != nil:
@@ -171,7 +167,7 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 	_, err := h.store.UpdateAudioFile(ctx, ref, fileID, func(f *db.AudioFile) error {
 		// A file already in keeps its first copy; one taken off the card's
 		// list while it was being sent stays off it.
-		if received(*f) || f.StatusDetail == detailNotOnCard {
+		if received(*f) || f.StatusDetail == db.AudioDetailNotOnCard {
 			return nil
 		}
 		f.Status, f.StatusDetail = db.AudioUploaded, ""
@@ -187,8 +183,10 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 	return tushandler.HTTPResponse{}, err
 }
 
+// received reports whether a file's audio is in storage: uploaded, and maybe
+// analyzed since.
 func received(f db.AudioFile) bool {
-	return f.Status == db.AudioUploaded || f.Status == db.AudioAnalyzed
+	return f.Status == db.AudioUploaded || f.Status == db.AudioAnalyzing || f.Status == db.AudioAnalyzed
 }
 
 // storagePrefix is a card reference as an upload id can spell it. References

@@ -1,16 +1,19 @@
-import { BaseElement } from "./base-element.js";
+import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, typography } from "../shared-styles.js";
 import { navigate, onNavigate, path } from "../router.js";
 import * as flow from "../upload-flow.js";
 import "./bs-admin-people.js";
 import "./bs-admin-recorders.js";
 import "./bs-admin-uploads.js";
+import "./bs-admin-upload-detail.js";
 
 /**
  * <bs-admin-page> is the coordinator's shell. The three tabs are routes, not
  * local state, so a coordinator can link a colleague straight to the uploads
- * table -- and so the back button works the way it looks like it should.
+ * table -- and so the back button works the way it looks like it should. A
+ * card's own page, /admin/uploads/{reference}, sits under the uploads tab.
  */
+const CARD_PREFIX = "/admin/uploads/";
 const TABS = [
   { path: "/admin/people", label: "People", tag: "bs-admin-people" },
   { path: "/admin/recorders", label: "Recorders", tag: "bs-admin-recorders" },
@@ -36,7 +39,8 @@ class AdminPage extends BaseElement {
 
   render() {
     const here = path();
-    const tab = TABS.find((t) => t.path === here) ?? TABS[0];
+    const tab = TABS.find((t) => here === t.path || here.startsWith(`${t.path}/`)) ?? TABS[0];
+    const card = here.startsWith(CARD_PREFIX) ? decodeURIComponent(here.slice(CARD_PREFIX.length)) : "";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -84,7 +88,11 @@ class AdminPage extends BaseElement {
         ).join("")}
       </nav>
 
-      <${tab.tag}></${tab.tag}>
+      ${
+        card
+          ? `<bs-admin-upload-detail reference="${escapeHTML(card)}"></bs-admin-upload-detail>`
+          : `<${tab.tag}></${tab.tag}>`
+      }
     `;
   }
 }

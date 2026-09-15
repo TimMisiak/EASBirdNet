@@ -29,11 +29,18 @@ import (
 // reachable from outside a demo.
 const sessionCookie = "bs_session"
 
-// Register mounts the API routes on mux. files is where card audio goes. dev
+// Register mounts the API routes on mux. files is where card audio goes, and
+// queue is told when a card has all its files, so BirdNET can start on it. dev
 // turns on the development-only routes -- today, the roster the sign-in page
 // lets you pick an account from.
-func Register(mux *http.ServeMux, store db.Store, files storage.Store, log *slog.Logger, dev bool) {
-	register(mux, &handlers{store: store, files: files, log: log, dev: dev, now: time.Now})
+func Register(mux *http.ServeMux, store db.Store, files storage.Store, queue Queue, log *slog.Logger, dev bool) {
+	register(mux, &handlers{store: store, files: files, queue: queue, log: log, dev: dev, now: time.Now})
+}
+
+// Queue is the analysis queue (internal/analysis). A received card is queued
+// by its status already; Enqueue only says to look now.
+type Queue interface {
+	Enqueue(reference string)
 }
 
 func register(mux *http.ServeMux, h *handlers) {
@@ -60,6 +67,8 @@ func register(mux *http.ServeMux, h *handlers) {
 
 	// Admin.
 	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
+	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
+	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}/files/{file}/detections", h.requireRole(db.RoleAdmin, h.listFileDetections))
 	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.listPeople))
 	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.addPerson))
 	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(db.RoleAdmin, h.updatePerson))
@@ -85,6 +94,8 @@ type handlers struct {
 	store db.Store
 	// files is where card audio is stored.
 	files storage.Store
+	// queue hears about cards that are ready for BirdNET. Nil runs no analysis.
+	queue Queue
 	log   *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
@@ -411,7 +422,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	default:
 		out := []CardFile{}
 		for _, f := range stored {
-			if f.StatusDetail != detailNotOnCard {
+			if f.StatusDetail != db.AudioDetailNotOnCard {
 				out = append(out, cardFileOf(f))
 			}
 		}
@@ -433,7 +444,7 @@ func (h *handlers) listedAsBefore(ctx context.Context, ref string, listed []db.A
 	}
 	sizes := make(map[string]int64, len(existing))
 	for _, f := range existing {
-		if f.StatusDetail != detailNotOnCard {
+		if f.StatusDetail != db.AudioDetailNotOnCard {
 			sizes[f.Path] = f.SizeBytes
 		}
 	}
@@ -501,8 +512,8 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		})
 	}
 	for _, old := range unlisted {
-		if old.StatusDetail != detailNotOnCard {
-			old.Status, old.StatusDetail = db.AudioFailed, detailNotOnCard
+		if old.StatusDetail != db.AudioDetailNotOnCard {
+			old.Status, old.StatusDetail = db.AudioFailed, db.AudioDetailNotOnCard
 			writes = append(writes, old)
 		}
 	}
@@ -533,7 +544,7 @@ func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error
 		}
 	}
 	now := h.stamp()
-	return h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+	u, err := h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
 		if !transferring(u.Status) {
 			return nil
 		}
@@ -543,6 +554,10 @@ func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error
 		}
 		return nil
 	})
+	if err == nil && u.Status == db.StatusProcessing && h.queue != nil {
+		h.queue.Enqueue(ref)
+	}
+	return u, err
 }
 
 // transferring reports whether a card's files are still being sent, which are
@@ -609,6 +624,51 @@ func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request, me db.
 
 func (h *handlers) listAllUploads(w http.ResponseWriter, r *http.Request, _ db.User) {
 	h.writeUploads(w, r, db.UploadFilter{})
+}
+
+// getCardFiles is one card with every file on it, where each stands in upload
+// and analysis, for the coordinator's card page.
+func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.User) {
+	ctx := r.Context()
+	u, err := h.store.GetUpload(ctx, r.PathValue("reference"))
+	var files []db.AudioFile
+	if err == nil {
+		files, err = h.store.ListAudioFiles(ctx, u.ID)
+	}
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, "no such card")
+	case err != nil:
+		h.fail(w, r, err)
+	default:
+		out := []AudioFile{}
+		for _, f := range files {
+			if f.StatusDetail != db.AudioDetailNotOnCard {
+				out = append(out, audioFileOf(f))
+			}
+		}
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "files": out})
+	}
+}
+
+// listFileDetections is everything BirdNET heard in one file, in the order it
+// was heard.
+func (h *handlers) listFileDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
+	ctx := r.Context()
+	ref := r.PathValue("reference")
+	f, err := h.store.GetAudioFile(ctx, ref, r.PathValue("file"))
+	var found []db.Detection
+	if err == nil {
+		found, err = h.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref, AudioFileID: f.ID})
+	}
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		h.problem(w, http.StatusNotFound, "no such file on that card")
+	case err != nil:
+		h.fail(w, r, err)
+	default:
+		h.json(w, http.StatusOK, map[string]any{"detections": mapAll(found, detectionOf)})
+	}
 }
 
 func (h *handlers) listPeople(w http.ResponseWriter, r *http.Request, _ db.User) {

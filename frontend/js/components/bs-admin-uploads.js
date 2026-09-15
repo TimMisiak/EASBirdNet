@@ -1,20 +1,24 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, tables, typography } from "../shared-styles.js";
 import { count } from "../format.js";
-import { isUnfinished, statusChip } from "../upload-status.js";
+import { isMoving, isUnfinished, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
 import "./bs-chip.js";
 
 /**
  * <bs-admin-uploads> -- every card in the program. A coordinator opens this to
  * find the two that are stuck, so the filters lead with that and the count of
- * cards needing attention is stated rather than left to be counted.
+ * cards needing attention is stated rather than left to be counted. A row
+ * opens the card's own page, with every file and what BirdNET heard in it.
  */
+const POLL_MS = 10_000;
+
 const FILTERS = [
   { id: "all", label: "All cards", match: () => true },
   { id: "attention", label: "Needs attention", match: (u) => u.status === "needs_attention" },
   { id: "unfinished", label: "Unfinished", match: isUnfinished },
   { id: "processing", label: "Processing", match: (u) => u.status === "processing" },
+  { id: "review", label: "In review", match: (u) => u.status === "in_review" },
 ];
 
 class AdminUploads extends BaseElement {
@@ -22,10 +26,15 @@ class AdminUploads extends BaseElement {
 
   #state = { status: "loading", uploads: [], error: null };
   #filter = "all";
+  #timer = 0;
 
   connectedCallback() {
     super.connectedCallback();
     this.#load();
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this.#timer);
   }
 
   get actions() {
@@ -42,9 +51,14 @@ class AdminUploads extends BaseElement {
       const { uploads } = await api.fetchAllUploads();
       this.#state = { status: "ready", uploads, error: null };
     } catch (error) {
-      this.#state = { status: "error", uploads: [], error };
+      // A failed refresh keeps the table that's already showing.
+      if (this.#state.status !== "ready") this.#state = { status: "error", uploads: [], error };
     }
-    if (this.isConnected) this.render();
+    if (!this.isConnected) return;
+    this.render();
+    // Cards being sent or analyzed change by the minute; look again while any are.
+    clearTimeout(this.#timer);
+    if (this.#state.uploads.some(isMoving)) this.#timer = setTimeout(() => this.#load(), POLL_MS);
   }
 
   render() {
@@ -72,6 +86,12 @@ class AdminUploads extends BaseElement {
            station and the note are allowed to wrap. */
         .ref { font-family: var(--bs-font-mono); font-size: 0.8125rem; white-space: nowrap; }
         .num, .who { white-space: nowrap; }
+        /* The reference links to the card, and its link covers the row. */
+        tbody tr { position: relative; }
+        tbody tr:hover { background: var(--bs-surface-sunk); }
+        .ref a { color: var(--bs-text); text-decoration: none; }
+        .ref a::after { content: ""; position: absolute; inset: 0; }
+        tbody tr:hover .ref a { text-decoration: underline; }
         .note-cell { font-size: 0.84375rem; color: var(--bs-text-muted); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
       </style>
@@ -103,6 +123,7 @@ class AdminUploads extends BaseElement {
                          <th scope="col">Station</th>
                          <th scope="col" style="text-align: right;">Nights</th>
                          <th scope="col" style="text-align: right;">Files</th>
+                         <th scope="col" style="text-align: right;">Detections</th>
                          <th scope="col">Status</th>
                          <th scope="col">Note</th>
                        </tr>
@@ -119,11 +140,12 @@ function row(upload) {
   const chip = statusChip(upload);
   return `
     <tr>
-      <td class="ref">${escapeHTML(upload.reference)}</td>
+      <td class="ref"><a href="/admin/uploads/${encodeURIComponent(upload.reference)}">${escapeHTML(upload.reference)}</a></td>
       <td class="who">${escapeHTML(upload.volunteerName)}</td>
       <td style="color: var(--bs-text-body);">${escapeHTML(upload.stationName)}</td>
       <td class="num" style="font-size: 0.84375rem;">${upload.nights?.length ?? 0}</td>
       <td class="num muted" style="font-size: 0.84375rem;">${count(upload.filesUploaded)} / ${count(upload.fileCount)}</td>
+      <td class="num muted" style="font-size: 0.84375rem;">${upload.analysis ? count(upload.detectionCount) : "—"}</td>
       <td><bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip></td>
       <td class="note-cell">${escapeHTML(upload.notes ?? "")}</td>
     </tr>

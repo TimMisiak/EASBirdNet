@@ -63,21 +63,64 @@ type Night struct {
 
 // Upload is one SD card on its way from a station into storage.
 type Upload struct {
-	Reference     string    `json:"reference"`
-	StationID     string    `json:"stationId"`
-	StationName   string    `json:"stationName"`
-	VolunteerName string    `json:"volunteerName"`
-	PulledOn      string    `json:"pulledOn"` // YYYY-MM-DD
-	Notes         string    `json:"notes"`
-	Nights        []Night   `json:"nights"`
-	FileCount     int       `json:"fileCount"`
-	FilesUploaded int       `json:"filesUploaded"`
-	TotalBytes    int64     `json:"totalBytes"`
-	BytesUploaded int64     `json:"bytesUploaded"`
-	Status        string    `json:"status"`
-	StatusDetail  string    `json:"statusDetail,omitempty"`
-	StartedAt     time.Time `json:"startedAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	Reference     string  `json:"reference"`
+	StationID     string  `json:"stationId"`
+	StationName   string  `json:"stationName"`
+	VolunteerName string  `json:"volunteerName"`
+	PulledOn      string  `json:"pulledOn"` // YYYY-MM-DD
+	Notes         string  `json:"notes"`
+	Nights        []Night `json:"nights"`
+	FileCount     int     `json:"fileCount"`
+	FilesUploaded int     `json:"filesUploaded"`
+	TotalBytes    int64   `json:"totalBytes"`
+	BytesUploaded int64   `json:"bytesUploaded"`
+	// FilesAnalyzed, FilesFailed and DetectionCount are BirdNET's progress
+	// through the card once it has been received.
+	FilesAnalyzed  int        `json:"filesAnalyzed"`
+	FilesFailed    int        `json:"filesFailed"`
+	DetectionCount int        `json:"detectionCount"`
+	Status         string     `json:"status"`
+	StatusDetail   string     `json:"statusDetail,omitempty"`
+	Analysis       *Analysis  `json:"analysis,omitempty"`
+	StartedAt      time.Time  `json:"startedAt"`
+	ReceivedAt     *time.Time `json:"receivedAt,omitempty"`
+	ProcessedAt    *time.Time `json:"processedAt,omitempty"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+// Analysis is how BirdNET was run over a card.
+type Analysis struct {
+	Model         string     `json:"model,omitempty"` // known once the first file is done
+	MinConfidence float64    `json:"minConfidence"`
+	StartedAt     time.Time  `json:"startedAt"`
+	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
+}
+
+// AudioFile is one file on a card as a coordinator sees it: where it is in
+// being sent and analyzed.
+type AudioFile struct {
+	ID             string     `json:"id"`
+	Path           string     `json:"path"`
+	Night          string     `json:"night"` // YYYY-MM-DD
+	Bytes          int64      `json:"bytes"`
+	Status         string     `json:"status"` // db.AudioPending, db.AudioUploaded, db.AudioAnalyzing, ...
+	StatusDetail   string     `json:"statusDetail,omitempty"`
+	RecordedAt     *time.Time `json:"recordedAt,omitempty"`
+	UploadedAt     *time.Time `json:"uploadedAt,omitempty"`
+	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
+	DetectionCount int        `json:"detectionCount"`
+}
+
+// Detection is one thing BirdNET heard in a file.
+type Detection struct {
+	ID             string    `json:"id"`
+	StartSec       float64   `json:"startSec"`
+	EndSec         float64   `json:"endSec"`
+	DetectedAt     time.Time `json:"detectedAt"`
+	ScientificName string    `json:"scientificName"`
+	CommonName     string    `json:"commonName"`
+	Confidence     float64   `json:"confidence"`
+	ReviewStatus   string    `json:"reviewStatus"`
 }
 
 // CardFile is one audio file on a card. The browser lists them when it
@@ -137,8 +180,33 @@ func uploadOf(u db.Upload) Upload {
 		VolunteerName: u.UserName, PulledOn: u.PulledOn, Notes: u.Notes, Nights: nights,
 		FileCount: u.FileCount, FilesUploaded: u.FilesUploaded,
 		TotalBytes: u.TotalBytes, BytesUploaded: u.BytesUploaded,
-		Status: u.Status, StatusDetail: u.StatusDetail,
-		StartedAt: u.StartedAt, UpdatedAt: u.UpdatedAt,
+		FilesAnalyzed: u.FilesAnalyzed, FilesFailed: u.FilesFailed, DetectionCount: u.DetectionCount,
+		Status: u.Status, StatusDetail: u.StatusDetail, Analysis: analysisOf(u.Analysis),
+		StartedAt: u.StartedAt, ReceivedAt: u.ReceivedAt, ProcessedAt: u.ProcessedAt, UpdatedAt: u.UpdatedAt,
+	}
+}
+
+func analysisOf(a *db.Analysis) *Analysis {
+	if a == nil {
+		return nil
+	}
+	return &Analysis{Model: a.Model, MinConfidence: a.MinConfidence, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
+}
+
+func audioFileOf(f db.AudioFile) AudioFile {
+	return AudioFile{
+		ID: f.ID, Path: f.Path, Night: f.Night, Bytes: f.SizeBytes,
+		Status: f.Status, StatusDetail: f.StatusDetail,
+		RecordedAt: f.RecordedAt, UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
+		DetectionCount: f.DetectionCount,
+	}
+}
+
+func detectionOf(d db.Detection) Detection {
+	return Detection{
+		ID: d.ID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
+		ScientificName: d.ScientificName, CommonName: d.CommonName,
+		Confidence: d.Confidence, ReviewStatus: d.ReviewStatus,
 	}
 }
 

@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -68,18 +70,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Shut down cleanly so `docker compose down` doesn't cut live requests.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// BirdNET runs in this process, over received cards. Without a Python that
+	// has it, cards wait in processing until the server starts with one.
+	queue := analysis.New(store, files, cfg.Analyzer, log)
+	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
+	analysisDone := make(chan struct{})
+	checkCtx, cancelCheck := context.WithTimeout(ctx, time.Minute)
+	err = cfg.Analyzer.Check(checkCtx)
+	cancelCheck()
+	if err != nil {
+		close(analysisDone)
+		log.Warn("BirdNET isn't available, so received cards will wait in processing; set BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_BIRDNET_SCRIPT", "err", err)
+	} else {
+		log.Info("analysis queue started", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script)
+		go func() {
+			defer close(analysisDone)
+			queue.Run(analysisCtx)
+		}()
+	}
+
 	// No ReadTimeout or WriteTimeout: a PATCH carrying audio takes as long as
 	// the volunteer's upstream link needs. tusd sets deadlines per read instead.
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           requestLogger(log, newMux(cfg, store, files, log)),
+		Handler:           requestLogger(log, newMux(cfg, store, files, queue, log)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	// Shut down cleanly so `docker compose down` doesn't cut live requests.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -94,6 +115,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	shutdownErr := srv.Shutdown(shutdownCtx)
+	// A BirdNET run in flight is killed; its file is queued again next start.
+	stopAnalysis()
+	<-analysisDone
 	if err := store.Close(); err != nil {
 		log.Error("closing the database", "err", err)
 	}
@@ -106,9 +130,9 @@ func main() {
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, files storage.Store, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
-	api.Register(mux, store, files, log, cfg.Dev)
+	api.Register(mux, store, files, queue, log, cfg.Dev)
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
 }
@@ -119,6 +143,8 @@ type config struct {
 	DB        db.Config
 	// Storage is where card audio goes.
 	Storage storage.Config
+	// Analyzer runs BirdNET over received cards.
+	Analyzer birdnet.Analyzer
 	// Dev turns on development-only affordances, like signing in as anyone on
 	// the roster. It follows BIRDSENSE_DB=local: the JSON file is only ever a
 	// development database, and Azure runs Cosmos, so it can't be on there.
@@ -148,6 +174,12 @@ func configFromEnv() (config, error) {
 			LocalDir:       envOr("BIRDSENSE_STORAGE_DIR", "data/audio"),
 			AzureEndpoint:  os.Getenv("BIRDSENSE_BLOB_ENDPOINT"),
 			AzureContainer: envOr("BIRDSENSE_BLOB_CONTAINER", "audio"),
+		},
+		// The defaults suit `go run ./cmd/server` from backend/ with the venv
+		// from CLAUDE.md; the image sets both.
+		Analyzer: birdnet.Analyzer{
+			Python: envOr("BIRDSENSE_BIRDNET_PYTHON", "../.venv/bin/python"),
+			Script: envOr("BIRDSENSE_BIRDNET_SCRIPT", "../analyzer/analyze.py"),
 		},
 	}
 	switch cfg.DB.Backend {

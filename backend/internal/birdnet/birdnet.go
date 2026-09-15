@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -258,3 +259,20 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (t *tailBuffer) String() string { return string(bytes.TrimSpace(t.buf)) }
+
+// Check reports whether Analyze can run: the script is there, and the Python
+// can import the birdnet package. It loads no model, so it takes a second, not
+// the minute a real run can.
+func (a Analyzer) Check(ctx context.Context) error {
+	if _, err := os.Stat(a.Script); err != nil {
+		return fmt.Errorf("birdnet: %w", err)
+	}
+	var stderr tailBuffer
+	stderr.max = 1 << 10
+	cmd := exec.CommandContext(ctx, a.Python, "-c", "import birdnet")
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("birdnet: %s can't import the birdnet package: %w\n%s", a.Python, err, stderr.String())
+	}
+	return nil
+}

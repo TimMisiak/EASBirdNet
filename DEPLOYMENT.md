@@ -197,8 +197,8 @@ environment forwards here.
 | identity | `UserAssigned`, the identity above | |
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
 | container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
-| cpu / memory | `0.25` / `0.5Gi` | A Go binary serving small JSON and static files. The image also carries BirdNET (Python + models), but the server doesn't run it yet. Once it does in this app, a one-worker run peaks near 300 MB on top of the server, so raise memory to at least `1Gi` (and cpu with it, since Container Apps couples the two) or move analysis to a job; see *Open questions*. |
-| min_replicas / max_replicas | `0` / `1` | Scale to zero between visits (a cold start of a few seconds). One is plenty for the traffic, and **uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)). |
+| cpu / memory | `1` / `2Gi` | The server runs BirdNET over received cards (`internal/analysis`): one Python process at a time, peaking near 300 MB, which is CPU-bound for hours per card. On this much CPU expect very roughly 2 minutes per hour of audio, so a ~336-file card takes most of a day; more CPU is faster. Moving analysis to a job would let the web app go back to `0.25` / `0.5Gi`; see *Open questions*. |
+| min_replicas / max_replicas | `1` / `1` | **Analysis needs a replica that stays up**: it runs in the background with no HTTP traffic, and a scale-to-zero replica is stopped mid-card. Nothing is lost when that happens (the queue is in Cosmos and resumes at the next start), but it stops until someone visits. `0` is fine again once analysis is a job. **Uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)), and two replicas would also analyze the same file twice. |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | liveness / readiness / startup probes | HTTP GET `/api/v1/health` on port `8080` | The same endpoint the Dockerfile `HEALTHCHECK` uses. |
 
@@ -216,7 +216,7 @@ environment forwards here.
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
-| `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. |
+| `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The server checks them at startup, and logs `BirdNET isn't available` (and analyzes nothing) if they don't work. |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 
@@ -303,7 +303,8 @@ What it needs, beyond resources 7 and 8:
 - **Ephemeral disk.** The Azure store writes each request body to a temp file
   before staging it. The browser sends at most 50 MB a request and one file at
   a time, so that is 50 MB per volunteer uploading at once, against the
-  replica's ephemeral storage allowance.
+  replica's ephemeral storage allowance. Analysis downloads one whole file at a
+  time to temp storage (a few hundred MB) and deletes it after.
 - **Request time.** The Container Apps ingress ends a request after 240 s. At
   50 MB a request that holds down to about 2 Mb/s of upstream; for slower links,
   lower `CHUNK_BYTES` in `frontend/js/upload-flow.js`.
@@ -388,12 +389,14 @@ can't be changed in place.
 - **Sign-in**: real Google/Microsoft OIDC will add app registrations and
   client secrets. Those go in Key Vault or Container Apps secrets, and get
   their own section here.
-- **BirdNET processing**: where analysis runs (a Container Apps job triggered
-  by a queue is the natural fit). It will add a queue, a job, and the same
-  identity-based roles. The image already has what a job needs
-  (`/app/birdsense-analyze`, the Python venv, and the models), so a job can
-  start from the same image and split off later. The build downloads the models
-  from Zenodo, so `az acr build` needs outbound network.
+- **BirdNET processing**: analysis runs in the container app today
+  (`internal/analysis`), which is why it needs `min_replicas = 1` and more CPU
+  and memory than serving pages does. A Container Apps job is the natural next
+  step: it would run the same queue over the same Cosmos documents, from the
+  same image, and let the web app scale to zero again. That adds a job and the
+  same identity-based roles, and a way to start it (a schedule, or an event when
+  a card is received). The build downloads the models from Zenodo, so
+  `az acr build` needs outbound network.
 - **Upload clean-up**: when to delete `.info` blobs and abandoned partial
   uploads (a job after a card is processed, or a lifecycle rule once retention
   is decided).

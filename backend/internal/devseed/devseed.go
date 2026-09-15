@@ -211,12 +211,17 @@ func Seed(ctx context.Context, s db.Store, now time.Time) (bool, error) {
 			up.ResultsSentAt = &sent
 		}
 
+		var heard []db.Detection
+		if processed {
+			reviewer := reviewers[len(up.ID)%len(reviewers)]
+			heard = detections(rng, up, st, reviewer, reviewedAt)
+			up.FilesAnalyzed, up.DetectionCount = up.FileCount, len(heard)
+		}
 		if _, err := s.CreateUpload(ctx, up); err != nil {
 			return false, fmt.Errorf("devseed: adding card %s: %w", up.ID, err)
 		}
 		if processed {
-			reviewer := reviewers[len(up.ID)%len(reviewers)]
-			if err := s.UpsertDetections(ctx, up.ID, detections(rng, up, st, reviewer, reviewedAt)); err != nil {
+			if err := s.UpsertDetections(ctx, up.ID, heard); err != nil {
 				return false, fmt.Errorf("devseed: adding detections for %s: %w", up.ID, err)
 			}
 		}

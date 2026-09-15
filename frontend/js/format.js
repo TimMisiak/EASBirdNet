@@ -73,6 +73,15 @@ export function dateAtTime(value) {
   return dateTime.format(d).replace(/\bAM\b/, "a.m.").replace(/\bPM\b/, "p.m.");
 }
 
+/** "12:12" or "1:04:09" -- a position in a recording. */
+export function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds ?? 0));
+  const pad = (n) => String(n).padStart(2, "0");
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+}
+
 /** "Aug 24 – Sep 6" for a card's span of nights. */
 export function nightRange(nights) {
   if (!nights?.length) return "";

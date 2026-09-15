@@ -1,0 +1,379 @@
+package analysis
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+)
+
+var testNow = time.Date(2026, time.September, 14, 18, 0, 0, 0, time.UTC)
+
+const ref = "OWL-20260914-SR02"
+
+// fakeBirdNET answers for each file by the name it had on the card, which the
+// queue passes as the temporary copy's extension and the audio's content.
+type fakeBirdNET struct {
+	mu    sync.Mutex
+	calls []call
+	// answer returns the result for one file's audio, or an error for the run.
+	answer func(audio string) (birdnet.File, error)
+}
+
+type call struct {
+	path, audio string
+	opts        birdnet.Options
+}
+
+func (f *fakeBirdNET) Analyze(_ context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	res := birdnet.Result{Model: "BirdNET_GLOBAL_6K_V2.4", Options: opts}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return birdnet.Result{}, err
+		}
+		f.calls = append(f.calls, call{path: p, audio: string(b), opts: opts})
+		file, err := f.answer(string(b))
+		if err != nil {
+			return birdnet.Result{}, err
+		}
+		file.Path = p
+		res.Files = append(res.Files, file)
+	}
+	return res, nil
+}
+
+type fixture struct {
+	t     *testing.T
+	store db.Store
+	dir   string
+	files storage.Store
+	bird  *fakeBirdNET
+	queue *Queue
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	dir := t.TempDir()
+	files, err := storage.OpenLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{t: t, store: store, dir: dir, files: files, bird: &fakeBirdNET{}}
+	f.queue = New(store, files, f.bird, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	f.queue.now = func() time.Time { return testNow }
+	f.queue.retryDelay = time.Millisecond
+	return f
+}
+
+// card stores a received card whose files are in storage, each holding its
+// own path as its audio. A path with no audio isn't in storage.
+func (f *fixture) card(status string, paths ...string) {
+	f.t.Helper()
+	ctx := f.t.Context()
+	received := testNow.Add(-time.Hour)
+	if _, err := f.store.CreateUpload(ctx, db.Upload{
+		ID: ref, RecorderID: "SW-02",
+		Recorder: db.RecorderSnapshot{Name: "Marymoor Park – Snag Row", Latitude: 47.66021, Longitude: -122.11384},
+		PulledOn: "2026-09-14", FileCount: len(paths), FilesUploaded: len(paths),
+		Status: status, StartedAt: received, ReceivedAt: &received,
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	var docs []db.AudioFile
+	for _, p := range paths {
+		doc := db.AudioFile{RecorderID: "SW-02", Path: p, SizeBytes: 100, Night: "2026-09-12", Status: db.AudioUploaded}
+		if !strings.Contains(p, "missing") {
+			doc.BlobName = storage.Name(ref + "/" + strings.ReplaceAll(path.Base(p), ".", "_"))
+			local := filepath.Join(f.dir, filepath.FromSlash(doc.BlobName))
+			if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+				f.t.Fatal(err)
+			}
+			if err := os.WriteFile(local, []byte(p), 0o644); err != nil {
+				f.t.Fatal(err)
+			}
+		}
+		docs = append(docs, doc)
+	}
+	if err := f.store.UpsertAudioFiles(ctx, ref, docs); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fixture) file(p string) db.AudioFile {
+	f.t.Helper()
+	file, err := f.store.GetAudioFile(f.t.Context(), ref, db.AudioFileID(ref, p))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return file
+}
+
+func (f *fixture) upload() db.Upload {
+	f.t.Helper()
+	u, err := f.store.GetUpload(f.t.Context(), ref)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return u
+}
+
+const (
+	owlFile    = "DATA/20260912/Marymoor_20260912_230000(-0700).WAV"
+	quietFile  = "DATA/20260912/Marymoor_20260913_000000.wav"
+	brokenFile = "DATA/20260912/broken.flac"
+)
+
+func owls(audio string) (birdnet.File, error) {
+	switch audio {
+	case owlFile:
+		return birdnet.File{Detections: []birdnet.Detection{
+			{StartSec: 732, EndSec: 735, ScientificName: "Strix varia", CommonName: "Barred Owl", Confidence: 0.91},
+			{StartSec: 732, EndSec: 735, ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl", Confidence: 0.3},
+		}}, nil
+	case brokenFile:
+		return birdnet.File{Error: "unreadable audio"}, nil
+	}
+	return birdnet.File{}, nil
+}
+
+func TestACardIsAnalyzedFileByFile(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile, quietFile, brokenFile)
+
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// One run per file, each on a copy that keeps its extension, located at
+	// the recorder in the week of the night.
+	if len(f.bird.calls) != 3 {
+		t.Fatalf("BirdNET ran %d times, want once per file", len(f.bird.calls))
+	}
+	for _, c := range f.bird.calls {
+		if filepath.Ext(c.path) != strings.ToLower(path.Ext(c.audio)) {
+			t.Errorf("%s was analyzed as %s; the extension picks the decoder", c.audio, c.path)
+		}
+		if l := c.opts.Location; l == nil || l.Latitude != 47.66021 || l.Week != 34 {
+			t.Errorf("%s location = %+v, want the recorder in week 34", c.audio, l)
+		}
+		if _, err := os.Stat(c.path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the copy of %s was left behind", c.audio)
+		}
+	}
+
+	owl := f.file(owlFile)
+	start := time.Date(2026, time.September, 13, 6, 0, 0, 0, time.UTC) // 23:00 at -0700
+	if owl.Status != db.AudioAnalyzed || owl.DetectionCount != 2 || owl.AnalyzedAt == nil || owl.RecordedAt == nil || !owl.RecordedAt.Equal(start) {
+		t.Errorf("owl file = %+v; want analyzed with 2 detections, recorded at %v", owl, start)
+	}
+	dets, err := f.store.ListDetections(t.Context(), db.DetectionFilter{UploadID: ref, AudioFileID: owl.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dets) != 2 {
+		t.Fatalf("got %d detections for the owl file, want 2", len(dets))
+	}
+	d := dets[0]
+	if want := start.Add(732 * time.Second); !d.DetectedAt.Equal(want) || d.Night != "2026-09-12" || d.RecorderID != "SW-02" ||
+		d.ReviewStatus != db.ReviewUnreviewed || d.EndSec != 735 || d.Confidence == 0 {
+		t.Errorf("detection = %+v; want heard at %v, unreviewed, on the file's night", d, want)
+	}
+
+	if quiet := f.file(quietFile); quiet.Status != db.AudioAnalyzed || quiet.DetectionCount != 0 ||
+		!quiet.RecordedAt.Equal(time.Date(2026, time.September, 13, 7, 0, 0, 0, time.UTC)) {
+		t.Errorf("quiet file = %+v; want analyzed, nothing heard, recorded at midnight Pacific", quiet)
+	}
+	if broken := f.file(brokenFile); broken.Status != db.AudioFailed || broken.StatusDetail != "unreadable audio" {
+		t.Errorf("broken file = %+v; want failed as unreadable", broken)
+	}
+
+	u := f.upload()
+	if u.Status != db.StatusNeedsAttention || u.StatusDetail != "1 file not analyzed" ||
+		u.FilesAnalyzed != 2 || u.FilesFailed != 1 || u.DetectionCount != 2 || u.ProcessedAt == nil {
+		t.Errorf("card = %s (%s), %d analyzed, %d failed, %d detections; want needs_attention with the tally",
+			u.Status, u.StatusDetail, u.FilesAnalyzed, u.FilesFailed, u.DetectionCount)
+	}
+	if a := u.Analysis; a == nil || a.Model != "BirdNET_GLOBAL_6K_V2.4" || a.MinConfidence != birdnet.DefaultMinConfidence ||
+		a.FinishedAt == nil || !a.FinishedAt.Equal(testNow) {
+		t.Errorf("analysis = %+v", a)
+	}
+
+	// Nothing is left, so another pass runs nothing.
+	if err := f.queue.drain(t.Context()); err != nil || len(f.bird.calls) != 3 {
+		t.Errorf("second pass: %v, %d runs", err, len(f.bird.calls))
+	}
+}
+
+func TestACleanCardGoesToReview(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile, quietFile)
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.upload(); u.Status != db.StatusInReview || u.StatusDetail != "" || u.FilesAnalyzed != 2 {
+		t.Errorf("card = %s (%q), %d analyzed; want in_review", u.Status, u.StatusDetail, u.FilesAnalyzed)
+	}
+}
+
+// A file that was mid-analysis when the server stopped is run again, and a
+// card still being sent isn't touched.
+func TestRunPicksUpWhereARestartLeftOff(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile, quietFile)
+	if _, err := f.store.UpdateAudioFile(t.Context(), ref, db.AudioFileID(ref, owlFile), func(a *db.AudioFile) error {
+		a.Status = db.AudioAnalyzing
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sending := "OWL-20260914-SR03"
+	if _, err := f.store.CreateUpload(t.Context(), db.Upload{ID: sending, Status: db.StatusInProgress}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpsertAudioFiles(t.Context(), sending, []db.AudioFile{{Path: "a.wav", Status: db.AudioUploaded, BlobName: "uploads/x"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.queue.Run(ctx)
+	}()
+	waitFor(t, func() bool { return f.upload().Status == db.StatusInReview })
+
+	// A card that arrives later is picked up when the API says so.
+	later := "OWL-20260914-SR05"
+	received := testNow
+	if _, err := f.store.CreateUpload(t.Context(), db.Upload{ID: later, Status: db.StatusProcessing, ReceivedAt: &received}); err != nil {
+		t.Fatal(err)
+	}
+	blob := storage.Name(later + "/q")
+	os.MkdirAll(filepath.Join(f.dir, "uploads", later), 0o755)
+	os.WriteFile(filepath.Join(f.dir, filepath.FromSlash(blob)), []byte(quietFile), 0o644)
+	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "q.wav", Night: "2026-09-13", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
+		t.Fatal(err)
+	}
+	f.queue.Enqueue(later)
+	waitFor(t, func() bool {
+		u, err := f.store.GetUpload(t.Context(), later)
+		return err == nil && u.Status == db.StatusInReview
+	})
+	cancel()
+	<-done
+
+	if n := len(f.bird.calls); n != 3 {
+		t.Errorf("BirdNET ran %d times, want 3 (two files, then the later card's one)", n)
+	}
+	if u, _ := f.store.GetUpload(t.Context(), sending); u.Status != db.StatusInProgress || u.Analysis != nil {
+		t.Errorf("a card still being sent was analyzed: %+v", u)
+	}
+}
+
+func TestBirdNETFailingIsRetriedThenTheFileFails(t *testing.T) {
+	f := newFixture(t)
+	runs := 0
+	f.bird.answer = func(audio string) (birdnet.File, error) {
+		runs++
+		return birdnet.File{}, errors.New("birdnet: analyze.py: signal: killed\nMemoryError")
+	}
+	f.card(db.StatusProcessing, quietFile)
+
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		if err := f.queue.drain(t.Context()); !errors.Is(err, errRetry) {
+			t.Fatalf("attempt %d: err = %v, want a pause to retry", attempt, err)
+		}
+		if file := f.file(quietFile); file.Status != db.AudioUploaded {
+			t.Fatalf("attempt %d: file = %s, want it queued again", attempt, file.Status)
+		}
+	}
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatalf("last attempt: %v", err)
+	}
+	file := f.file(quietFile)
+	if runs != maxAttempts || file.Status != db.AudioFailed || !strings.Contains(file.StatusDetail, "signal: killed") ||
+		strings.Contains(file.StatusDetail, "MemoryError") {
+		t.Errorf("after %d runs, file = %s (%q); want failed with the first line of the error", runs, file.Status, file.StatusDetail)
+	}
+	if u := f.upload(); u.Status != db.StatusNeedsAttention || u.FilesFailed != 1 {
+		t.Errorf("card = %s, %d failed", u.Status, u.FilesFailed)
+	}
+}
+
+func TestAudioMissingFromStorageFails(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, "DATA/missing.wav")
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if file := f.file("DATA/missing.wav"); file.Status != db.AudioFailed || file.StatusDetail != "the audio isn't in storage" {
+		t.Errorf("file = %s (%q)", file.Status, file.StatusDetail)
+	}
+	if len(f.bird.calls) != 0 {
+		t.Errorf("BirdNET ran without the audio")
+	}
+}
+
+func TestACardWithNoFilesOnRecordIsLeftAlone(t *testing.T) {
+	f := newFixture(t)
+	f.card(db.StatusProcessing)
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if u := f.upload(); u.Status != db.StatusProcessing || u.ProcessedAt != nil {
+		t.Errorf("card = %s; want it still processing", u.Status)
+	}
+}
+
+func TestRecordedAt(t *testing.T) {
+	cases := map[string]string{
+		"DATA/Marymoor_20260723_160624(-0700).wav": "2026-07-23T23:06:24Z",
+		"DATA/20260725/20260725_040000.WAV":        "2026-07-25T11:00:00Z", // Pacific daylight time
+		"SMM01234_20260115_220000.wav":             "2026-01-16T06:00:00Z", // Pacific standard time
+		"20260115_220000_+0100.wav":                "2026-01-16T06:00:00Z", // an offset only counts in parentheses
+		"a_20260231_010000.wav":                    "",
+		"recording.wav":                            "",
+		"x120260115_220000.wav":                    "",
+	}
+	for p, want := range cases {
+		got, ok := RecordedAt(p)
+		switch {
+		case want == "" && ok:
+			t.Errorf("RecordedAt(%q) = %v, want none", p, got)
+		case want != "" && (!ok || got.Format(time.RFC3339) != want):
+			t.Errorf("RecordedAt(%q) = %v, %v; want %s", p, got, ok, want)
+		}
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the queue")
+		}
+	}
+}

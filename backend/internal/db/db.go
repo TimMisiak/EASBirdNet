@@ -84,7 +84,10 @@ type UploadFilter struct {
 // DetectionFilter narrows ListDetections. Zero fields match everything; leaving
 // UploadID empty searches every card.
 type DetectionFilter struct {
-	UploadID     string
+	UploadID string
+	// AudioFileID keeps one file's detections. Set UploadID with it, so the
+	// query stays in the card's partition.
+	AudioFileID  string
 	ReviewStatus string
 	// Since keeps detections heard at or after this instant.
 	Since time.Time
@@ -144,6 +147,7 @@ func (f UploadFilter) match(u Upload) bool {
 
 func (f DetectionFilter) match(d Detection) bool {
 	return (f.UploadID == "" || d.UploadID == f.UploadID) &&
+		(f.AudioFileID == "" || d.AudioFileID == f.AudioFileID) &&
 		(f.ReviewStatus == "" || d.ReviewStatus == f.ReviewStatus) &&
 		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since))
 }

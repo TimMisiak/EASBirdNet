@@ -25,7 +25,13 @@ const ROUTES = [
   { path: "/admin/people", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
   { path: "/admin/recorders", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
   { path: "/admin/uploads", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  // One card: /admin/uploads/OWL-20260914-SR03.
+  { path: "/admin/uploads/", prefix: true, tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
 ];
+
+/** The route for a path: an exact match, or a prefix route with something after the prefix. */
+const routeFor = (here) =>
+  ROUTES.find((r) => (r.prefix ? here.startsWith(r.path) && here.length > r.path.length : r.path === here));
 
 class BirdsenseApp extends BaseElement {
   #route = null;
@@ -45,7 +51,7 @@ class BirdsenseApp extends BaseElement {
       return;
     }
 
-    const route = ROUTES.find((r) => r.path === path());
+    const route = routeFor(path());
 
     if (route?.redirect) return navigate(route.redirect, { replace: true });
     if (route?.auth && !session.isSignedIn()) return navigate("/signin", { replace: true });

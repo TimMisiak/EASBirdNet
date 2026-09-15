@@ -135,14 +135,17 @@ recorder `SW-02`, pulled 7 September 2026.
 | `nights`         | array    | Per-night manifest the browser read off the card; see below. |
 | `fileCount`      | integer  | Sum of `nights[].files`. |
 | `totalBytes`     | integer  | Sum of `nights[].bytes`. |
-| `filesUploaded`  | integer  | The card's audio files in `uploaded` or `analyzed` status, counted by the server as each file lands. Capped at `fileCount`. |
+| `filesUploaded`  | integer  | The card's audio files in `uploaded`, `analyzing` or `analyzed` status, counted by the server as each file lands. Capped at `fileCount`. |
 | `bytesUploaded`  | integer  | Their total size. Capped at `totalBytes`. |
+| `filesAnalyzed`  | integer  | The card's listed audio files in `analyzed` status, recounted by the analysis queue after each file. |
+| `filesFailed`    | integer  | The card's listed audio files in `failed` status, recounted the same way. |
+| `detectionCount` | integer  | Sum of `detectionCount` over the analyzed files. |
 | `status`         | string   | See [Upload status](#upload-status). |
 | `statusDetail?`  | string   | Short human reason shown instead of the status label, e.g. `2 unreadable`. |
 | `analysis?`      | object   | How BirdNET was run over the card; see below. |
 | `startedAt`      | instant  | When the transfer (re)started. |
 | `receivedAt?`    | instant  | When the last file landed. |
-| `processedAt?`   | instant  | When BirdNET finished. |
+| `processedAt?`   | instant  | When BirdNET finished the card's last file. |
 | `resultsSentAt?` | instant  | When the results email went out. |
 | `createdAt`      | instant  | When the card was first registered. |
 | `updatedAt`      | instant  | |
@@ -160,12 +163,16 @@ recorder `SW-02`, pulled 7 September 2026.
 
 | Field           | Type    | Notes |
 |-----------------|---------|-------|
-| `model`         | string  | BirdNET model, e.g. `BirdNET_GLOBAL_6K_V2.4`. |
+| `model`         | string  | BirdNET model, e.g. `BirdNET_GLOBAL_6K_V2.4`. Empty until the first file is done, since the analyzer reports it. |
 | `minConfidence` | number  | Detections below this weren't stored. |
 | `sensitivity`   | number  | |
 | `overlapSec`    | number  | |
-| `startedAt`     | instant | |
-| `finishedAt?`   | instant | |
+| `startedAt`     | instant | When the queue started on the card's first file. |
+| `finishedAt?`   | instant | Same as `processedAt`. |
+
+Every file is analyzed with the recorder's position (the `recorder` copy) and
+the BirdNET week of its night, so BirdNET's geo model narrows the species to
+those expected there and then.
 
 ```json
 {
@@ -194,7 +201,8 @@ recorder `SW-02`, pulled 7 September 2026.
 ### Upload status
 
 ```
-in_progress ⇄ interrupted ──(last file lands)──▶ processing ──▶ results_sent
+in_progress ⇄ interrupted ──(last file lands)──▶ processing ──(last file analyzed)──▶ in_review ──▶ results_sent
+                                                     └──(some files failed)──▶ needs_attention
         any state ──(coordinator flags it)──▶ needs_attention ──(resolved)──▶ back
 ```
 
@@ -203,7 +211,8 @@ in_progress ⇄ interrupted ──(last file lands)──▶ processing ──�
 | `in_progress`     | Files are being sent. | Registration, or the client resuming. |
 | `interrupted`     | The transfer stopped part way; resumable. | The client. |
 | `processing`      | Every file received; BirdNET queued or running. | The server, never the client. |
-| `needs_attention` | A coordinator has to look (short card, unreadable files). | Server checks or a coordinator. |
+| `in_review`       | BirdNET has analyzed every file; detections wait for review. | The analysis queue. |
+| `needs_attention` | A coordinator has to look (short card, unreadable files). The analysis queue sets it, with `statusDetail` like `2 files not analyzed`, when it finishes a card some of whose files failed. | Server checks or a coordinator. |
 | `results_sent`    | Detections reviewed and results emailed. | The server. |
 
 ## `audioFiles`
@@ -220,15 +229,15 @@ interruption produces the same ids instead of duplicates.
 | `path`           | string  | Path on the card relative to its root, forward slashes, e.g. `DATA/20260824/20260825_040000.WAV`. |
 | `sizeBytes`      | integer | |
 | `night`          | date    | The evening the recording's night began. |
-| `recordedAt?`    | instant | Recording start, when known (filename or file header). |
-| `durationSec?`   | number  | Filled in by processing. |
+| `recordedAt?`    | instant | Recording start, when known. The analysis queue fills it in from the file name (`20260723_160624`, local time, with an optional `(-0700)` offset; Pacific without one). |
+| `durationSec?`   | number  | Filled in by processing. Not yet: the analyzer doesn't report it. |
 | `sampleRate?`    | integer | Hz, filled in by processing. |
 | `sha256?`        | string  | Hex checksum, to tell a corrupt transfer from a corrupt card. |
 | `blobName?`      | string  | Where the audio is stored, set when its last byte lands; see [Blob naming](#blob-naming). |
-| `status`         | string  | `pending` → `uploaded` → `analyzed`, or `failed`. |
+| `status`         | string  | `pending` → `uploaded` → `analyzing` → `analyzed`, or `failed`. |
 | `statusDetail?`  | string  | Why it failed, e.g. `checksum mismatch`. |
 | `uploadedAt?`    | instant | |
-| `analyzedAt?`    | instant | |
+| `analyzedAt?`    | instant | When BirdNET finished with it, or gave up on it. |
 | `detectionCount` | integer | Detections stored for this file (above threshold). |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
@@ -257,9 +266,10 @@ interruption produces the same ids instead of duplicates.
 | Status     | Meaning |
 |------------|---------|
 | `pending`  | Registered from the card manifest; not in storage yet. |
-| `uploaded` | In file storage; not analyzed yet. |
+| `uploaded` | In file storage; not analyzed yet. On a `processing` card, this is the analysis queue: the file is waiting for BirdNET. |
+| `analyzing`| BirdNET is running over it. Found at startup, it was cut off by a restart, and is run again. |
 | `analyzed` | BirdNET has run over it (it may still have zero detections). |
-| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
+| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when the analyzer itself crashed on the file three times, that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
 
 ## `detections`
 
@@ -274,7 +284,7 @@ same BirdNET output overwrites rather than duplicates.
 | `uploadId`       | string  | → `uploads.id`. **Partition key.** |
 | `audioFileId`    | string  | → `audioFiles.id` |
 | `recorderId`     | string  | → `recorders.id` |
-| `detectedAt`     | instant | Recording start + `startSec`. |
+| `detectedAt`     | instant | Recording start (`audioFiles.recordedAt`) + `startSec`. For a file whose name has no time, midnight Pacific at the start of its `night`. |
 | `night`          | date    | The evening the night began. |
 | `startSec`       | number  | Window start, seconds into the file. |
 | `endSec`         | number  | Window end. |
@@ -346,9 +356,11 @@ Every read the API needs, and what it costs in Cosmos:
 | One card | `GetUpload` | `uploads` | point read |
 | A volunteer's cards | `ListUploads{UserID}` | `uploads` | cross-partition |
 | Coordinator's card table | `ListUploads{Status?}` | `uploads` | cross-partition |
-| Files on a card (registering, counting, processing) | `ListAudioFiles` | `audioFiles` | single partition |
+| Files on a card (registering, counting, the admin card page, analysis) | `ListAudioFiles` | `audioFiles` | single partition |
+| Analysis queue: cards with files waiting | `ListUploads{Status: processing}` | `uploads` | cross-partition |
 | A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
+| What was heard in one file (admin card page) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
@@ -443,11 +455,24 @@ What the write routes do to documents:
 | `POST /uploads` | Creates the upload, and a `pending` audio file for each file listed. The list has to add up to `nights`. If that id exists and is the caller's, it is a resume: `notes` are replaced and the `recorder`/`userName` copies are kept. If the card is already received, the same list (paths and sizes) answers the card as it is, and a different list is a 409: it is another card with that recorder and pull date. If the card was still transferring, `nights` and the totals are replaced too, `status` goes back to `in_progress`, and the audio files are matched to the new list: a listed file already `uploaded` at the same size stays, other listed files are `pending`, and a file no longer listed becomes `failed`. The uploaded counts are then recounted. Someone else's card is a 409. Answers the card and its listed files. |
 | `POST /uploads/{ref}/progress` | Sets `status` to the client's `in_progress` or `interrupted`, only while the card is one of those. The client can't report counts. |
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
-| `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`. |
+| `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
+| `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list. |
+| `GET /admin/uploads/{ref}/files/{id}/detections` | Answers that file's detections, in the order heard. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
 | `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. |
+
+What the analysis queue (`internal/analysis`) does, one file at a time, oldest
+`receivedAt` first:
+
+| Step | Effect |
+|------|--------|
+| First file on a card | Sets `analysis` (settings, `startedAt`). |
+| Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
+| BirdNET answers | Upserts a `detections` document per result, `unreviewed`; sets the file `analyzed` with `analyzedAt`, `detectionCount` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
+| BirdNET fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
+| After each file | Recounts `filesAnalyzed`, `filesFailed` and `detectionCount`. When nothing on the card is waiting, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |
 
 ## Local JSON file
 

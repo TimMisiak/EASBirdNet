@@ -40,7 +40,7 @@ func TestRoutesCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	mux := newMux(config{StaticDir: dir}, store, testFiles(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := newMux(config{StaticDir: dir}, store, testFiles(t), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	cases := []struct {
 		path string
@@ -202,7 +202,7 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
 			t.Fatalf("prepare: %v", err)
 		}
-		mux := newMux(cfg, store, testFiles(t), log)
+		mux := newMux(cfg, store, testFiles(t), nil, log)
 		for _, path := range []string{"/api/v1/health", "/api/v1/session", "/api/v1/public/overview"} {
 			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
 		}
@@ -247,7 +247,7 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 			t.Fatalf("prepare: %v", err)
 		}
 	}
-	mux := newMux(cfg, store, testFiles(t), log)
+	mux := newMux(cfg, store, testFiles(t), nil, log)
 	get := func(path string, cookie *http.Cookie) string {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)

@@ -14,6 +14,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server)
 │   └── internal/
+│       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
 │       ├── api/        JSON handlers under /api/v1/
 │       ├── birdnet/    Runs analyzer/analyze.py, returns detections
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
@@ -112,6 +113,8 @@ GET    /api/v1/uploads/{reference}
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 GET    /api/v1/admin/uploads              every card, admin only
+GET    /api/v1/admin/uploads/{reference}  one card, with every file and its status
+GET    /api/v1/admin/uploads/{reference}/files/{id}/detections   what was heard in a file
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
@@ -131,10 +134,11 @@ to `processing` only once every file on its list is in. The roster always keeps 
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **Routes are paths, not hashes.** `/`, `/signin`, `/app`, `/app/upload/check`,
-`/admin/people`. `internal/web` already falls back to index.html for
+`/admin/people`, `/admin/uploads/{reference}`. `internal/web` already falls back to index.html for
 extension-less paths, so a reload mid-wizard lands on the same screen, and a
 coordinator can send a colleague a link to one admin tab. `js/router.js` is the
-whole router; `<bs-app>` holds the route table and the two guards (signed in,
+whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
+routes for a path with an id on the end) and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
 
@@ -208,12 +212,32 @@ LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 - Each inference worker is its own process with its own model copy (~285 MB
   peak for the whole tree with one worker). Cancelling the context kills the
   process group, so workers don't outlive a cancelled run.
+**The analysis queue is the database.** `internal/analysis` runs in the server
+process. A card in `processing` with files in `uploaded` status is queued work;
+there is no separate queue to keep in step with the documents, and nothing in
+memory to lose. `Queue.Run` takes one file at a time, oldest card first: it
+copies the file out of `internal/storage` to a temp file (keeping its
+extension, which birdnet picks a decoder by), runs BirdNET with the recorder's
+position and week, upserts the detections, marks the file `analyzed`, and
+recounts the card. The API only calls `Enqueue` to wake it when a card's last
+file lands. At startup it resumes whatever was left, including a file cut off
+mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
+A file BirdNET can't read fails at once; a crashed run is retried twice, 30 s
+apart and growing, and then fails, so one file can't wedge the queue. The last
+file moves the card to `in_review`, or `needs_attention` if any failed. If the
+server's Python can't `import birdnet` at startup it logs a warning and doesn't
+start the queue, so cards wait in `processing` rather than failing.
+One file per run, not a night per run: measured on the Osprey clip, a warm run
+spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
+10 minutes of audio. On hour-long card files that overhead is ~3%, and in
+exchange each file's detections are stored as soon as it's done and only one
+file sits in temp storage at a time.
 Perch v2 is available in the same package but is TensorFlow-only (another
 ~600 MB). Add it as a second model in `analyze.py` if BirdNET's accuracy isn't
 enough, not before.
 *Revisit when:* analysis moves to its own Container Apps job (see
 DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
-the job's image.
+the job's image, and `Queue.Run` is what the job runs.
 
 **Design tokens in CSS custom properties.** Custom properties pierce shadow DOM
 boundaries, so `styles/app.css` defines `--bs-*` tokens and every component
@@ -267,8 +291,12 @@ roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
 the seed, so setting it starts you from a clean roster. Outside dev mode it
 refuses anyone from the placeholder roster, so dev people never reach Cosmos.
 
-BirdNET, for `internal/birdnet` and `cmd/analyze` (needs Python 3.12; models
-download to `$BIRDNET_APP_DATA`, default `~/.local/share/birdnet`, on first use):
+BirdNET, for the server's analysis queue, `internal/birdnet` and `cmd/analyze`
+(needs Python 3.12; models download to `$BIRDNET_APP_DATA`, default
+`~/.local/share/birdnet`, on first use). The server looks for
+`../.venv/bin/python` and `../analyzer/analyze.py` from `backend/`
+(`BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`); without them it says
+so at startup and received cards wait in `processing`:
 
 ```sh
 python3.12 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt
@@ -319,7 +347,9 @@ The Cosmos DB backend compiles but has not been run against Azure or the
 emulator; the JSON-file backend and its tests define the behaviour it must
 match. The Blob Storage backend has run against Azurite with a shared key, not
 against Azure with a managed identity (DEPLOYMENT.md lists what to check).
-Uploaded audio is stored, and a card whose files are all in moves to
-`processing`, but nothing picks it up: `internal/birdnet` can analyze files on
-disk, and nothing in the server calls it -- no job queue, and no detections
-written to the Store. Nothing cleans up abandoned partial uploads.
+Uploaded audio is stored, a card whose files are all in moves to `processing`,
+and the analysis queue runs BirdNET over it in the server process, writing
+`unreviewed` detections. The coordinator's card page (`/admin/uploads/{ref}`)
+shows each file's status and what was heard in it. There is no review screen
+yet, so nothing moves a card from `in_review` to `results_sent`, and no email.
+Nothing cleans up abandoned partial uploads.

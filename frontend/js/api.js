@@ -70,6 +70,11 @@ export const reportProgress = (reference, body) =>
   request("POST", `/uploads/${encodeURIComponent(reference)}/progress`, body);
 
 export const fetchAllUploads = () => get("/admin/uploads");
+/** One card and every file on it, with where each is in upload and analysis. */
+export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComponent(reference)}`);
+/** What BirdNET heard in one file of a card, in the order it was heard. */
+export const fetchFileDetections = (reference, fileId) =>
+  get(`/admin/uploads/${encodeURIComponent(reference)}/files/${encodeURIComponent(fileId)}/detections`);
 export const fetchPeople = () => get("/admin/people");
 export const addPerson = (body) => request("POST", "/admin/people", body);
 /** Replace someone's name, email and role. */
