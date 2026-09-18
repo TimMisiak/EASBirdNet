@@ -1,0 +1,11 @@
+# Copy to backend.hcl and fill in, then `terraform init -backend-config=backend.hcl`.
+# The state account is created once by hand (see README.md) and is deliberately
+# not managed by this configuration -- Terraform should not own its own state.
+
+resource_group_name  = "rg-birdsense-tfstate"
+storage_account_name = "stbirdsensetfstate"  # whatever name was free
+container_name       = "tfstate"
+key                  = "prod.tfstate"
+
+# Sign in as yourself (az login), not with an account key.
+use_azuread_auth = true

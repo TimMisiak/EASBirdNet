@@ -1,0 +1,23 @@
+# Copy to prod.tfvars and fill in. Not in git: it holds one person's address.
+
+# The first admin, added only if the roster is empty, as `Name <email>` or an
+# email. This is the address they sign in with. See DEPLOYMENT.md, First
+# deploy -- a typo has to be fixed in the Cosmos Data Explorer afterwards,
+# because by then the roster is no longer empty.
+bootstrap_admin = "Your Name <you@eastsideaudubon.org>"
+
+# The subscription to deploy into. Leave it out to use ARM_SUBSCRIPTION_ID
+# from the environment instead.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Defaults, listed so they are easy to find. Uncomment to change.
+# env         = "prod"
+# location    = "westus2"
+
+# If the storage account, registry or Cosmos account name is taken globally,
+# put a short suffix here and update DEPLOYMENT.md's naming table.
+# name_suffix = ""
+
+# Sized for the analysis queue. Container Apps only allows particular pairs.
+# cpu    = 1.0
+# memory = "2Gi"

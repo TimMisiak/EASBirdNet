@@ -12,3 +12,13 @@
 
 # Python environment for analyzer/ (see CLAUDE.md, "Running it")
 /.venv/
+
+# Terraform (infra/). The provider lock file *is* committed; these are local:
+# .terraform/ is downloaded, backend.hcl names the state account, and the
+# tfvars hold one coordinator's email (see infra/prod.tfvars.example).
+/infra/.terraform/
+/infra/backend.hcl
+/infra/*.tfvars
+*.tfstate
+*.tfstate.*
+crash.log

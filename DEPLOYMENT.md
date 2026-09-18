@@ -1,12 +1,19 @@
 # Birdsense — Azure deployment
 
 This is the list of Azure resources Birdsense needs, with the settings that
-matter. It is written to be turned into Terraform (`azurerm` provider) without
-guessing: every resource names its Terraform type, and every setting that
-differs from the default is spelled out. The data those resources hold is
+matter. Every resource names its Terraform type, and every setting that differs
+from the default is spelled out and explained. The data those resources hold is
 described in [SCHEMA.md](SCHEMA.md).
 
-Status: nothing here is provisioned yet. The app code supports both data
+`infra/` is this file as Terraform (`azurerm` provider), one file per group of
+resources: `main.tf` (resource group, identity), `cosmos.tf`, `storage.tf`,
+`registry.tf`, `app.tf` (logs, environment, container app), plus `variables.tf`
+and `outputs.tf`. The short version of running it is in
+[README.md](README.md#deploying); this file is the why. When the two disagree,
+the Terraform is what runs -- fix this file.
+
+Status: nothing here is provisioned yet; the Terraform has never been applied
+against a real subscription. The app code supports both data
 stores, Cosmos DB for documents and Blob Storage for card audio, but neither
 has run against Azure. [Blob storage for uploads](#blob-storage-for-uploads)
 lists what the storage side needs and what to check first.
@@ -70,7 +77,7 @@ can't pull its image. Its `client_id` goes into the app's `AZURE_CLIENT_ID`.
 | capabilities | `EnableServerless` | Pay per request. The load is a few cards a week, not a steady rate. |
 | consistency_policy | `Session` | The default. A writer reads its own writes. |
 | geo_location | one: `westus2`, failover_priority 0, zone_redundant `false` | Serverless is single-region. |
-| local_authentication_disabled | `true` | Entra ID only. No account keys to leak. |
+| local_authentication_enabled | `false` | Entra ID only. No account keys to leak. (`local_authentication_disabled = true` says the same thing and is deprecated from provider v5.) |
 | public_network_access_enabled | `true` | The consumption Container Apps environment has no VNet. Revisit with private endpoints if that changes. |
 | minimal_tls_version | `Tls12` | |
 | backup | `type = Continuous`, `tier = Continuous7Days` | Point-in-time restore of the last 7 days at no extra cost. |
@@ -238,6 +245,16 @@ invisible to it:
 2. Role assignments take a minute or two to propagate. A first `apply` can
    still race them. If the first revision fails, re-apply or restart the
    revision; it is not a config error.
+3. Creating the `audio` blob container is a **data-plane** call, and shared
+   keys are off, so the principal running Terraform needs Storage Blob Data
+   Contributor on the storage account -- Owner on the subscription grants no
+   data actions. `infra/storage.tf` assigns it (`grant_operator_blob_access`,
+   default true) and the provider is configured with `storage_use_azuread`.
+   This is the same role to give yourself for the local storage check below.
+4. The **registry must exist before the container app's first apply**, because
+   a revision can't be created pointing at an image that isn't there. Hence the
+   one-time `apply -target=azurerm_container_registry.this` in README.md. It is
+   only ever needed once, for an empty subscription.
 
 ## First deploy
 
@@ -264,19 +281,36 @@ the seed that writes them only runs in dev mode, against the JSON file.
 
 ## Deploying a new version
 
-Until CI exists:
-
-```sh
-# from the repo root
-az acr build --registry crbirdsenseprod --image birdsense:$(git rev-parse --short HEAD) .
-az containerapp update --name ca-birdsense-prod --resource-group rg-birdsense-prod \
-  --image crbirdsenseprod.azurecr.io/birdsense:$(git rev-parse --short HEAD)
+```powershell
+./scripts/deploy.ps1
 ```
 
-Pick one owner for the image tag. If Terraform sets the image, an `az`
-update is drift the next `apply` reverts. The usual split is
-`lifecycle { ignore_changes = [template[0].container[0].image] }` in
-Terraform, with deploys done by `az`/CI.
+**Terraform owns the image tag.** The script builds the image and then applies
+`-var image_tag=<sha>`, so one thing decides what is running, a rollback is
+applying an older tag, and `terraform plan` is never wrong about the app. The
+alternative -- `lifecycle { ignore_changes = [template[0].container[0].image] }`
+with deploys done by `az containerapp update` -- is the right split only once
+deploys run from CI with an identity that has no Terraform state access. Until
+then, nothing should `az containerapp update` this app: that is drift the next
+`apply` reverts.
+
+The script builds with `az acr build` rather than a local `docker build`. That
+needs no local Docker, downloads the BirdNET models over Azure's network rather
+than yours, and produces a `linux/amd64` image whatever the machine running it
+is -- an arm64 image (an Apple Silicon `docker build`) starts and dies in
+Container Apps with an exec format error.
+
+Two rules the script enforces, both about the tag being the commit sha:
+
+- It refuses a dirty working tree, so what's deployed is something that can be
+  checked out. `-AllowDirty` appends a timestamp instead.
+- A tag is never reused. Container Apps keys revisions off the image *string*,
+  so re-pushing a tag the app already runs creates no new revision at all: the
+  deploy would look like it worked and change nothing.
+
+Terraform's own state lives in a storage account created by hand, outside this
+configuration (see [README.md](README.md#one-time-setup)). Terraform owning the
+state it depends on is a knot nobody wants to untie at 11pm.
 
 ## Blob storage for uploads
 
@@ -408,22 +442,33 @@ can't be changed in place.
 - **Email**: the upload flow promises "card received" and "results" emails,
   which needs Azure Communication Services or an external provider.
 
-## Terraform checklist
+## Where each resource is
 
-| # | Resource | Terraform type |
-|---|----------|----------------|
-| 1 | Resource group | `azurerm_resource_group` |
-| 2 | Managed identity | `azurerm_user_assigned_identity` |
-| 3 | Cosmos account (serverless, key auth off, continuous 7-day backup) | `azurerm_cosmosdb_account` |
-| 4 | Cosmos database `birdsense` | `azurerm_cosmosdb_sql_database` |
-| 5 | Containers `users`, `recorders`, `uploads` (`/id`), `audioFiles`, `detections` (`/uploadId`) | `azurerm_cosmosdb_sql_container` |
-| 6 | Cosmos Built-in Data Contributor → identity, database scope | `azurerm_cosmosdb_sql_role_assignment` |
-| 7 | Storage account (shared keys off) + `audio` container + lifecycle policy | `azurerm_storage_account`, `azurerm_storage_container`, `azurerm_storage_management_policy` |
-| 8 | Storage Blob Data Contributor → identity | `azurerm_role_assignment` |
-| 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` |
-| 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` |
-| 11 | Container Apps environment | `azurerm_container_app_environment` |
-| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` from a required variable and the blob endpoint, probes, 0–1 replicas, `depends_on` the role assignments) | `azurerm_container_app` |
+Everything above is in `infra/`, applied as one stack. This table is the map
+from this file to that one.
 
-**Outputs**: container app FQDN, Cosmos endpoint, ACR login server, identity
-client id.
+| # | Resource | Terraform type | File |
+|---|----------|----------------|------|
+| 1 | Resource group | `azurerm_resource_group` | `main.tf` |
+| 2 | Managed identity | `azurerm_user_assigned_identity` | `main.tf` |
+| 3 | Cosmos account (serverless, key auth off, continuous 7-day backup) | `azurerm_cosmosdb_account` | `cosmos.tf` |
+| 4 | Cosmos database `birdsense` | `azurerm_cosmosdb_sql_database` | `cosmos.tf` |
+| 5 | Containers `users`, `recorders`, `uploads` (`/id`), `audioFiles`, `detections` (`/uploadId`) | `azurerm_cosmosdb_sql_container` (`for_each`) | `cosmos.tf` |
+| 6 | Cosmos Built-in Data Contributor → identity, database scope | `azurerm_cosmosdb_sql_role_assignment` | `cosmos.tf` |
+| 7 | Storage account (shared keys off) + `audio` container + lifecycle policy | `azurerm_storage_account`, `azurerm_storage_container`, `azurerm_storage_management_policy` | `storage.tf` |
+| 8 | Storage Blob Data Contributor → identity, and → whoever runs Terraform | `azurerm_role_assignment` ×2 | `storage.tf` |
+| 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` | `registry.tf` |
+| 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` | `app.tf` |
+| 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
+| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN`, probes, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
+
+**Variables** (`variables.tf`): `image_tag` and `bootstrap_admin` are required
+and have no default; `env`, `location`, `name_suffix`, `cpu`, `memory`,
+`log_retention_days` and `grant_operator_blob_access` have the defaults this
+file describes. A `staging` copy is a second tfvars file with `env = "staging"`.
+
+**Outputs** (`outputs.tf`): `app_url` and `app_fqdn`, `acr_name` (which
+`scripts/deploy.ps1` reads) and `acr_login_server`, `cosmos_endpoint`,
+`blob_endpoint`, `identity_client_id`, `resource_group`, and `image_tag` --
+what is deployed right now, so a settings change can be applied without a
+rebuild.

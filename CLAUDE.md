@@ -38,8 +38,11 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
+├── infra/              Terraform (azurerm) for the Azure resources
+├── scripts/deploy.ps1  Build the image in ACR, apply the new tag (pwsh:
+│                    deploying runs from Windows and Linux; dev is Linux)
 ├── SCHEMA.md           Stored documents: containers, fields, queries
-├── DEPLOYMENT.md       Azure resources and settings (Terraform source)
+├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
 └── docker-compose.yml
 ```
@@ -176,6 +179,16 @@ reach the same process -- one replica (see DEPLOYMENT.md). And tusd's
 writes its own warnings to stdout.
 *Revisit when:* the app needs more than one replica, or the container's share
 of a card upload (CPU, bandwidth) costs more than direct-to-blob uploads would.
+
+**Terraform owns what is deployed.** `infra/` is the whole Azure stack and
+`scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
+`terraform apply -var image_tag=<sha>`. One owner for the running image means a
+rollback is applying an older tag and `terraform plan` is never wrong about the
+app, at the cost of needing Terraform credentials to deploy. So nothing runs
+`az containerapp update` -- that is drift the next apply reverts.
+*Revisit when:* deploys move to CI, which should get an identity that can push
+images and update the app but not touch state; that is the point of
+`ignore_changes` on the image (DEPLOYMENT.md, *Deploying a new version*).
 
 **Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
 `CSSStyleSheet` objects for the primitives that appear on nearly every screen
