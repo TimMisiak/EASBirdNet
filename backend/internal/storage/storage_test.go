@@ -2,12 +2,14 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/tus/tusd/v2/pkg/azurestore"
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 )
 
@@ -180,4 +182,55 @@ func TestAzure(t *testing.T) {
 		t.Fatal(err)
 	}
 	testStore(t, s)
+}
+
+// fakeBlob records what actually reached Azure.
+type fakeBlob struct {
+	azurestore.AzBlob
+	uploads [][]byte
+}
+
+func (b *fakeBlob) Upload(_ context.Context, body io.ReadSeeker) error {
+	data, err := io.ReadAll(body)
+	b.uploads = append(b.uploads, data)
+	return err
+}
+
+type fakeService struct{ blob *fakeBlob }
+
+func (s fakeService) NewBlob(context.Context, string) (azurestore.AzBlob, error) {
+	return s.blob, nil
+}
+
+// TestSkipEmpty covers what Azurite can't: Azure's Put Block refuses a
+// zero-length body, so the empty sentinel block tusd stages when an upload is
+// created has to be dropped before it becomes a request. Azurite accepts it,
+// so TestAzure passes either way.
+func TestSkipEmpty(t *testing.T) {
+	blob := &fakeBlob{}
+	s, err := skipEmpty{fakeService{blob}}.NewBlob(t.Context(), "uploads/OWL-20260907-SR02/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"", "a chunk", ""} {
+		if err := s.Upload(t.Context(), strings.NewReader(body)); err != nil {
+			t.Fatalf("upload %q: %v", body, err)
+		}
+	}
+	if len(blob.uploads) != 1 || string(blob.uploads[0]) != "a chunk" {
+		t.Errorf("Azure saw %q, want only the one non-empty chunk", blob.uploads)
+	}
+
+	// A body that has already been read from sends only what is left, and is
+	// left where it was found.
+	r := strings.NewReader("skip me: keep this")
+	if _, err := r.Seek(9, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upload(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(blob.uploads[len(blob.uploads)-1]); got != "keep this" {
+		t.Errorf("Azure saw %q, want %q", got, "keep this")
+	}
 }

@@ -249,10 +249,11 @@ func OpenAzure(cfg Config) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: connecting to blob container %s: %w", cfg.AzureContainer, err)
 	}
-	tus := azurestore.New(service)
+	wrapped := skipEmpty{service}
+	tus := azurestore.New(wrapped)
 	tus.ObjectPrefix = prefix
 	tus.Container = cfg.AzureContainer
-	return &azure{service: service, container: client, tus: tus, locker: memorylocker.New()}, nil
+	return &azure{service: wrapped, container: client, tus: tus, locker: memorylocker.New()}, nil
 }
 
 // containerClient signs in the same way tusd's AzService does.
@@ -270,6 +271,58 @@ func containerClient(cfg Config) (*container.Client, error) {
 		return nil, err
 	}
 	return container.NewClient(url, cred, nil)
+}
+
+// skipEmpty drops zero-length block uploads on the way to Azure.
+//
+// Creating an upload, tusd stages an empty sentinel block so that "no
+// uncommitted blocks" reliably means finished, which it needs only when blob
+// versioning is on and a blob can be overwritten. Azure's Put Block rejects a
+// zero-length body -- 400 InvalidHeaderValue naming Content-Length -- so with
+// tusd v2.9.2 every upload failed the moment it was created. Azurite accepts
+// the empty block, which is why TestAzure never saw it.
+//
+// Dropping it is safe here: versioning is off on the account (infra/storage.tf)
+// and an upload id is unique, so a new upload never lands on a name that
+// already has committed blocks. Without the sentinel a new upload's blob does
+// not exist yet, and tusd already reads that as offset 0.
+type skipEmpty struct{ azurestore.AzService }
+
+func (s skipEmpty) NewBlob(ctx context.Context, name string) (azurestore.AzBlob, error) {
+	b, err := s.AzService.NewBlob(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return skipEmptyBlob{b}, nil
+}
+
+type skipEmptyBlob struct{ azurestore.AzBlob }
+
+func (b skipEmptyBlob) Upload(ctx context.Context, body io.ReadSeeker) error {
+	n, err := remaining(body)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	return b.AzBlob.Upload(ctx, body)
+}
+
+// remaining is how many bytes are left in body, leaving it where it was.
+func remaining(body io.ReadSeeker) (int64, error) {
+	at, err := body.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	end, err := body.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := body.Seek(at, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return end - at, nil
 }
 
 func (s *azure) UseIn(composer *tushandler.StoreComposer) {
