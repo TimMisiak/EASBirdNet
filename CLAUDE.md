@@ -118,8 +118,8 @@ GET    POST /api/v1/uploads               your cards; register a card and its fi
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
-GET    /api/v1/detections                 every card's detections: filtered, sorted, a page at a time
-GET    /api/v1/detections/{reference}?file=        what was heard on a card, or in one of its files
+GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time
+GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
 PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
@@ -147,6 +147,21 @@ the server's own tally of the files it has received (`tallyFiles`), never
 reported by the client, so a retried chunk can't count twice, and a card moves
 to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
+
+**A list of detections is always bounded.** `GET /detections` answers for the
+last 30 days when the request names no `since`, and says which window in
+`window`, which the Detections tab prints above the list;
+`GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
+beside the page. Neither is a nicety. A season is millions of detection
+documents, and the Cosmos SDK can't page or sort a cross-partition query
+(SCHEMA.md), so every row that matches is decoded into the memory of the one
+replica that is also running BirdNET. The default window is what makes the
+common case -- what has been heard lately, waiting to be reviewed -- cost a
+date range instead of a full scan; a page's station names are point reads of
+the cards on that page, for the same reason.
+*Revisit when:* someone needs a whole season on one screen, or the species
+tally above the list has to count what the window leaves out. Then the answer
+is a precomputed summary document, not a wider query.
 
 **Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
 has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
@@ -523,7 +538,8 @@ be removed or was, and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
-minimum confidence and the days heard, and opens the same detection page.
+minimum confidence and the days heard, and opens the same detection page. It
+shows the last 30 days until the dates say otherwise, and says so.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
 My uploads, their own cards, where an unfinished one is resumed; and

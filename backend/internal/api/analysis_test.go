@@ -49,6 +49,7 @@ type cardFilesBody struct {
 
 type detectionsBody struct {
 	Detections []Detection `json:"detections"`
+	Total      int         `json:"total"`
 }
 
 func TestTheLastFileQueuesTheCardForAnalysis(t *testing.T) {

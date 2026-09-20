@@ -19,7 +19,8 @@ import "./bs-chip.js";
  *
  * The filters live in the query string (/app/detections?species=Strix+varia),
  * so a reload or a link to a colleague shows the same list. The server filters,
- * sorts and pages; this only asks.
+ * sorts and pages; this only asks. With no dates set it also bounds the answer
+ * to a window of recent days, which the list says above itself.
  *
  * The filter fields are rendered once and only the results are redrawn, so a
  * date half typed in keeps its focus while the list catches up.
@@ -84,8 +85,12 @@ class Detections extends BaseElement {
   static styles = [typography, controls, forms, tables];
 
   #view = viewFrom(query());
-  /** {status: loading|ready|error, detections, total, species, error}; a refresh keeps the last list showing. */
-  #state = { status: "loading", detections: [], total: 0, species: [], error: null };
+  /**
+   * {status: loading|ready|error, detections, total, species, window, error};
+   * a refresh keeps the last list showing. window is the date range the server
+   * bounded the answer to because this view named none, or null.
+   */
+  #state = { status: "loading", detections: [], total: 0, species: [], window: null, error: null };
   #busy = false;
   /** Only the latest request's answer is shown. */
   #asked = 0;
@@ -137,8 +142,8 @@ class Detections extends BaseElement {
     this.#update();
     let next;
     try {
-      const { detections, total, species } = await api.fetchDetections(params);
-      next = { status: "ready", detections, total, species, error: null };
+      const { detections, total, species, window: bounded } = await api.fetchDetections(params);
+      next = { status: "ready", detections, total, species, window: bounded ?? null, error: null };
     } catch (error) {
       next = { ...this.#state, status: this.#state.status === "loading" ? "error" : this.#state.status, error };
     }
@@ -222,6 +227,7 @@ class Detections extends BaseElement {
         .pager .row { display: flex; gap: var(--bs-space-2); }
         .pager .btn { padding: 0.5rem 0.875rem; font-size: 0.8125rem; }
         .quiet { font-size: 0.8125rem; color: var(--bs-text-muted); }
+        .window { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-4); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
       </style>
 
@@ -256,6 +262,7 @@ class Detections extends BaseElement {
         <button type="button" class="btn btn--quiet clear" data-action="clear">Clear filters</button>
       </div>
 
+      <p class="quiet window" hidden></p>
       <div class="results"></div>
     `;
     this.#update();
@@ -266,8 +273,13 @@ class Detections extends BaseElement {
     const results = this.$(".results");
     if (!results) return;
     const v = this.#view;
-    const { status, detections, total, species, error } = this.#state;
+    const { status, detections, total, species, window: bounded, error } = this.#state;
     const filtered = Boolean(v.status || v.species || v.min || v.from || v.to);
+    // What the server bounded the answer to, said once above the list rather
+    // than left for someone to notice an old detection missing.
+    const note = this.$(".window");
+    note.hidden = !(status === "ready" && bounded && total > 0);
+    if (bounded) note.textContent = `Showing the last ${bounded.days} days. Set “Heard from” to look further back.`;
 
     for (const pill of this.$$('[data-action="status"]')) {
       pill.setAttribute("aria-pressed", String(pill.dataset.status === v.status));
@@ -285,7 +297,9 @@ class Detections extends BaseElement {
     } else if (total === 0) {
       results.innerHTML = filtered
         ? `<p class="empty">No detections match those filters.</p>`
-        : `<p class="empty">BirdNET hasn't heard anything yet. Detections show up here as each card is analyzed.</p>`;
+        : bounded
+          ? `<p class="empty">BirdNET hasn't heard anything in the last ${bounded.days} days. Set “Heard from” to look further back.</p>`
+          : `<p class="empty">BirdNET hasn't heard anything yet. Detections show up here as each card is analyzed.</p>`;
     } else {
       results.innerHTML = `
         ${error ? `<p class="error" role="alert">Couldn't refresh the list: ${escapeHTML(error.message)}</p>` : ""}

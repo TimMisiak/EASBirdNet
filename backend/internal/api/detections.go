@@ -2,8 +2,10 @@ package api
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,11 +21,19 @@ const (
 	sortConfidence = "confidence"
 )
 
-// Page sizes for the list of every detection.
+// Page sizes for a list of detections.
 const (
 	defaultDetectionsLimit = 50
 	maxDetectionsLimit     = 500
 )
+
+// defaultDetectionsDays bounds the list of every detection when the request
+// names no date range of its own. Without it the query is a cross-partition
+// read of every detection ever stored -- a season is millions of documents,
+// decoded whole into the memory of the one replica that is also running
+// BirdNET. The window is what the list is for anyway (what has been heard
+// lately, waiting to be reviewed); looking further back is a filter you set.
+const defaultDetectionsDays = 30
 
 // detectionQuery is what GET /detections was asked for.
 type detectionQuery struct {
@@ -33,6 +43,9 @@ type detectionQuery struct {
 	desc    bool
 	limit   int
 	offset  int
+	// windowed is set when since is the server's default window rather than
+	// the request's own, so the answer can say what it was bounded to.
+	windowed bool
 }
 
 // listDetections is every card's detections, filtered, sorted and a page at a
@@ -45,9 +58,10 @@ type detectionQuery struct {
 // Sorting, the species tally and the page are all cut in Go, from one query:
 // Cosmos can't ORDER BY or OFFSET across partitions from the Go SDK (see
 // SCHEMA.md). The query carries the date, review and confidence filters, so a
-// date range is what keeps it cheap.
+// date range is what keeps it cheap -- which is why a request that names none
+// is answered for the last defaultDetectionsDays, and says so in window.
 func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
-	q, problem := parseDetectionQuery(r)
+	q, problem := parseDetectionQuery(r, h.now())
 	if problem != "" {
 		h.problem(w, http.StatusBadRequest, problem)
 		return
@@ -57,15 +71,6 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 	if err != nil {
 		h.fail(w, r, err)
 		return
-	}
-	uploads, err := h.store.ListUploads(ctx, db.UploadFilter{})
-	if err != nil {
-		h.fail(w, r, err)
-		return
-	}
-	stationName := make(map[string]string, len(uploads))
-	for _, u := range uploads {
-		stationName[u.ID] = u.Recorder.Name
 	}
 
 	// The species come from before the species filter, so picking one still
@@ -93,15 +98,35 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 
 	sortListed(matched, q.sort, q.desc)
 	page := matched[min(q.offset, len(matched)):min(q.offset+q.limit, len(matched))]
+
+	// Where each row was recorded comes from the cards on this page alone: a
+	// point read each, and a page is usually one or two cards. Reading every
+	// card to name a few was a second cross-partition query on every request.
+	name := map[string]string{}
 	rows := make([]ListedDetection, len(page))
 	for i, d := range page {
-		name := stationName[d.UploadID]
-		if name == "" {
-			name = d.RecorderID
+		station, known := name[d.UploadID]
+		if !known {
+			u, err := h.store.GetUpload(ctx, d.UploadID)
+			// A detection whose card has gone keeps its recorder id.
+			if err != nil && !errors.Is(err, db.ErrNotFound) {
+				h.fail(w, r, err)
+				return
+			}
+			station = u.Recorder.Name
+			name[d.UploadID] = station
 		}
-		rows[i] = ListedDetection{Detection: detectionOf(d), Reference: d.UploadID, StationName: name, Night: d.Night}
+		rows[i] = ListedDetection{
+			Detection: detectionOf(d), Reference: d.UploadID,
+			StationName: cmp.Or(station, d.RecorderID), Night: d.Night,
+		}
 	}
-	h.json(w, http.StatusOK, map[string]any{"detections": rows, "total": len(matched), "species": species})
+
+	body := map[string]any{"detections": rows, "total": len(matched), "species": species}
+	if q.windowed {
+		body["window"] = DetectionWindow{Since: q.filter.Since, Days: defaultDetectionsDays}
+	}
+	h.json(w, http.StatusOK, body)
 }
 
 // parseDetectionQuery reads GET /detections' parameters, or says what is
@@ -114,9 +139,17 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 //	sort           heard (the default), species or confidence
 //	order          asc or desc; heard and confidence default to desc, species to asc
 //	limit, offset  the page; limit defaults to 50 and is at most 500
-func parseDetectionQuery(r *http.Request) (detectionQuery, string) {
+//
+// A request with no since is answered for the defaultDetectionsDays before
+// until, or before now; q.windowed says that happened. now is the clock.
+func parseDetectionQuery(r *http.Request, now time.Time) (detectionQuery, string) {
 	v := r.URL.Query()
-	q := detectionQuery{species: v.Get("species"), sort: cmp.Or(v.Get("sort"), sortHeard), limit: defaultDetectionsLimit}
+	q := detectionQuery{species: v.Get("species"), sort: cmp.Or(v.Get("sort"), sortHeard)}
+	limit, offset, problem := parsePage(v)
+	if problem != "" {
+		return q, problem
+	}
+	q.limit, q.offset = limit, offset
 
 	for _, t := range []struct {
 		name string
@@ -159,21 +192,35 @@ func parseDetectionQuery(r *http.Request) (detectionQuery, string) {
 	default:
 		return q, "order must be asc or desc"
 	}
+	// No date range asked for: bound it rather than reading every detection
+	// ever stored. See defaultDetectionsDays.
+	if q.filter.Since.IsZero() {
+		q.filter.Since = cmp.Or(q.filter.Until, now).UTC().Truncate(time.Second).AddDate(0, 0, -defaultDetectionsDays)
+		q.windowed = true
+	}
+	return q, ""
+}
+
+// parsePage reads the limit and offset a list of detections was asked for, or
+// says what is wrong with them. Both are optional, and both lists of
+// detections take them, so both are capped the same way.
+func parsePage(v url.Values) (limit, offset int, problem string) {
+	limit = defaultDetectionsLimit
 	if s := v.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > maxDetectionsLimit {
-			return q, fmt.Sprintf("limit must be a whole number from 1 to %d", maxDetectionsLimit)
+			return 0, 0, fmt.Sprintf("limit must be a whole number from 1 to %d", maxDetectionsLimit)
 		}
-		q.limit = n
+		limit = n
 	}
 	if s := v.Get("offset"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 0 {
-			return q, "offset must be a whole number from 0"
+			return 0, 0, "offset must be a whole number from 0"
 		}
-		q.offset = n
+		offset = n
 	}
-	return q, ""
+	return limit, offset, ""
 }
 
 // sortListed orders detections by what the list is sorted on. Ties go to the

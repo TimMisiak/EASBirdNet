@@ -13,6 +13,7 @@ type listedBody struct {
 	Detections []ListedDetection `json:"detections"`
 	Total      int               `json:"total"`
 	Species    []SpeciesCount    `json:"species"`
+	Window     *DetectionWindow  `json:"window"`
 }
 
 func TestListEveryDetection(t *testing.T) {
@@ -131,5 +132,93 @@ func TestListEveryDetection(t *testing.T) {
 	}
 	if rec := do(t, mux, http.MethodGet, "/api/v1/detections", "", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("anonymous GET detections = %d, want 401", rec.Code)
+	}
+}
+
+// TestEveryDetectionIsBoundedWithoutDates holds the line that keeps the
+// Detections tab from reading every detection ever stored on every request:
+// with no since, the query is bounded to the last defaultDetectionsDays and
+// the answer says so. See defaultDetectionsDays.
+func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
+	mux, store := newTestMux(t)
+	// Older than the default window, on a card the seed already has.
+	old, err := time.Parse(time.RFC3339, "2026-06-01T09:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDetections(t.Context(), "OWL-20260821-SR03", []db.Detection{{
+		AudioFileID: "af_old", DetectedAt: old, Night: "2026-05-31", StartSec: 9,
+		ScientificName: "Tyto alba", CommonName: "Barn Owl", Confidence: 0.8,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	list := func(query string) listedBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET detections%s = %d %s", query, rec.Code, rec.Body)
+		}
+		return decodeInto[listedBody](t, rec)
+	}
+
+	// The default window leaves June out, of the rows and of the species.
+	recent := list("")
+	wantSince := testNow.AddDate(0, 0, -defaultDetectionsDays)
+	if recent.Total != 6 || recent.Window == nil || !recent.Window.Since.Equal(wantSince) ||
+		recent.Window.Days != defaultDetectionsDays {
+		t.Errorf("default list = %d detections, window %+v; want 6 since %v", recent.Total, recent.Window, wantSince)
+	}
+	for _, s := range recent.Species {
+		if s.CommonName == "Barn Owl" {
+			t.Errorf("the June barn owl is in the default window's species: %+v", recent.Species)
+		}
+	}
+
+	// Asking for dates is asking for exactly those, and is never windowed.
+	all := list("?since=2026-01-01T00:00:00Z")
+	if all.Total != 7 || all.Window != nil {
+		t.Errorf("since January = %d detections, window %+v; want 7 and no window", all.Total, all.Window)
+	}
+	// until with no since is the window before until, not everything before it.
+	before := list("?until=2026-06-02T00:00:00Z")
+	if before.Total != 1 || before.Window == nil ||
+		!before.Window.Since.Equal(time.Date(2026, time.May, 3, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("until June 2nd = %d detections, window %+v; want the one barn owl since May 3rd", before.Total, before.Window)
+	}
+}
+
+// TestCardDetectionsArePaged holds the cap on GET /detections/{ref}: a card
+// carries tens of thousands of detections and the whole card is the default
+// ask, so the answer is a page with the count beside it.
+func TestCardDetectionsArePaged(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	// seedProgram's five on this card, newest first.
+	card := func(query string) detectionsBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections/OWL-20260913-SR05"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET card detections%s = %d %s", query, rec.Code, rec.Body)
+		}
+		return decodeInto[detectionsBody](t, rec)
+	}
+	whole := card("")
+	if whole.Total != 5 || len(whole.Detections) != 5 {
+		t.Fatalf("whole card = %d of %d, want 5", len(whole.Detections), whole.Total)
+	}
+	page := card("?limit=2&offset=2")
+	if page.Total != 5 || len(page.Detections) != 2 || page.Detections[0].ID != whole.Detections[2].ID {
+		t.Errorf("page = %d of %d starting %q, want 2 of 5 from %q",
+			len(page.Detections), page.Total, page.Detections[0].ID, whole.Detections[2].ID)
+	}
+	if past := card("?offset=5"); past.Total != 5 || len(past.Detections) != 0 {
+		t.Errorf("past the end = %d of %d, want none of 5", len(past.Detections), past.Total)
+	}
+	for _, query := range []string{"?limit=0", "?limit=501", "?limit=lots", "?offset=-1"} {
+		if rec := do(t, mux, http.MethodGet, "/api/v1/detections/OWL-20260913-SR05"+query, "", admin); rec.Code != http.StatusBadRequest {
+			t.Errorf("GET card detections%s = %d, want 400 (%s)", query, rec.Code, rec.Body)
+		}
 	}
 }

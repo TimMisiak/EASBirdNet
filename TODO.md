@@ -137,28 +137,6 @@ state. (Retention still expires the audio, so nothing is stranded.)
 
 ## 3. Scale and cost — this bites during the first season, not later
 
-### 3.1 The Detections tab reads the entire detections container per request
-`backend/internal/api/detections.go:56-69`, `backend/internal/db/cosmos.go:316`
-
-The default view sends no `since` (`bs-detections.js:125-133`), so
-`ListDetections` is an unbounded cross-partition `SELECT *` whose full result is
-decoded into Go, tallied, sorted and then sliced to 50 rows — plus an
-unconditional `ListUploads`. Every sort, filter and page change repeats it.
-
-**If not fixed:** at the volume DEPLOYMENT.md's own cost table predicts (~2M
-detection documents, ~2 GB), this is hundreds of MB of Go heap per request in a
-2 GiB replica that is simultaneously running BirdNET at ~300 MB — an OOM restart
-mid-analysis — and a serverless Cosmos bill for a full scan on every page view.
-This is the single most likely production failure. Cheapest fix before release:
-default `since` to a bounded window server-side when none is given.
-
-### 3.2 A card's detections endpoint is unpaginated
-`backend/internal/api/api.go:782`
-
-`GET /detections/{ref}` with no `?file=` returns every detection on the card in
-one body — tens of thousands of rows. Single-partition, so cheap in RU, but a
-very large response. Cap it, or require `file`.
-
 ### 3.3 The public overview is an unauthenticated full scan with no cache
 `backend/internal/api/overview.go:20-41`
 
@@ -427,8 +405,9 @@ own Entra user, upload a few large `.wav` files, and confirm pause/resume
 carries on from the last 50 MB chunk rather than restarting; (2) deploy and send
 one real card end to end, watching ingress for 499/504 and the replica's CPU,
 memory and restarts; (3) expect the startup container check to fail while role
-assignments propagate. Item (2) is also where 3.4 (clips per card) and 3.1
-(detections volume) get their first real measurement.
+assignments propagate. Item (2) is also where 3.4 (clips per card) gets its
+first real measurement, along with how many detections a card yields — which is
+what says whether the Detections tab's 30-day default window is the right size.
 
 ---
 

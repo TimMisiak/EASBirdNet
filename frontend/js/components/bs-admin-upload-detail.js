@@ -17,6 +17,13 @@ import "./bs-queue-note.js";
  */
 const POLL_MS = 5_000;
 
+/**
+ * The most detections in one file this page lists at once, which is the API's
+ * own cap. A dawn chorus file can merge to hundreds; the rest are a page of
+ * their own on the Detections tab.
+ */
+const HEARD_LIMIT = 500;
+
 const FILTERS = [
   { id: "all", label: "All files", match: () => true },
   { id: "queued", label: "Queued", match: (f) => f.status === "uploaded" || f.status === "pending" },
@@ -34,7 +41,7 @@ class AdminUploadDetail extends BaseElement {
   #filter = "all";
   /** Ids of the files whose detections are showing. */
   #open = new Set();
-  /** fileId -> {status, detections, count}; count is the file's detectionCount when fetched. */
+  /** fileId -> {status, detections, total, count}; count is the file's detectionCount when fetched. */
   #heard = new Map();
   #timer = 0;
 
@@ -105,13 +112,15 @@ class AdminUploadDetail extends BaseElement {
     const had = this.#heard.get(file.id);
     if (had && had.status !== "error" && had.count === file.detectionCount) return;
 
-    this.#heard.set(file.id, { status: "loading", detections: had?.detections ?? [], count: file.detectionCount });
+    this.#heard.set(file.id, {
+      status: "loading", detections: had?.detections ?? [], total: had?.total ?? 0, count: file.detectionCount,
+    });
     let next;
     try {
-      const { detections } = await api.fetchFileDetections(this.reference, file.id);
-      next = { status: "ready", detections, count: file.detectionCount };
+      const { detections, total } = await api.fetchFileDetections(this.reference, file.id, HEARD_LIMIT);
+      next = { status: "ready", detections, total, count: file.detectionCount };
     } catch (error) {
-      next = { status: "error", detections: [], count: file.detectionCount, error };
+      next = { status: "error", detections: [], total: 0, count: file.detectionCount, error };
     }
     this.#heard.set(file.id, next);
     if (this.isConnected) this.render();
@@ -371,6 +380,11 @@ class AdminUploadDetail extends BaseElement {
             .join("")}
         </tbody>
       </table>
+      ${
+        heard.total > heard.detections.length
+          ? `<p class="quiet">Showing the first ${count(heard.detections.length)} of ${count(heard.total)} detections in this file.</p>`
+          : ""
+      }
     `;
   }
 }

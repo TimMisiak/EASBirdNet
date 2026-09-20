@@ -89,16 +89,21 @@ export const reportProgress = (reference, body) =>
 
 /**
  * Every card's detections, a page at a time, with the species among them:
- * {detections, total, species}. params are the API's, all optional: since,
- * until, status, minConfidence, species, sort, order, limit, offset.
+ * {detections, total, species, window}. params are the API's, all optional:
+ * since, until, status, minConfidence, species, sort, order, limit, offset.
+ * With no since the server answers for a window of recent days rather than
+ * reading every detection there is, and window says which.
  */
 export const fetchDetections = (params) => {
   const search = new URLSearchParams(params).toString();
   return get(`/detections${search ? `?${search}` : ""}`);
 };
-/** What BirdNET heard in one file of a card, in the order it was heard. */
-export const fetchFileDetections = (reference, fileId) =>
-  get(`/detections/${encodeURIComponent(reference)}?file=${encodeURIComponent(fileId)}`);
+/**
+ * What BirdNET heard in one file of a card, in the order it was heard, at most
+ * limit of them: {detections, total}. total is how many there are in all.
+ */
+export const fetchFileDetections = (reference, fileId, limit) =>
+  get(`/detections/${encodeURIComponent(reference)}?file=${encodeURIComponent(fileId)}&limit=${limit}`);
 /** One detection, with the card and the file it was heard in. */
 export const fetchDetection = (reference, id) =>
   get(`/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}`);

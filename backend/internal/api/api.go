@@ -821,11 +821,20 @@ func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
 	return h.files.DeleteAll(ctx, prefix)
 }
 
-// listCardDetections is everything BirdNET heard on a card, or with ?file= in
-// one of its files, in the order it was heard.
+// listCardDetections is what BirdNET heard on a card, or with ?file= in one of
+// its files, in the order it was heard, a page at a time: limit and offset
+// read the same way as on the list of every detection, and total is how many
+// there are in all. A whole card is tens of thousands of detections, which is
+// a response nothing wants in one piece even though the query is a single
+// partition and so cheap to run.
 func (h *handlers) listCardDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
 	ctx := r.Context()
 	ref := r.PathValue("reference")
+	limit, offset, problem := parsePage(r.URL.Query())
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
 	filter := db.DetectionFilter{UploadID: ref}
 	missing := "no such card"
 	var err error
@@ -846,7 +855,8 @@ func (h *handlers) listCardDetections(w http.ResponseWriter, r *http.Request, _ 
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]any{"detections": mapAll(found, detectionOf)})
+		page := found[min(offset, len(found)):min(offset+limit, len(found))]
+		h.json(w, http.StatusOK, map[string]any{"detections": mapAll(page, detectionOf), "total": len(found)})
 	}
 }
 

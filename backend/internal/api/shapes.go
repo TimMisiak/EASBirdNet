@@ -161,6 +161,14 @@ type ListedDetection struct {
 	Night       string `json:"night"` // YYYY-MM-DD
 }
 
+// DetectionWindow is the date range the server bounded a list of every card's
+// detections to because the request named none of its own. Absent when the
+// request asked for its own dates.
+type DetectionWindow struct {
+	Since time.Time `json:"since"`
+	Days  int       `json:"days"`
+}
+
 // SpeciesCount is one species BirdNET labelled detections with, and how many.
 type SpeciesCount struct {
 	ScientificName string `json:"scientificName"`
