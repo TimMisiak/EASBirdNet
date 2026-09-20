@@ -26,6 +26,7 @@ class UploadProgress extends BaseElement {
   #wakeLock = null;
   #view = null;
   #onVisible = null;
+  #loadError = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -38,10 +39,7 @@ class UploadProgress extends BaseElement {
       if (state.upload && viewOf(state) === this.#view) this.#update(state);
       else this.render();
     });
-    flow.current().then((upload) => {
-      if (!upload) navigate("/app/upload", { replace: true });
-      else this.render();
-    });
+    this.#find();
     // The browser drops a wake lock whenever the tab is hidden; take it back.
     this.#onVisible = () => this.#syncWakeLock(flow.get().status);
     document.addEventListener("visibilitychange", this.#onVisible);
@@ -53,8 +51,27 @@ class UploadProgress extends BaseElement {
     this.#releaseWakeLock();
   }
 
+  /** Find the card this page is about, and say so if we can't. */
+  #find() {
+    flow.current().then(
+      (upload) => {
+        if (!upload) navigate("/app/upload", { replace: true });
+        else this.render();
+      },
+      (error) => {
+        this.#loadError = error;
+        this.render();
+      },
+    );
+  }
+
   get actions() {
     return {
+      lookup: () => {
+        this.#loadError = null;
+        this.render();
+        this.#find();
+      },
       pause: () => (flow.get().status === "paused" ? flow.start() : flow.pause()),
       retry: () => flow.start(),
       rechoose: () => navigate("/app/upload"),
@@ -81,7 +98,7 @@ class UploadProgress extends BaseElement {
     const state = flow.get();
     if (!state.upload) {
       this.#view = null;
-      this.shadowRoot.innerHTML = `<p class="lede">Finding the card…</p>`;
+      this.shadowRoot.innerHTML = this.#loadError ? lookupFailed(this.#loadError) : `<p class="lede">Finding the card…</p>`;
       return;
     }
     this.#view = viewOf(state);
@@ -253,6 +270,29 @@ const FILES_HEAD = `
     <span class="note">One at a time, in the order they're on the card</span>
   </div>
 `;
+
+/**
+ * The card lookup itself failed -- a 500, or the connection dropped on reload.
+ * Say so rather than leaving "Finding the card…" up for good; the upload is
+ * untouched either way, so trying again is the whole recovery.
+ */
+function lookupFailed(error) {
+  return `
+    <style>
+      :host { display: block; max-width: 640px; }
+      .row { display: flex; gap: var(--bs-space-3); flex-wrap: wrap; margin-top: var(--bs-space-5); }
+    </style>
+    <h1>We couldn't look up the card</h1>
+    <p class="error" role="alert">${escapeHTML(error.message)}</p>
+    <p class="lede" style="margin-top: var(--bs-space-4);">
+      Nothing has been lost — the files already on our side are still counted.
+    </p>
+    <div class="row">
+      <button class="btn btn--primary" data-action="lookup">Try again</button>
+      <button class="btn btn--quiet" data-action="later">My uploads</button>
+    </div>
+  `;
+}
 
 const STYLE = `
   <style>

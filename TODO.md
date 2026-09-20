@@ -110,16 +110,6 @@ change the copy to say what actually happens (the card page shows progress; come
 back and look). The copy change is small and can ship now; email is its own
 piece of work.
 
-### 2.3 Upload steps 3 and 4 hang forever if the card lookup fails
-`bs-upload-progress.js:41-44`, `bs-upload-done.js:18-21`
-
-Both attach only a fulfilment handler, and `flow.current()` re-throws anything
-that isn't a 404 (`upload-flow.js:195`).
-
-**If not fixed:** a 500 or a dropped connection on reload leaves the volunteer
-staring at "Finding the card…" with no message and an unhandled rejection in the
-console. `bs-upload-check.js:23-27` already does this correctly.
-
 ### 2.4 An ended session shows raw errors instead of the sign-in page
 `frontend/js/api.js:15-31`, `frontend/js/session.js:23-40`
 
