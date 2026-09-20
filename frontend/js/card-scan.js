@@ -54,7 +54,9 @@ async function walk(dir, out, prefix = "", depth = 0) {
 }
 
 // The fallback path: <input webkitdirectory>, which every current browser
-// supports. It reads the whole folder into File objects up front.
+// supports. It reads the whole folder into File objects up front. This is the
+// path every Firefox and Safari volunteer takes, so closing the picker has to
+// settle the promise: "change" for a folder, "cancel" for a closed picker.
 function viaInput() {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
@@ -64,11 +66,20 @@ function viaInput() {
     input.style.display = "none";
     document.body.append(input);
 
+    // Whichever event arrives first takes the promise with it and takes the
+    // input out of the document; the other is then a no-op.
+    let settled = false;
+    const settle = (finish) => () => {
+      if (settled) return;
+      settled = true;
+      input.remove();
+      finish();
+    };
+
     input.addEventListener(
       "change",
-      () => {
+      settle(() => {
         const files = [...input.files];
-        input.remove();
         if (!files.length) return reject(new CancelledError());
         // Relative paths start with the folder that was picked; the card's
         // paths start inside it.
@@ -78,11 +89,12 @@ function viaInput() {
           file,
         }));
         resolve({ label: label || "SD card", entries });
-      },
-      { once: true },
+      }),
     );
-    // There is no reliable "cancelled" event; the picker just never fires
-    // change. The input is removed on the next scan either way.
+    // <input type=file> has fired "cancel" since Firefox 91 and Safari 16.4.
+    // Somewhere older leaves the promise pending, which is what it did here
+    // for every browser before this handler existed.
+    input.addEventListener("cancel", settle(() => reject(new CancelledError())));
     input.click();
   });
 }

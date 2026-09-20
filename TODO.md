@@ -110,20 +110,6 @@ change the copy to say what actually happens (the card page shows progress; come
 back and look). The copy change is small and can ship now; email is its own
 piece of work.
 
-### 2.2 Cancelling the folder picker permanently wedges the upload page on Firefox and Safari
-`frontend/js/card-scan.js:58-88`, `bs-upload-details.js:115-129`
-
-`viaInput()` resolves only on `change` and has no `cancel` handler.
-`showDirectoryPicker` is Chromium-only, so every Firefox and Safari volunteer
-takes this path.
-
-**If not fixed:** closing the OS picker leaves the promise pending forever:
-`#busy` stays true, every button renders disabled reading "Reading the card…",
-and the only recovery is a page reload. The abandoned hidden `<input>` also
-stays in the document — `input.remove()` runs only inside the `change` handler,
-despite the comment claiming otherwise. `<input type=file>` has fired `cancel`
-since Firefox 91 / Safari 16.4.
-
 ### 2.3 Upload steps 3 and 4 hang forever if the card lookup fails
 `bs-upload-progress.js:41-44`, `bs-upload-done.js:18-21`
 
