@@ -48,6 +48,21 @@ func cardBody(stationID, pulledOn, notes, firstNight string, nights, perNight in
 	return string(b)
 }
 
+// oneNightBody is a POST /api/v1/uploads body for a card holding one night of
+// the files given, summed into it the way the browser sums them.
+func oneNightBody(stationID, pulledOn, night string, files []CardFile) string {
+	var bytes int64
+	for _, f := range files {
+		bytes += f.Bytes
+	}
+	b, _ := json.Marshal(map[string]any{
+		"stationId": stationID, "pulledOn": pulledOn,
+		"nights": []Night{{Date: night, Files: len(files), Bytes: bytes}},
+		"files":  files,
+	})
+	return string(b)
+}
+
 // tusServer is the API on a real listener, so uploads go through tusd the way
 // a browser's do, with the file storage it writes to.
 type tusServer struct {
@@ -322,6 +337,68 @@ func TestReRegisteringACardKeepsTheFilesAlreadyIn(t *testing.T) {
 	}
 	if r := s.create(jane, ref, reg.Files[0].Path, 100); r.status != http.StatusBadRequest {
 		t.Errorf("uploading the unlisted file = %d, want 400", r.status)
+	}
+
+	// The right folder again: the file that went off the list is back on it at
+	// the same length, so it is the one already in storage and isn't sent
+	// again.
+	back := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 3, 1))
+	if back.Upload.FilesUploaded != 1 || back.Files[0].Status != db.AudioUploaded {
+		t.Errorf("re-listed file = %d uploaded, files %+v; want the stored one counted again", back.Upload.FilesUploaded, back.Files)
+	}
+	restored, err := s.store.GetAudioFile(t.Context(), ref, db.AudioFileID(ref, reg.Files[0].Path))
+	if err != nil || restored.BlobName != gone.BlobName || restored.StatusDetail != "" {
+		t.Errorf("re-listed file = %+v, %v; want %s kept", restored, err, gone.BlobName)
+	}
+}
+
+// A file listed at a length other than the one already in storage is a
+// different recording. Its document is the only thing naming what was stored,
+// so the bytes have to go with it.
+func TestReRegisteringAFileAtADifferentLengthReplacesWhatWasStored(t *testing.T) {
+	s := newTusServer(t)
+	ctx := t.Context()
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 2))
+	ref, first, second := reg.Upload.Reference, reg.Files[0].Path, reg.Files[1].Path
+	s.send(jane, ref, first, audio(1), 100)
+	stored, err := s.store.GetAudioFile(ctx, ref, db.AudioFileID(ref, first))
+	if err != nil || stored.BlobName == "" {
+		t.Fatalf("received file = %+v, %v", stored, err)
+	}
+
+	longer := oneNightBody("SW-03", "2026-09-14", "2026-09-12", []CardFile{
+		{Path: first, Bytes: 150, Night: "2026-09-12"},
+		{Path: second, Bytes: 100, Night: "2026-09-12"},
+	})
+	if u := s.register(jane, longer).Upload; u.FilesUploaded != 0 || u.TotalBytes != 250 {
+		t.Errorf("after the longer list = %d files, %d bytes; want 0 of 250", u.FilesUploaded, u.TotalBytes)
+	}
+	f, err := s.store.GetAudioFile(ctx, ref, db.AudioFileID(ref, first))
+	if err != nil || f.Status != db.AudioPending || f.SizeBytes != 150 || f.BlobName != "" || f.UploadedAt != nil {
+		t.Errorf("re-listed file = %+v, %v; want pending at 150 with nothing stored", f, err)
+	}
+	if _, err := s.files.Open(ctx, stored.BlobName); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("what was stored for the old length: err = %v, want ErrNotFound", err)
+	}
+
+	// The new length is what may be sent now, and it lands on its own bytes.
+	if r := s.create(jane, ref, first, 100); r.status != http.StatusBadRequest {
+		t.Errorf("sending the old length = %d, want 400", r.status)
+	}
+	s.send(jane, ref, first, bytes.Repeat([]byte{7}, 150), 150)
+	sent, err := s.store.GetAudioFile(ctx, ref, db.AudioFileID(ref, first))
+	if err != nil || sent.Status != db.AudioUploaded || sent.BlobName == stored.BlobName {
+		t.Fatalf("file sent again = %+v, %v", sent, err)
+	}
+	r, err := s.files.Open(ctx, sent.BlobName)
+	if err != nil {
+		t.Fatalf("open %s: %v", sent.BlobName, err)
+	}
+	kept, _ := io.ReadAll(r)
+	r.Close()
+	if len(kept) != 150 {
+		t.Errorf("stored %d bytes, want the 150 just sent", len(kept))
 	}
 }
 

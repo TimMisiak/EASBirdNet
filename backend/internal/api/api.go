@@ -544,6 +544,13 @@ func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile,
 // everything else listed is pending. A file that is no longer listed is marked
 // failed rather than deleted, so whatever was stored for it is still accounted
 // for.
+//
+// A file document is the only thing that names what was stored for it, so a
+// file that is about to be listed at a different length has its stored bytes
+// deleted first: nothing else would ever find them again. The bytes go before
+// the document that names them, the way retention does it, so a registration
+// that fails part way leaves a file to delete again rather than storage
+// nothing points at.
 func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.AudioFile) error {
 	existing, err := h.store.ListAudioFiles(ctx, u.ID)
 	if err != nil {
@@ -558,9 +565,22 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		id := db.AudioFileID(u.ID, f.Path)
 		old, had := unlisted[id]
 		delete(unlisted, id)
-		unchanged := old.SizeBytes == f.SizeBytes && (received(old) || (old.Status == db.AudioPending && old.Night == f.Night))
-		if had && unchanged {
+		sameFile := had && old.SizeBytes == f.SizeBytes
+		if sameFile && (received(old) || (old.Status == db.AudioPending && old.Night == f.Night)) {
 			continue
+		}
+		if sameFile && old.BlobName != "" {
+			// A file that was taken off the card's list and is on it again at
+			// the same length is the one already in storage, so it counts as
+			// received rather than being sent a second time.
+			old.Status, old.StatusDetail, old.Night = db.AudioUploaded, "", f.Night
+			writes = append(writes, old)
+			continue
+		}
+		if old.BlobName != "" {
+			if err := h.files.Delete(ctx, old.BlobName); err != nil {
+				return fmt.Errorf("api: replacing %s on %s: %w", f.Path, u.ID, err)
+			}
 		}
 		writes = append(writes, db.AudioFile{
 			ID: id, RecorderID: u.RecorderID, Path: f.Path, SizeBytes: f.SizeBytes,

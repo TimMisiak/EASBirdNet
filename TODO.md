@@ -88,19 +88,6 @@ quietly.
 Audio is irreplaceable: the volunteer erases the card, and originals are deleted
 after 30 days. These are the items where being wrong costs recordings.
 
-### 1.5 Re-registering a card at a different size orphans stored bytes
-`backend/internal/api/api.go:561-569`
-
-If a file is already `uploaded` but the re-read card reports a different size,
-the document is rewritten as fresh `AudioPending`, dropping `blobName` and
-`uploadedAt`. The sibling branch two lines down deliberately *keeps* the
-document for a file taken off the list, "so whatever was stored for it is still
-accounted for".
-
-**If not fixed:** the old bytes stay in storage with nothing naming them.
-Retention sweeps by `blobName`, so it can never see them; only deleting the
-whole card reclaims them.
-
 ### 1.6 Recorder ids are unvalidated, and card references can collide
 `backend/internal/api/api.go:1145`, `backend/internal/db/models.go:282-284`
 
