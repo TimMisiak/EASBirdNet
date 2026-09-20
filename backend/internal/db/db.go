@@ -217,8 +217,8 @@ func prepareUser(u *User, t time.Time) error {
 }
 
 func prepareRecorder(r *Recorder, t time.Time) error {
-	if r.ID == "" {
-		return errors.New("db: a recorder needs an id")
+	if problem := RecorderIDProblem(r.ID); problem != "" {
+		return fmt.Errorf("db: recorder id %q: %s", r.ID, problem)
 	}
 	stamp(&r.CreatedAt, &r.UpdatedAt, t)
 	return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -885,6 +886,41 @@ func TestAddStation(t *testing.T) {
 		`{"id":"sw-02","name":"Marymoor","latitude":47.66,"longitude":-122.11}`, admin)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "SW-02") {
 		t.Errorf("add sw-02 = %d %s; want 409 naming SW-02", rec.Code, rec.Body)
+	}
+}
+
+// A recorder id is a Cosmos item id and partition key, a path segment in the
+// card references built from it, and a blob-name prefix. An id the whitelist
+// lets through would leave cards that can't be routed to or deleted.
+func TestAddStationRejectsBadIDs(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	for _, tc := range []struct {
+		id   string
+		want int
+	}{
+		{"SW/06", http.StatusBadRequest},
+		{`SW\06`, http.StatusBadRequest},
+		{"SW?06", http.StatusBadRequest},
+		{"SW#06", http.StatusBadRequest},
+		{"SW 06", http.StatusBadRequest},
+		{"-06", http.StatusBadRequest},
+		{strings.Repeat("S", db.MaxRecorderIDLen+1), http.StatusBadRequest},
+		// Both would make OWL-20260907-SR02 out of a card pulled from SW-02.
+		{"02", http.StatusConflict},
+		{"sw-02", http.StatusConflict},
+	} {
+		body := fmt.Sprintf(`{"id":%q,"name":"Mercer Slough","latitude":47.59,"longitude":-122.18}`, tc.id)
+		if rec := do(t, mux, http.MethodPost, "/api/v1/admin/stations", body, admin); rec.Code != tc.want {
+			t.Errorf("add %q = %d, want %d (%s)", tc.id, rec.Code, tc.want, rec.Body)
+		}
+	}
+	// And a card can't be registered against an id no recorder could have.
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads",
+		`{"stationId":"SW/02","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":1,"bytes":100}],"files":[{"path":"a.wav","sizeBytes":100}]}`, vol)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("card for an unusable station id = %d, want %d (%s)", rec.Code, http.StatusBadRequest, rec.Body)
 	}
 }
 

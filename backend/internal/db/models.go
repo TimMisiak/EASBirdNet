@@ -279,7 +279,54 @@ func NewID(prefix string) string {
 // "2026-09-07" is "OWL-20260907-SR02". Registering the same card again yields
 // the same id, which is how a resume finds what already landed.
 func UploadID(pulledOn, recorderID string) string {
-	return "OWL-" + strings.ReplaceAll(pulledOn, "-", "") + "-SR" + strings.TrimPrefix(recorderID, "SW-")
+	return "OWL-" + strings.ReplaceAll(pulledOn, "-", "") + "-SR" + RecorderRef(recorderID)
+}
+
+// RecorderRef is a recorder's part of the card references built from it: the
+// id without the "SW-" every unit in the field is labelled with, since the
+// reference already says which program it belongs to. Two recorders sharing
+// one would name the same card on the same pull date, which is why
+// CreateRecorder refuses the second.
+func RecorderRef(id string) string {
+	return strings.TrimPrefix(id, "SW-")
+}
+
+// MaxRecorderIDLen caps a recorder id. It is short because the id is carried
+// by every card reference, and through those by every blob name.
+const MaxRecorderIDLen = 24
+
+// RecorderIDProblem is what's wrong with a recorder id, or "". The coordinator
+// types it from the unit's label, and it then serves as a Cosmos item id and
+// partition key, as a path segment in card references and their URLs, and as a
+// blob-name prefix. Each of those forbids something different -- Cosmos
+// rejects '/', '\', '?' and '#' in an item id with a raw 400, a reference
+// carrying a '/' breaks both routing and storage.under(), so the card could
+// never be deleted -- so rather than enumerate them, an id is letters, digits
+// and hyphens, beginning and ending with a letter or a digit.
+func RecorderIDProblem(id string) string {
+	if id == "" {
+		return "a recorder id is required"
+	}
+	if len(id) > MaxRecorderIDLen {
+		return fmt.Sprintf("a recorder id is at most %d characters", MaxRecorderIDLen)
+	}
+	for i, c := range id {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i > 0 && i < len(id)-1:
+		default:
+			return "a recorder id is letters, digits and hyphens, such as SW-06"
+		}
+	}
+	return ""
+}
+
+// NormalizeRecorderID is the stored form of a typed id. Ids are compared
+// case-insensitively -- "sw-02" is the unit labelled SW-02 -- so case carries
+// no meaning, and the form worth storing is the one printed on the unit, which
+// is also the one RecorderRef trims.
+func NormalizeRecorderID(id string) string {
+	return strings.ToUpper(strings.TrimSpace(id))
 }
 
 // CardPath normalizes a path on a card: forward slashes, no leading slash.

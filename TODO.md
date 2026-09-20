@@ -88,21 +88,6 @@ quietly.
 Audio is irreplaceable: the volunteer erases the card, and originals are deleted
 after 30 days. These are the items where being wrong costs recordings.
 
-### 1.6 Recorder ids are unvalidated, and card references can collide
-`backend/internal/api/api.go:1145`, `backend/internal/db/models.go:282-284`
-
-`addStation` accepts any trimmed string as the recorder id, which is both the
-document id and the partition key. `UploadID` is
-`"OWL-" + date + "-SR" + strings.TrimPrefix(recorderID, "SW-")`.
-
-**If not fixed:** recorders `SW-02` and `02` produce the *same card reference*
-on the same pull date — a real document collision, not just a storage-prefix
-one. And Cosmos forbids `/`, `\`, `?`, `#` in an item id, so a recorder id
-containing one yields ids Cosmos rejects with a raw 400, a reference that breaks
-`GET /uploads/{reference}` routing, and a prefix `storage.under()` refuses — so
-the card could never be deleted. A character whitelist and a length cap on
-`addStation` closes all of it.
-
 ### 1.7 Deleting a real card will exceed the ingress timeout
 `backend/internal/db/cosmos.go:429-442`, `backend/internal/storage/storage.go:367-397`,
 called synchronously from `backend/internal/api/api.go:722-762`

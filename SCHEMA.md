@@ -98,7 +98,7 @@ they were recorded (see [Denormalized copies](#denormalized-copies)).
 
 | Field        | Type    | Notes |
 |--------------|---------|-------|
-| `id`         | string  | Typed by the coordinator from the unit's label, e.g. `SW-02`. A duplicate is a conflict. |
+| `id`         | string  | Typed by the coordinator from the unit's label, e.g. `SW-02`. Letters, digits and hyphens only, beginning and ending with a letter or digit, at most 24 characters, stored upper case. A duplicate is a conflict. |
 | `name`       | string  | Site name shown everywhere, e.g. `Marymoor Park – Snag Row`. |
 | `latitude`   | number  | WGS 84 degrees, 5 decimal places from the map picker. |
 | `longitude`  | number  | |
@@ -125,7 +125,9 @@ they were recorded (see [Denormalized copies](#denormalized-copies)).
 An upload session: one SD card, from the moment a volunteer registers it until
 its results are sent. The id is the reference a volunteer quotes in email,
 built from the pull date and the recorder: `OWL-20260907-SR02` is
-recorder `SW-02`, pulled 7 September 2026.
+recorder `SW-02`, pulled 7 September 2026. The recorder's part is its id
+without the `SW-` prefix, so two recorder ids that differ only by that prefix
+would name the same card; `POST /admin/stations` refuses the second.
 
 | Field            | Type     | Notes |
 |------------------|----------|-------|
@@ -549,7 +551,7 @@ What the write routes do to documents:
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
-| `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. |
+| `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. An id outside the `recorders.id` rules is a 400; one that would share card references with a recorder already added is a 409. |
 
 What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 `receivedAt` first:

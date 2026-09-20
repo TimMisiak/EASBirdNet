@@ -390,6 +390,12 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	}
 	ctx := r.Context()
 
+	// An id no recorder could have is looked up as a miss, not handed to the
+	// store: Cosmos answers a read for an id containing '/' with a raw 400.
+	if db.RecorderIDProblem(body.StationID) != "" {
+		h.problem(w, http.StatusBadRequest, "unknown station")
+		return
+	}
 	rec, err := h.store.GetRecorder(ctx, body.StationID)
 	switch {
 	case errors.Is(err, db.ErrNotFound) || (err == nil && rec.RetiredAt != nil):
@@ -1162,15 +1168,26 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ db.User)
 		h.fail(w, r, err)
 		return
 	}
-	id := strings.TrimSpace(body.ID)
+	id := db.NormalizeRecorderID(body.ID)
 	if id == "" {
 		id = fmt.Sprintf("SW-%02d", len(all)+1)
 	}
-	// Ids are compared case-insensitively: "sw-02" is the unit labelled SW-02.
+	if problem := db.RecorderIDProblem(id); problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
+	// Ids are compared case-insensitively: "sw-02" is the unit labelled SW-02,
+	// and the stored form is the label's.
 	var existing *db.Recorder
 	for i := range all {
-		if strings.EqualFold(all[i].ID, id) {
+		switch {
+		case strings.EqualFold(all[i].ID, id):
 			existing = &all[i]
+		case db.RecorderRef(all[i].ID) == db.RecorderRef(id):
+			// Different recorders, one card reference: "02" and "SW-02" both
+			// make OWL-20260907-SR02 out of the same pull date (db.UploadID).
+			h.problem(w, http.StatusConflict, fmt.Sprintf("recorder %s would share card references with %s", id, all[i].ID))
+			return
 		}
 	}
 
