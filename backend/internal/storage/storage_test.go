@@ -82,6 +82,39 @@ func testStore(t *testing.T, s Store) {
 		}
 	}
 
+	// Audio retention deletes one recording at a time, with tusd's record of
+	// it, and leaves the clips cut from it where they are.
+	expiring := "OWL-20260907-SR02/" + t.Name() + "-expiring"
+	up, err = composer.Core.NewUpload(ctx, tushandler.FileInfo{ID: expiring, Size: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := up.WriteChunk(ctx, 0, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.FinishUpload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, Name(expiring)); err != nil {
+		t.Fatalf("delete one recording: %v", err)
+	}
+	if _, err := s.Open(ctx, Name(expiring)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("open an expired recording: err = %v, want ErrNotFound", err)
+	}
+	if _, err := composer.Core.GetUpload(ctx, expiring); err == nil {
+		t.Error("tusd's record of an expired recording is still there")
+	}
+	if r, err := s.Open(ctx, clip); err != nil {
+		t.Errorf("a clip went with the recording it was cut from: %v", err)
+	} else {
+		r.Close()
+	}
+	// A sweep that stopped between deleting the blob and marking the document
+	// runs over the same name again.
+	if err := s.Delete(ctx, Name(expiring)); err != nil {
+		t.Errorf("delete the same recording again: %v", err)
+	}
+
 	// Deleting a card's audio takes its unfinished files and its clips too, and
 	// nothing of a card whose reference only starts the same way.
 	partial := "OWL-20260907-SR02/" + t.Name() + "-partial"

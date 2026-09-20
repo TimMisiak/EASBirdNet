@@ -115,8 +115,14 @@ type Upload struct {
 	ReceivedAt    *time.Time `json:"receivedAt,omitempty"`
 	ProcessedAt   *time.Time `json:"processedAt,omitempty"`
 	ResultsSentAt *time.Time `json:"resultsSentAt,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	// AudioDeletedAt is when the last of the card's originals was removed from
+	// storage under the retention policy. It is the card-level form of
+	// AudioFile.AudioDeletedAt, so a list can show which cards still hold
+	// audio without reading their files. The card's detections and their clips
+	// are kept: only a coordinator deleting the card removes those.
+	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 // RecorderSnapshot is the part of a Recorder an upload keeps for itself.
@@ -178,11 +184,17 @@ type AudioFile struct {
 	SHA256      string     `json:"sha256,omitempty"`
 	// BlobName is where the audio lives in file storage (storage.Name of its
 	// tus upload), set when the last byte lands.
-	BlobName       string     `json:"blobName,omitempty"`
-	Status         string     `json:"status"`
-	StatusDetail   string     `json:"statusDetail,omitempty"`
-	UploadedAt     *time.Time `json:"uploadedAt,omitempty"`
-	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
+	BlobName     string     `json:"blobName,omitempty"`
+	Status       string     `json:"status"`
+	StatusDetail string     `json:"statusDetail,omitempty"`
+	UploadedAt   *time.Time `json:"uploadedAt,omitempty"`
+	AnalyzedAt   *time.Time `json:"analyzedAt,omitempty"`
+	// AudioDeletedAt is when the recording itself was removed from storage
+	// under the retention policy (internal/retention). Status stays what
+	// analysis made it, because it still describes what BirdNET did with the
+	// file; BlobName is cleared with this, so nothing looks for audio that has
+	// gone. The file's detections and their clips are kept.
+	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`

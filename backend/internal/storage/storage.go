@@ -42,6 +42,11 @@ type Store interface {
 	// Put stores a file the server made itself, a detection clip, replacing
 	// anything under that name. Card audio only ever arrives over tus.
 	Put(ctx context.Context, name string, body io.ReadSeeker) error
+	// Delete removes one stored file, by the name Name or ClipName gave, and
+	// tusd's record of it beside it. This is how audio retention removes a
+	// card's originals one at a time, leaving its clips alone; a name with
+	// nothing stored under it is not an error, so a sweep can be run again.
+	Delete(ctx context.Context, name string) error
 	// DeleteAll removes everything stored for the card with that prefix: every
 	// upload whose id starts with prefix + "/", finished or not, with tusd's
 	// records of them, and the card's clips. A prefix with nothing stored under
@@ -69,6 +74,10 @@ func under(prefix string) ([]string, error) {
 	}
 	return []string{Name(prefix) + "/", clipPrefix + "/" + prefix + "/"}, nil
 }
+
+// infoSuffix names tusd's own record of an upload, which it writes beside the
+// bytes. Deleting a file takes its record with it.
+const infoSuffix = ".info"
 
 // clipPrefix is where detection clips go: beside the card audio rather than
 // inside it, so a lifecycle rule that tiers or deletes originals leaves the
@@ -177,6 +186,18 @@ func (s *local) DeleteAll(_ context.Context, prefix string) error {
 	for _, name := range names {
 		if err := os.RemoveAll(filepath.Join(s.dir, filepath.FromSlash(name))); err != nil {
 			return fmt.Errorf("storage: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *local) Delete(_ context.Context, name string) error {
+	if !fs.ValidPath(name) {
+		return fmt.Errorf("storage: invalid name %q", name)
+	}
+	for _, n := range []string{name, name + infoSuffix} {
+		if err := os.Remove(filepath.Join(s.dir, filepath.FromSlash(n))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("storage: deleting %s: %w", n, err)
 		}
 	}
 	return nil
@@ -370,6 +391,22 @@ func (s *azure) DeleteAll(ctx context.Context, prefix string) error {
 					return fmt.Errorf("storage: deleting %s: %w", *item.Name, err)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// Delete removes the blob and the .info blob tusd keeps beside it. A blob that
+// isn't there is not an error: the retention sweep marks the document after the
+// blob is gone, so a sweep interrupted between the two runs again over a name
+// that is already deleted.
+func (s *azure) Delete(ctx context.Context, name string) error {
+	for _, n := range []string{name, name + infoSuffix} {
+		_, err := s.container.NewBlobClient(n).Delete(ctx, &blob.DeleteOptions{
+			DeleteSnapshots: to.Ptr(blob.DeleteSnapshotsOptionTypeInclude),
+		})
+		if err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
+			return fmt.Errorf("storage: deleting %s: %w", n, err)
 		}
 	}
 	return nil

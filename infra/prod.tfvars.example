@@ -22,6 +22,14 @@ bootstrap_admin = "Your Name <you@eastsideaudubon.org>"
 # cpu    = 1.0
 # memory = "2Gi"
 
+# How long a card's original recordings are kept after the card is received,
+# and when the storage lifecycle rule sweeps whatever is left under
+# audio/uploads/. The first is the policy and most of the storage bill; the
+# second is only a net for abandoned uploads (DEPLOYMENT.md, Audio retention).
+# Detections and their clips are never removed by either.
+# audio_retention_days = 30
+# audio_backstop_days  = 180
+
 # --- Sign-in (DEPLOYMENT.md, "Sign-in") ---
 
 # The Entra ID app registration volunteers sign in through: its Application

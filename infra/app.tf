@@ -113,6 +113,13 @@ resource "azurerm_container_app" "this" {
         name  = "BIRDSENSE_BLOB_CONTAINER"
         value = azurerm_storage_container.audio.name
       }
+      # How long a card's original recordings are kept once BirdNET has
+      # finished with them. The app does the deleting (internal/retention);
+      # the lifecycle rule in storage.tf is only a backstop.
+      env {
+        name  = "BIRDSENSE_AUDIO_RETENTION_DAYS"
+        value = tostring(var.audio_retention_days)
+      }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
       env {

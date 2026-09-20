@@ -128,7 +128,8 @@ reading or writing documents. The app needs no control-plane role at all.
 
 ### 7. Storage account — `azurerm_storage_account`
 
-Holds the audio. At ~128 GB per card, this is where the money goes (see *Cost*).
+Holds the audio. At ~128 GB per card this is where the money goes, which is why
+originals are kept for only a month (see *Audio retention* and *Cost*).
 
 | Setting | Value | Why |
 |---------|-------|-----|
@@ -149,15 +150,20 @@ Holds the audio. At ~128 GB per card, this is where the money goes (see *Cost*).
 startup and carries on if it exists; Terraform should still own it.
 
 **Lifecycle** — `azurerm_storage_management_policy`, one rule on prefix
-`audio/uploads/`. It deliberately leaves `audio/clips/` in the hot tier, since
-reviewers play clips on demand. The day counts are placeholders until the retention question
-below is answered:
+`audio/uploads/`. It deliberately never names `audio/clips/`, which stays hot:
+clips are what retention keeps for good, and reviewers play them on demand.
 
-| Action | After |
-|--------|-------|
-| tier to cool | 30 days since last modification |
-| tier to archive | 180 days |
-| delete | *unset*: retention not decided |
+The rule is **not** the retention policy. The app deletes originals itself
+(*Audio retention* below), because only it knows whether BirdNET has finished
+with a file and it has to mark the document either way. This rule is the net
+underneath: it sweeps what the app never recorded — uploads abandoned part way,
+and anything a failed delete left behind:
+
+| Action | After | Why |
+|--------|-------|-----|
+| tier to cool | 30 days since last modification | For the stragglers the app doesn't manage. By then a managed blob is usually deleted anyway, and a straggler always outlives cool's 30-day early-deletion charge. |
+| delete | `audio_backstop_days`, 180 by default | Far enough out that it is never what removes a card normally. A card the app is deliberately holding — one whose analysis never finished — does lose its audio here, so don't tighten it towards the retention window. |
+| tier to archive | *unset* | An archived blob can't be read without a rehydrate, and `internal/analysis` reads originals straight out of the container. |
 
 ### 8. Storage data-plane role — `azurerm_role_assignment`
 
@@ -223,6 +229,7 @@ environment forwards here.
 | `BIRDSENSE_BLOB_CONTAINER` | `audio` | The default. Set explicitly. |
 | `AZURE_CLIENT_ID` | `azurerm_user_assigned_identity.this.client_id` | Tells the SDK *which* managed identity to use. Required for a user-assigned identity. |
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
+| `BIRDSENSE_AUDIO_RETENTION_DAYS` | `var.audio_retention_days`, default `30` | How long a card's original recordings are kept once BirdNET has finished with them; `0` keeps them for good. Detections and their clips are never removed by it. See [Audio retention](#audio-retention). |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
@@ -406,8 +413,45 @@ What it needs, beyond resources 7 and 8:
   be CPU-bound. Watch the replica's CPU during the first real card, and raise
   cpu/memory if it sits at the limit.
 - **Leftovers.** An upload that never finishes leaves uncommitted blocks, which
-  Azure discards after 7 days, and a `.info` blob, which stays. Finished uploads
-  keep their `.info` blob too. Nothing sweeps these yet; see *Open questions*.
+  Azure discards after 7 days, and a `.info` blob, which stays. A finished
+  file's `.info` blob goes when the file does, under retention or with the card;
+  an abandoned one has no document naming it, so only the lifecycle rule's
+  delete action sweeps it. See *Open questions*.
+
+## Audio retention
+
+**A card's original recordings are kept for a month; its detections and their
+clips are kept for good.** At ~128 GB a card, keeping originals is most of the
+storage bill, and nothing reads one once BirdNET has: `internal/analysis` is
+the only reader of `audio/uploads/`, and the only audio a browser ever plays is
+a clip.
+
+The app does the deleting, in `backend/internal/retention`, running in the
+server process beside the analysis queue. It sweeps every few hours, and only
+touches files BirdNET has finished with on cards it has finished with — a card
+still being analyzed keeps its audio however old it is. It deletes the blob and
+its `.info`, then marks the `audioFiles` document (`audioDeletedAt`, and
+`blobName` cleared) and the card. Nothing under `audio/clips/` is ever named.
+The rules and the failure ordering are in SCHEMA.md, *Audio retention*.
+
+| Setting | Where | Default | What it does |
+|---------|-------|---------|--------------|
+| `audio_retention_days` | `infra/variables.tf` → `BIRDSENSE_AUDIO_RETENTION_DAYS` | 30 | The policy. `0` keeps originals until someone deletes the card. |
+| `audio_backstop_days` | `infra/variables.tf` → the lifecycle rule | 180 | The net for what the app never recorded. Not the policy; see resource 7. |
+
+Why the app rather than the lifecycle rule alone: the rule is prod-only, so dev
+would behave differently; it can't tell an analyzed file from one still queued;
+and it would leave `blobName` claiming audio that has gone.
+
+Two things to know before this is switched on in production:
+
+- **A card can't be re-analyzed after its window.** A better model, or a lower
+  threshold, can only be run against cards still inside it. That is the real
+  cost of the policy, and it is what the backstop's generous default protects
+  a little of.
+- **Detections stored before clips were cut have no clip**, and nothing
+  backfills them (CLAUDE.md, *State of the code*). Once their originals go
+  they are clipless for good, so backfill first if any are in Cosmos.
 
 **First checks once we have Azure access:**
 
@@ -460,7 +504,8 @@ Rough order of magnitude at five recorders, one card each every two weeks
 
 | Item | Volume per year | Cost driver |
 |------|-----------------|-------------|
-| Audio in blob storage | 130 cards × ~128 GB ≈ **17 TB** | **The dominant cost.** Hot LRS storage is several hundred dollars a month by the end of a year; cool roughly halves that and archive cuts it by about an order of magnitude. Retention and tiering decide the bill. |
+| Audio in blob storage | ~2 cards held at a time ≈ **250 GB**, not 17 TB | Originals are deleted a month after a card is received (*Audio retention*), so this is flat rather than growing: about two cards' worth of hot LRS storage, tens of dollars a month. Without the policy it would be 130 cards × ~128 GB ≈ 17 TB by the end of a year, several hundred dollars a month. |
+| Clips in blob storage | 130 cards × a few MB per detection | Kept for good, and small enough to stay hot. Grows with the detection threshold, not with hours of audio. |
 | Cosmos DB, serverless | ~44k audio-file docs; detections depend on threshold (at 50 per file, ~2M docs, ~2 GB) | Low: a few dollars a year in request units, plus storage per GB-month. |
 | Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |
 | Container Registry Basic | one small image | A few dollars a month. |
@@ -475,8 +520,6 @@ can't be changed in place.
 
 ## Open questions that change this file
 
-- **Audio retention**: how long originals are kept, and in which tier. This
-  sets the lifecycle rule and most of the bill.
 - **Custom domain**: e.g. `birdsense.eastsideaudubon.org`, and who controls DNS.
 - **Secrets**: the client secret and session key are Container Apps secrets,
   which means they are in the Terraform state file. Key Vault with the app's
@@ -490,11 +533,11 @@ can't be changed in place.
   same identity-based roles, and a way to start it (a schedule, or an event when
   a card is received). The build downloads the models from Zenodo, so
   `az acr build` needs outbound network.
-- **Upload clean-up**: when to delete `.info` blobs and abandoned partial
-  uploads (a job after a card is processed, or a lifecycle rule once retention
-  is decided). A coordinator deleting a card already removes everything under
-  its `uploads/` and `clips/` prefixes; soft delete keeps those blobs for 7 days, but the card's Cosmos
-  documents are gone at once.
+- **Abandoned partial uploads**: a card registered and never sent leaves blocks
+  with no `audioFiles` document naming them, so neither retention nor a card
+  delete finds them, and only the lifecycle rule's delete action eventually
+  sweeps them. A job that cleans up after a card that has gone quiet would do
+  it sooner, and would be the place to reclaim the card's reference too.
 - **Email**: the upload flow promises "card received" and "results" emails,
   which needs Azure Communication Services or an external provider.
 
@@ -511,17 +554,17 @@ from this file to that one.
 | 4 | Cosmos database `birdsense` | `azurerm_cosmosdb_sql_database` | `cosmos.tf` |
 | 5 | Containers `users`, `recorders`, `uploads` (`/id`), `audioFiles`, `detections` (`/uploadId`) | `azurerm_cosmosdb_sql_container` (`for_each`) | `cosmos.tf` |
 | 6 | Cosmos Built-in Data Contributor → identity, database scope | `azurerm_cosmosdb_sql_role_assignment` | `cosmos.tf` |
-| 7 | Storage account (shared keys off) + `audio` container + lifecycle policy | `azurerm_storage_account`, `azurerm_storage_container`, `azurerm_storage_management_policy` | `storage.tf` |
+| 7 | Storage account (shared keys off) + `audio` container + lifecycle policy (the backstop, not the retention policy) | `azurerm_storage_account`, `azurerm_storage_container`, `azurerm_storage_management_policy` | `storage.tf` |
 | 8 | Storage Blob Data Contributor → identity, and → whoever runs Terraform | `azurerm_role_assignment` ×2 | `storage.tf` |
 | 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` | `registry.tf` |
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` | `app.tf` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
-| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN`, probes, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
+| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, probes, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
 
 **Variables** (`variables.tf`): `image_tag` and `bootstrap_admin` are required
 and have no default; `env`, `location`, `name_suffix`, `cpu`, `memory`,
-`log_retention_days` and `grant_operator_blob_access` have the defaults this
-file describes. A `staging` copy is a second tfvars file with `env = "staging"`.
+`log_retention_days`, `audio_retention_days`, `audio_backstop_days` and
+`grant_operator_blob_access` have the defaults this file describes. A `staging` copy is a second tfvars file with `env = "staging"`.
 
 **Outputs** (`outputs.tf`): `app_url` and `app_fqdn`, `acr_name` (which
 `scripts/deploy.ps1` reads) and `acr_login_server`, `cosmos_endpoint`,

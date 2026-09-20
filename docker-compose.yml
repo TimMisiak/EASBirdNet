@@ -18,6 +18,11 @@ services:
       # Storage -- see DEPLOYMENT.md.
       BIRDSENSE_STORAGE: "local"
       BIRDSENSE_STORAGE_DIR: "/app/audio"
+      # A card's original recordings are removed this long after the card is
+      # received, once BirdNET has finished with it; its detections and their
+      # clips are kept. 0 keeps the originals, which is what a demo container
+      # that is left running for months wants.
+      BIRDSENSE_AUDIO_RETENTION_DAYS: "30"
       # Dev mode signs in from the roster picker, so no identity provider is
       # needed. To try the real OpenID Connect flow here instead, fill these in
       # and register http://localhost:${HOST_PORT}/api/v1/auth/microsoft/callback

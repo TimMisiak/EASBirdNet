@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -46,6 +47,9 @@ type Options struct {
 	Auth *Authenticator
 	// SessionKey signs the session cookie. Changing it signs everyone out.
 	SessionKey string
+	// Retention is how long a card's originals are kept, so a card can say
+	// when its audio is due to go. The zero value keeps them for good.
+	Retention retention.Policy
 }
 
 // Register mounts the API routes on mux.
@@ -53,7 +57,7 @@ func Register(mux *http.ServeMux, o Options) {
 	register(mux, &handlers{
 		store: o.Store, files: o.Files, queue: o.Queue, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
-		now: time.Now,
+		retention: o.Retention, now: time.Now,
 	})
 }
 
@@ -141,6 +145,9 @@ type handlers struct {
 	keys *keyset
 	// secureCookies keeps cookies to HTTPS. Off in dev, which is http://localhost.
 	secureCookies bool
+	// retention is how long card originals are kept, for the dates a card
+	// reports. The sweep itself is internal/retention's.
+	retention retention.Policy
 	// now is the clock, so tests can pin "this year" and "the last 7 nights".
 	now func() time.Time
 }
@@ -360,7 +367,9 @@ func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.Upl
 		h.fail(w, r, err)
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"uploads": mapAll(uploads, uploadOf)})
+	h.json(w, http.StatusOK, map[string]any{"uploads": mapAll(uploads, func(u db.Upload) Upload {
+		return uploadOf(u, h.retention)
+	})})
 }
 
 // createUpload registers a card the volunteer is about to send, with the list
@@ -473,7 +482,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u), "files": cardFilesOf(stored)})
+		h.json(w, http.StatusCreated, map[string]any{"upload": uploadOf(u, h.retention), "files": cardFilesOf(stored)})
 	}
 }
 
@@ -634,7 +643,7 @@ func (h *handlers) getUpload(w http.ResponseWriter, r *http.Request, me db.User)
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "files": cardFilesOf(files)})
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u, h.retention), "files": cardFilesOf(files)})
 	}
 }
 
@@ -671,7 +680,7 @@ func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request, me db.
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u)})
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u, h.retention)})
 	}
 }
 
@@ -702,7 +711,7 @@ func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.Use
 				out = append(out, audioFileOf(f))
 			}
 		}
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "files": out})
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u, h.retention), "files": out})
 	}
 }
 
@@ -804,7 +813,7 @@ func (h *handlers) getDetection(w http.ResponseWriter, r *http.Request, _ db.Use
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u), "file": audioFileOf(f), "detection": detectionOf(d)})
+		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u, h.retention), "file": audioFileOf(f), "detection": detectionOf(d)})
 	}
 }
 

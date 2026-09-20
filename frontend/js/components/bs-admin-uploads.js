@@ -212,19 +212,22 @@ class AdminUploads extends BaseElement {
   }
 
   #confirmRow(upload) {
-    const files = upload.filesUploaded ?? 0;
-    const lost = [`${count(files)} audio ${files === 1 ? "file" : "files"}`];
+    // Retention may already have taken the recordings; the detections and
+    // their clips are only ever lost here, which is the part to spell out.
+    const files = upload.audioDeletedAt ? 0 : (upload.filesUploaded ?? 0);
+    const lost = [];
+    if (files) lost.push(`${count(files)} audio ${files === 1 ? "file" : "files"}`);
     if (upload.analysis) {
-      lost.push(`${count(upload.detectionCount)} ${upload.detectionCount === 1 ? "detection" : "detections"}`);
+      lost.push(`${count(upload.detectionCount)} ${upload.detectionCount === 1 ? "detection" : "detections"}`, "their clips");
     }
+    const goes = lost.length ? ` Its ${LIST.format(lost)} are deleted with it.` : "";
     const sending = isUnfinished(upload) ? " The volunteer's upload stops, and they would have to send the card again." : "";
     return `
       <tr class="sub">
         <td colspan="${COLUMNS}">
           <div class="confirm" role="alertdialog" aria-labelledby="confirm-text">
             <p id="confirm-text">
-              Delete <strong>${escapeHTML(upload.reference)}</strong> for good?
-              Its ${lost.join(" and ")} are deleted with it.${sending}
+              Delete <strong>${escapeHTML(upload.reference)}</strong> for good?${goes}${sending}
             </p>
             <span class="row">
               <button type="button" class="btn btn--tiny btn--danger-solid" data-action="confirmDelete"
@@ -239,6 +242,9 @@ class AdminUploads extends BaseElement {
 }
 
 const COLUMNS = 9;
+
+/** "a, b, and c" -- what a delete takes with it can be two or three things. */
+const LIST = new Intl.ListFormat("en-US", { style: "long", type: "conjunction" });
 
 const BIN = `
   <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"

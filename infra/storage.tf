@@ -60,15 +60,28 @@ resource "azurerm_role_assignment" "operator_blob" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-# One rule, on the originals only: reviewers play clips on demand, so
-# audio/clips/ stays hot. The day counts are placeholders until the retention
-# question in DEPLOYMENT.md is answered, and there is deliberately no delete
-# action -- nothing here throws audio away on its own.
+# One rule, on the originals only: reviewers play clips on demand, and a clip
+# is what the retention policy keeps for good, so audio/clips/ is not named
+# here at all and stays hot.
+#
+# The app is what deletes originals (backend/internal/retention, after
+# var.audio_retention_days), because only it knows whether BirdNET has
+# finished with a file and it has to mark the document either way. This rule
+# is the net underneath that: it sweeps what the app never records -- uploads
+# abandoned part way, and anything a failed delete left behind -- and it is set
+# far enough out (var.audio_backstop_days) that it is never what removes a card
+# in the normal course of things.
+#
+# No tier_to_archive: an archived blob can't be read without a rehydrate, and
+# internal/analysis reads originals straight out of the container. Cool is
+# fine, and by var.audio_retention_days the app has usually deleted the blob
+# anyway; what this tiers is the stragglers the rule below eventually deletes,
+# which are always older than cool's 30-day early-deletion charge.
 resource "azurerm_storage_management_policy" "this" {
   storage_account_id = azurerm_storage_account.this.id
 
   rule {
-    name    = "audio-originals-tiering"
+    name    = "audio-originals"
     enabled = true
 
     filters {
@@ -78,8 +91,8 @@ resource "azurerm_storage_management_policy" "this" {
 
     actions {
       base_blob {
-        tier_to_cool_after_days_since_modification_greater_than    = 30
-        tier_to_archive_after_days_since_modification_greater_than = 180
+        tier_to_cool_after_days_since_modification_greater_than = 30
+        delete_after_days_since_modification_greater_than       = var.audio_backstop_days
       }
     }
   }

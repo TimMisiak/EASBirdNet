@@ -2,7 +2,7 @@
 // when a coordinator needs to know why, a short detail; the wording and the
 // chip colour are a presentation decision and live here.
 
-import { count } from "./format.js";
+import { count, longDate } from "./format.js";
 
 const LABELS = {
   in_progress: "In progress",
@@ -67,6 +67,25 @@ export function fileChip(file, upload) {
     default:
       return { kind: "neutral", label: file.status };
   }
+}
+
+/**
+ * What has become of a card's original recordings. They are kept for a month
+ * after the card is received and then removed; the detections BirdNET found in
+ * them, and the clips of those, are kept for good. Nothing plays an original,
+ * so this is a coordinator's record of what is still there to re-analyze.
+ *
+ * Retention off on the server sends neither date, and the card says nothing.
+ * @returns {string} a sentence, or "" when there is nothing to say.
+ */
+export function audioNote(upload) {
+  if (upload.audioDeletedAt) {
+    return `Original recordings removed ${longDate(upload.audioDeletedAt)}. Detections and their clips are kept.`;
+  }
+  if (upload.audioExpiresAt) {
+    return `Original recordings kept until ${longDate(upload.audioExpiresAt)}. Detections and their clips are kept.`;
+  }
+  return "";
 }
 
 /** True when the volunteer still has work to do on this card. */

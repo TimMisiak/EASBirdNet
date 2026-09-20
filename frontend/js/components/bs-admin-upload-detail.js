@@ -1,7 +1,7 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
 import { byteSize, clock, count, dateAtTime, longDate, percent, shortDate } from "../format.js";
-import { analyzedSoFar, fileChip, isMoving, reviewChip, statusChip } from "../upload-status.js";
+import { analyzedSoFar, audioNote, fileChip, isMoving, reviewChip, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
 import "./bs-chip.js";
 import "./bs-progress-bar.js";
@@ -144,7 +144,8 @@ class AdminUploadDetail extends BaseElement {
         .stat dt { font-family: var(--bs-font-mono); font-size: 0.65625rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--bs-text-muted); }
         .stat dd { margin: var(--bs-space-1) 0 0; font-family: var(--bs-font-display); font-size: 1.625rem; }
         .stat dd small { font-family: var(--bs-font-body, inherit); font-size: 0.8125rem; color: var(--bs-text-muted); }
-        .settings { font-size: 0.8125rem; color: var(--bs-text-muted); margin: var(--bs-space-3) 0 var(--bs-space-6); }
+        .settings { font-size: 0.8125rem; color: var(--bs-text-muted); margin: var(--bs-space-3) 0 var(--bs-space-2); }
+        .retention { font-size: 0.8125rem; color: var(--bs-text-muted); margin: 0 0 var(--bs-space-6); }
 
         .filters { display: flex; align-items: center; gap: var(--bs-space-2); margin-bottom: var(--bs-space-4); flex-wrap: wrap; }
         .filter {
@@ -176,6 +177,9 @@ class AdminUploadDetail extends BaseElement {
           width: 1.25rem;
         }
         .why { display: block; margin-top: var(--bs-space-1); font-size: 0.78125rem; color: var(--bs-chip-attention-text); }
+        /* Audio expiring is the policy working, not a problem: muted, not the
+           attention colour .why uses. */
+        .gone { display: block; margin-top: var(--bs-space-1); font-size: 0.78125rem; color: var(--bs-text-muted); }
         .nowrap { white-space: nowrap; }
 
         tr.heard { border-top: 0; background: var(--bs-surface-sunk); }
@@ -231,6 +235,7 @@ class AdminUploadDetail extends BaseElement {
           : `<bs-progress-bar value="${percent(upload.filesUploaded, upload.fileCount)}" label="Files received"></bs-progress-bar>`
       }
       <p class="settings">${this.#settings(upload)}</p>
+      ${audioNote(upload) ? `<p class="retention">${escapeHTML(audioNote(upload))}</p>` : ""}
 
       <div class="filters" role="group" aria-label="Show files">
         ${FILTERS.map((f) => {
@@ -297,6 +302,7 @@ class AdminUploadDetail extends BaseElement {
         <td>
           <bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip>
           ${file.status === "failed" && file.statusDetail ? `<span class="why">${escapeHTML(file.statusDetail)}</span>` : ""}
+          ${file.audioDeletedAt ? `<span class="gone">recording removed ${escapeHTML(shortDate(file.audioDeletedAt))}</span>` : ""}
         </td>
         <td class="num">${file.status === "analyzed" ? count(file.detectionCount) : "—"}</td>
       </tr>

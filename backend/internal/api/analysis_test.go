@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -64,6 +65,73 @@ func TestTheLastFileQueuesTheCardForAnalysis(t *testing.T) {
 	s.send(jane, ref, reg.Files[1].Path, audio(2), 100)
 	if told := queue.told(); len(told) != 1 || told[0] != ref {
 		t.Errorf("queue was told %v, want [%s]", told, ref)
+	}
+}
+
+// TestAdminCardPageShowsAudioRetention: a coordinator can see when a card's
+// originals go, and which of its files have already lost theirs. The
+// detections and clips those files produced are untouched, so the card page
+// still shows what was heard in a file whose recording has gone.
+func TestAdminCardPageShowsAudioRetention(t *testing.T) {
+	store := newTestStore(t)
+	mux := http.NewServeMux()
+	register(mux, &handlers{
+		store: store, files: testFiles(t), log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		keys: newKeyset(testSessionKey), retention: retention.Policy{Window: 30 * 24 * time.Hour},
+		now: func() time.Time { return testNow },
+	})
+	ctx := t.Context()
+	ref := "OWL-20260913-SR05"
+	received, gone := testNow.Add(-40*24*time.Hour), testNow.Add(-10*24*time.Hour)
+	if _, err := store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+		u.Status, u.ReceivedAt = db.StatusInReview, &received
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAudioFiles(ctx, ref, []db.AudioFile{
+		{Path: "DATA/kept.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, BlobName: "uploads/" + ref + "/kept"},
+		{Path: "DATA/gone.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, AudioDeletedAt: &gone},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	rec := do(t, mux, http.MethodGet, "/api/v1/admin/uploads/"+ref, "", admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET card = %d (%s)", rec.Code, rec.Body)
+	}
+	body := decodeInto[cardFilesBody](t, rec)
+	// The card's audio hasn't all gone, so it still has a date to come.
+	if at := body.Upload.AudioExpiresAt; at == nil || !at.Equal(received.Add(30*24*time.Hour)) {
+		t.Errorf("audioExpiresAt = %v, want %v", at, received.Add(30*24*time.Hour))
+	}
+	if body.Upload.AudioDeletedAt != nil {
+		t.Errorf("audioDeletedAt = %v, want nil while a recording is still stored", body.Upload.AudioDeletedAt)
+	}
+	for _, f := range body.Files {
+		switch f.Path {
+		case "DATA/kept.wav":
+			if f.AudioDeletedAt != nil {
+				t.Errorf("%s: audioDeletedAt = %v, want nil", f.Path, f.AudioDeletedAt)
+			}
+		case "DATA/gone.wav":
+			if f.AudioDeletedAt == nil || !f.AudioDeletedAt.Equal(gone) {
+				t.Errorf("%s: audioDeletedAt = %v, want %v", f.Path, f.AudioDeletedAt, gone)
+			}
+			if f.Status != db.AudioAnalyzed {
+				t.Errorf("%s: status = %q, want it still analyzed", f.Path, f.Status)
+			}
+		default:
+			t.Errorf("unexpected file %q", f.Path)
+		}
+	}
+
+	// With retention off, a card says nothing about when its audio goes.
+	plain, _ := newTestMux(t)
+	rec = do(t, plain, http.MethodGet, "/api/v1/admin/uploads/"+ref, "", signedIn(t, plain, db.RoleAdmin))
+	if at := decodeInto[cardFilesBody](t, rec).Upload.AudioExpiresAt; at != nil {
+		t.Errorf("audioExpiresAt with retention off = %v, want nil", at)
 	}
 }
 

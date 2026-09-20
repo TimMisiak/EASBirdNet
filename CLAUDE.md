@@ -19,6 +19,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── devseed/    Placeholder program written into an empty dev database
+│       ├── retention/  Deletes a card's originals a month on; clips are kept
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
@@ -304,6 +305,29 @@ enough, not before.
 DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
 the job's image, and `Queue.Run` is what the job runs.
 
+**Originals expire; clips don't.** A card is ~128 GB of audio against a few
+megabytes of clips, and nothing reads an original once BirdNET has:
+`internal/analysis` is the only reader of `uploads/`, and the only audio a
+browser ever plays is a clip. So `internal/retention` sweeps every few hours in
+the server process and deletes a card's recordings a month after it was
+received, while its detections and their clips are kept until someone deletes
+the card. `BIRDSENSE_AUDIO_RETENTION_DAYS` sets the window; `0` keeps
+everything. The sweep only looks at cards BirdNET has finished with
+(`in_review`, `needs_attention`, `results_sent`) and, on them, only at files in
+`analyzed` or `failed` status: a card stuck in `processing` keeps its audio
+however old it is, so the policy can't take a recording the queue is still
+waiting to read. The blob goes before the document is marked, because a sweep
+interrupted in between leaves something the next sweep finishes, whereas the
+other order leaks a blob nothing names. Doing it in Go rather than with an
+Azure lifecycle rule keeps dev and prod the same, lets the rule see whether a
+file has been analyzed, and keeps `blobName` honest; the lifecycle rule stays
+as a backstop for abandoned partial uploads, which have no document at all.
+The cost of the policy is that a card can't be re-analyzed once its window
+passes -- a better model, or a lower threshold, only ever runs against cards
+still inside it.
+*Revisit when:* a card has to be held past its window (a hold flag on the
+upload, which the sweep would skip), or re-analysis matters more than the bill.
+
 **Spectrograms are drawn in the browser.** `<bs-spectrogram>` fetches a
 detection's clip once, plays it from a blob URL, decodes it with Web Audio and
 runs its own FFT onto a canvas, in the paper and ink tokens. The clip is the
@@ -359,6 +383,9 @@ to re-seed. Without
 `BIRDSENSE_COSMOS_DATABASE`) and Blob Storage (`BIRDSENSE_BLOB_ENDPOINT`,
 `BIRDSENSE_BLOB_CONTAINER`), and exits if they aren't configured.
 `BIRDSENSE_STORAGE=local|azure` overrides where audio goes either way.
+`BIRDSENSE_AUDIO_RETENTION_DAYS` (default 30) is how long a card's original
+recordings are kept; set it to `0` in dev if you want a test card's audio to
+stay put for good.
 Sign-in needs `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` and `_CLIENT_SECRET` (and
 `_TENANT`, default `common`; `BIRDSENSE_OIDC_GOOGLE_*` the same way),
 `BIRDSENSE_PUBLIC_URL` -- where a browser reaches the app, which the redirect
@@ -437,7 +464,8 @@ JSON-file backend and its tests still define the behaviour Cosmos must match.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
 and the analysis queue runs BirdNET over it in the server process, writing
 `unreviewed` detections, each with a clip. The coordinator's card page
-(`/admin/uploads/{ref}`) shows each file's status and what was heard in it, and
+(`/admin/uploads/{ref}`) shows each file's status, when its recording is due to
+be removed or was, and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/admin/detections`, and `/app/detections` on a
 volunteer's page) lists every card's detections,
@@ -448,4 +476,6 @@ holding the card upload's four steps; My uploads, their own cards, where an
 unfinished one is resumed; and Detections. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged; nothing backfills them.
-Nothing cleans up abandoned partial uploads, short of deleting their card.
+Nothing cleans up abandoned partial uploads, short of deleting their card or
+the storage lifecycle rule getting to them: they have no `audioFiles` document,
+so retention never sees them.

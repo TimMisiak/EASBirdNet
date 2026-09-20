@@ -51,7 +51,9 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
 - **Ids are immutable**, and so is `uploadId` on the two child containers. An
   update cannot change them.
 - **Only cards are hard-deleted**, by a coordinator, and a card takes its
-  `audioFiles`, `detections`, stored audio and clips with it. People leave the roster
+  `audioFiles`, `detections`, stored audio and clips with it. A card's stored
+  *audio* also goes on its own, a month after the card is received, and its
+  documents stay (see [Audio retention](#audio-retention)). People leave the roster
   via `removedAt` and recorders leave the field via `retiredAt`, because cards
   point at both.
 
@@ -149,6 +151,7 @@ recorder `SW-02`, pulled 7 September 2026.
 | `receivedAt?`    | instant  | When the last file landed. |
 | `processedAt?`   | instant  | When BirdNET finished the card's last file. |
 | `resultsSentAt?` | instant  | When the results email went out. |
+| `audioDeletedAt?`| instant  | When the last of the card's original recordings was removed under [Audio retention](#audio-retention). Its detections and their clips stay. |
 | `createdAt`      | instant  | When the card was first registered. |
 | `updatedAt`      | instant  | |
 
@@ -240,6 +243,7 @@ interruption produces the same ids instead of duplicates.
 | `statusDetail?`  | string  | Why it failed, e.g. `checksum mismatch`. |
 | `uploadedAt?`    | instant | |
 | `analyzedAt?`    | instant | When BirdNET finished with it, or gave up on it. |
+| `audioDeletedAt?`| instant | When the recording itself was removed under [Audio retention](#audio-retention). `blobName` is cleared with it; `status` is unchanged, because it still says what BirdNET made of the file. |
 | `detectionCount` | integer | Detections stored for this file (above threshold). |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
@@ -452,9 +456,51 @@ with its size and the metadata the server set (`reference`, `path`,
 `audioFileId`, `userId`). In Azure a file is a block blob whose block list is
 committed when the last byte lands, so the blob only appears once it is whole;
 until then the blocks are uncommitted, and Azure discards them after 7 days. A
-local file grows in place. Nothing deletes `.info` records, or what's left of
-uploads that never finished, until the card is deleted, which removes
-everything under its prefix, and under its `clips/` prefix too.
+local file grows in place. A file's `.info` record goes when the file does:
+with the recording under [Audio retention](#audio-retention), or with the whole
+card when a coordinator deletes it, which removes everything under its prefix
+and under its `clips/` prefix too. What is left of an upload that never
+finished is swept by neither, because no `audioFiles` document ever named it;
+in Azure the storage lifecycle rule eventually deletes it (DEPLOYMENT.md).
+
+## Audio retention
+
+A card's **original recordings are kept for a month** after the card is
+received, and its **detections and their clips are kept for good**. A card is
+~128 GB of audio against a few megabytes of clips, and nothing reads an
+original once BirdNET has: `internal/analysis` is the only reader of
+`uploads/`, and the only audio a browser ever plays is a clip.
+
+`internal/retention` sweeps every few hours. It looks only at cards in
+`in_review`, `needs_attention` or `results_sent` -- statuses BirdNET is done
+with -- whose `receivedAt` is older than the window, and on them only at files
+in `analyzed` or `failed` status. For each it deletes the blob and the `.info`
+beside it, then clears `blobName` and sets `audioDeletedAt`; when nothing of
+the card is left in storage, the card gets `audioDeletedAt` too. Nothing under
+`clips/` is ever named.
+
+The blob goes first and the document is marked after. A sweep that stops in
+between leaves a document pointing at a blob that isn't there, which the next
+sweep marks and which `internal/analysis` already reads as *the audio isn't in
+storage*; marking first would leak the blob instead, with nothing left naming
+it.
+
+Two things are deliberately never swept:
+
+- **A card analysis hasn't finished with.** A card stuck in `processing`, or a
+  file still `uploaded` on a card that has moved on, keeps its audio however
+  old it is, and shows on the coordinator's card page as something to fix.
+- **Anything a reviewer can still play.** Clips are under their own prefix, and
+  only deleting the card removes them.
+
+`BIRDSENSE_AUDIO_RETENTION_DAYS` sets the window (default 30); `0` keeps
+originals until someone deletes the card. The Azure lifecycle rule is a
+backstop for abandoned partial uploads, not the policy -- see DEPLOYMENT.md.
+
+**Consequence worth knowing:** after the window a card cannot be re-analyzed. A
+new model, or a lower threshold, can only be run against cards still inside it.
+Detections stored before clips were cut have no clip and nothing backfills
+them, so those become permanently clipless when their originals go.
 
 ## API mapping
 
@@ -475,6 +521,8 @@ public summary), following these rules:
 | `upload.volunteerName` | `uploads.userName` |
 | `detection.review` | `{by, at}`: `review.userName` and `review.at`; absent while unreviewed |
 | `detection.clip` | `{startSec, endSec}` of `clip`; the blob name isn't sent |
+| `upload.audioDeletedAt`, `files[].audioDeletedAt` | the stored fields of the same name |
+| `upload.audioExpiresAt` | computed, not stored: `uploads.receivedAt` + the server's retention window. Left out once the audio has gone, while the card is still being analyzed, or when retention is off |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
 | `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `nights` = distinct `night`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
 | `program.recorders` | recorders with no `retiredAt` |
@@ -498,7 +546,7 @@ What the write routes do to documents:
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
 | `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/wav`, answering range requests. 404 for a detection with no clip. |
 | `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
-| `DELETE /admin/uploads/{ref}` | Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
+| `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |

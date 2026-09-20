@@ -65,6 +65,28 @@ variable "log_retention_days" {
   default     = 30
 }
 
+variable "audio_retention_days" {
+  description = "How long a card's original recordings are kept after the card is received. The app deletes them itself (backend/internal/retention), and only once BirdNET has finished with them, so a card still being analyzed keeps its audio however old it is. Detections and their clips are never deleted by this. 0 keeps originals until someone deletes the card."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.audio_retention_days >= 0 && floor(var.audio_retention_days) == var.audio_retention_days
+    error_message = "audio_retention_days must be a whole number of days, 0 to keep originals for good."
+  }
+}
+
+variable "audio_backstop_days" {
+  description = "When the storage lifecycle rule deletes anything left under audio/uploads/. This is a net, not the policy: it catches abandoned partial uploads and anything the app failed to delete, so it must stay comfortably longer than audio_retention_days. A card the app is deliberately holding on to (one whose analysis never finished) loses its audio here, so don't tighten it to the retention window."
+  type        = number
+  default     = 180
+
+  validation {
+    condition     = var.audio_backstop_days > 0 && floor(var.audio_backstop_days) == var.audio_backstop_days
+    error_message = "audio_backstop_days must be a whole number of days, and more than zero."
+  }
+}
+
 variable "grant_operator_blob_access" {
   description = "Give whoever runs Terraform Storage Blob Data Contributor on the storage account. Needed because shared keys are off and the provider creates the `audio` container over the data plane; set false if that role is granted some other way."
   type        = bool

@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
 )
@@ -93,6 +95,25 @@ func main() {
 		}()
 	}
 
+	// Audio retention: the originals of a card BirdNET has finished with go
+	// after their window, and its detections and clips stay. Unlike analysis
+	// this needs nothing but the store, so it runs whether or not BirdNET is
+	// there -- audio a queue-less server can't analyze is audio it must keep,
+	// which is exactly what the sweep's "settled cards only" rule does.
+	sweeper := retention.New(store, files, cfg.Retention, log)
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	retentionDone := make(chan struct{})
+	if cfg.Retention.On() {
+		log.Info("audio retention started", "days", int(cfg.Retention.Window/(24*time.Hour)))
+		go func() {
+			defer close(retentionDone)
+			sweeper.Run(retentionCtx)
+		}()
+	} else {
+		close(retentionDone)
+		log.Info("audio retention is off: card originals are kept until the card is deleted")
+	}
+
 	// Sign-in. Reaching the provider is a network call, so a provider that is
 	// unreachable now is retried when someone signs in rather than stopping
 	// the server -- the same call BirdNET's check makes above.
@@ -135,6 +156,9 @@ func main() {
 	// A BirdNET run in flight is killed; its file is queued again next start.
 	stopAnalysis()
 	<-analysisDone
+	// A sweep in flight stops between files; the next start finishes it.
+	stopRetention()
+	<-retentionDone
 	if err := store.Close(); err != nil {
 		log.Error("closing the database", "err", err)
 	}
@@ -151,7 +175,7 @@ func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, au
 	mux := http.NewServeMux()
 	api.Register(mux, api.Options{
 		Store: store, Files: files, Queue: queue, Log: log,
-		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey,
+		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
 	})
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
@@ -178,6 +202,10 @@ type config struct {
 	// SessionKey signs the session cookie. Outside dev mode it is required, so
 	// a restart or a new revision doesn't sign everyone out.
 	SessionKey string
+	// Retention is how long a card's original recordings are kept once BirdNET
+	// has finished with them. Detections and their clips are kept for good
+	// either way.
+	Retention retention.Policy
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -234,6 +262,19 @@ func configFromEnv() (config, error) {
 	default:
 		return cfg, fmt.Errorf("BIRDSENSE_STORAGE must be %q or %q, not %q", storage.BackendLocal, storage.BackendAzure, cfg.Storage.Backend)
 	}
+
+	// Audio retention. Days rather than a duration, because that is how the
+	// policy is written down (DEPLOYMENT.md) and how a coordinator reads it.
+	// 0 keeps the originals until someone deletes the card.
+	days := 30
+	if v := strings.TrimSpace(os.Getenv("BIRDSENSE_AUDIO_RETENTION_DAYS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return cfg, fmt.Errorf("BIRDSENSE_AUDIO_RETENTION_DAYS must be a whole number of days, 0 to keep originals for good, not %q", v)
+		}
+		days = n
+	}
+	cfg.Retention = retention.Policy{Window: time.Duration(days) * 24 * time.Hour}
 
 	if err := readAuth(&cfg); err != nil {
 		return cfg, err

@@ -6,6 +6,7 @@ import (
 	_ "time/tzdata" // the runtime image has no zoneinfo; see pacific
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 )
 
 // These are the API's JSON shapes -- what the frontend is built against. They
@@ -85,6 +86,12 @@ type Upload struct {
 	StartedAt      time.Time  `json:"startedAt"`
 	ReceivedAt     *time.Time `json:"receivedAt,omitempty"`
 	ProcessedAt    *time.Time `json:"processedAt,omitempty"`
+	// AudioExpiresAt is when the card's original recordings are due to be
+	// removed, and AudioDeletedAt when they were. Only one of them is ever
+	// set, and neither is when retention is off. The card's detections and
+	// their clips are kept either way.
+	AudioExpiresAt *time.Time `json:"audioExpiresAt,omitempty"`
+	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
@@ -99,15 +106,19 @@ type Analysis struct {
 // AudioFile is one file on a card as a coordinator sees it: where it is in
 // being sent and analyzed.
 type AudioFile struct {
-	ID             string     `json:"id"`
-	Path           string     `json:"path"`
-	Night          string     `json:"night"` // YYYY-MM-DD
-	Bytes          int64      `json:"bytes"`
-	Status         string     `json:"status"` // db.AudioPending, db.AudioUploaded, db.AudioAnalyzing, ...
-	StatusDetail   string     `json:"statusDetail,omitempty"`
-	RecordedAt     *time.Time `json:"recordedAt,omitempty"`
-	UploadedAt     *time.Time `json:"uploadedAt,omitempty"`
-	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
+	ID           string     `json:"id"`
+	Path         string     `json:"path"`
+	Night        string     `json:"night"` // YYYY-MM-DD
+	Bytes        int64      `json:"bytes"`
+	Status       string     `json:"status"` // db.AudioPending, db.AudioUploaded, db.AudioAnalyzing, ...
+	StatusDetail string     `json:"statusDetail,omitempty"`
+	RecordedAt   *time.Time `json:"recordedAt,omitempty"`
+	UploadedAt   *time.Time `json:"uploadedAt,omitempty"`
+	AnalyzedAt   *time.Time `json:"analyzedAt,omitempty"`
+	// AudioDeletedAt is when the recording itself was removed under the
+	// retention policy. Status still says what BirdNET made of it, and its
+	// detections and their clips are still there.
+	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
 }
 
@@ -202,8 +213,9 @@ func personOf(u db.User) Person {
 }
 
 // uploadOf shows a card as it was registered: the station name and volunteer
-// name are the copies taken then, not the recorder's or person's today.
-func uploadOf(u db.Upload) Upload {
+// name are the copies taken then, not the recorder's or person's today. The
+// retention policy is the server's, not the card's, so it is passed in.
+func uploadOf(u db.Upload, keep retention.Policy) Upload {
 	nights := make([]Night, len(u.Nights))
 	for i, n := range u.Nights {
 		nights[i] = Night(n)
@@ -215,7 +227,8 @@ func uploadOf(u db.Upload) Upload {
 		TotalBytes: u.TotalBytes, BytesUploaded: u.BytesUploaded,
 		FilesAnalyzed: u.FilesAnalyzed, FilesFailed: u.FilesFailed, DetectionCount: u.DetectionCount,
 		Status: u.Status, StatusDetail: u.StatusDetail, Analysis: analysisOf(u.Analysis),
-		StartedAt: u.StartedAt, ReceivedAt: u.ReceivedAt, ProcessedAt: u.ProcessedAt, UpdatedAt: u.UpdatedAt,
+		StartedAt: u.StartedAt, ReceivedAt: u.ReceivedAt, ProcessedAt: u.ProcessedAt,
+		AudioExpiresAt: keep.ExpiresAt(u), AudioDeletedAt: u.AudioDeletedAt, UpdatedAt: u.UpdatedAt,
 	}
 }
 
@@ -231,7 +244,7 @@ func audioFileOf(f db.AudioFile) AudioFile {
 		ID: f.ID, Path: f.Path, Night: f.Night, Bytes: f.SizeBytes,
 		Status: f.Status, StatusDetail: f.StatusDetail,
 		RecordedAt: f.RecordedAt, UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
-		DetectionCount: f.DetectionCount,
+		AudioDeletedAt: f.AudioDeletedAt, DetectionCount: f.DetectionCount,
 	}
 }
 

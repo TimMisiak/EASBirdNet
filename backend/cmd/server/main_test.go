@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
@@ -196,6 +197,33 @@ func TestConfigFromEnvStorage(t *testing.T) {
 	t.Setenv("BIRDSENSE_STORAGE", "s3")
 	if _, err := configFromEnv(); err == nil {
 		t.Error("an unknown BIRDSENSE_STORAGE was accepted")
+	}
+}
+
+// Audio retention is a whole number of days, 30 unless it is set, and 0 turns
+// it off. Anything else is a startup error rather than a silent default,
+// because getting it wrong throws recordings away.
+func TestConfigFromEnvRetention(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	t.Setenv("BIRDSENSE_AUDIO_RETENTION_DAYS", "")
+	cfg, err := configFromEnv()
+	if err != nil || cfg.Retention.Window != 30*24*time.Hour {
+		t.Errorf("default retention = %v, %v; want 30 days", cfg.Retention.Window, err)
+	}
+	t.Setenv("BIRDSENSE_AUDIO_RETENTION_DAYS", "7")
+	if cfg, err := configFromEnv(); err != nil || cfg.Retention.Window != 7*24*time.Hour {
+		t.Errorf("retention = %v, %v; want 7 days", cfg.Retention.Window, err)
+	}
+	t.Setenv("BIRDSENSE_AUDIO_RETENTION_DAYS", "0")
+	if cfg, err := configFromEnv(); err != nil || cfg.Retention.On() {
+		t.Errorf("retention of 0 days = %v, %v; want it off", cfg.Retention.Window, err)
+	}
+	for _, bad := range []string{"-1", "a month", "30d", "0.5"} {
+		t.Setenv("BIRDSENSE_AUDIO_RETENTION_DAYS", bad)
+		if _, err := configFromEnv(); err == nil {
+			t.Errorf("BIRDSENSE_AUDIO_RETENTION_DAYS=%q was accepted", bad)
+		}
 	}
 }
 
