@@ -244,7 +244,10 @@ export const tabs = sheet(`
   .tabs {
     display: flex;
     gap: var(--bs-space-1);
-    border-bottom: 1px solid var(--bs-border);
+    /* The baseline is an inset shadow, not a border: a tab's own underline sits
+       on top of it without a negative margin, so nothing overflows the box and
+       overflow-x below can't earn a vertical scrollbar for a stray pixel. */
+    box-shadow: inset 0 -1px 0 var(--bs-border);
     margin-bottom: 2.125rem;
     overflow-x: auto;
   }
@@ -252,7 +255,6 @@ export const tabs = sheet(`
     border-bottom: 2px solid transparent;
     color: var(--bs-text-muted);
     padding: 0.625rem var(--bs-space-4);
-    margin-bottom: -1px;
     font-size: 0.90625rem;
     text-decoration: none;
     white-space: nowrap;
