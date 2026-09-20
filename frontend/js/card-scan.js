@@ -19,10 +19,21 @@ export class CancelledError extends Error {
  * Ask for the card and read its manifest. Each of `files` is
  * {path, bytes, night, file}: the path from the card's root with forward
  * slashes, and the File to send.
+ *
+ * `onWorking` is called when the scan starts on work that finishes: at once
+ * where the picker reports a cancellation, and only once the files are in
+ * where it doesn't (see `viaInput`). A caller that holds its screen while the
+ * card is read holds it from there, so a picker that never answers leaves the
+ * page as it was rather than stuck.
  * @returns {Promise<{label: string, nights: object[], files: object[], fileCount: number, totalBytes: number, skipped: string[]}>}
  */
-export async function scanCard() {
-  const found = window.showDirectoryPicker ? await viaDirectoryPicker() : await viaInput();
+export async function scanCard({ onWorking } = {}) {
+  if (window.showDirectoryPicker) {
+    onWorking?.();
+    return manifest(await viaDirectoryPicker());
+  }
+  const found = await viaInput();
+  onWorking?.();
   return manifest(found);
 }
 
@@ -53,11 +64,23 @@ async function walk(dir, out, prefix = "", depth = 0) {
   }
 }
 
+/** The input the volunteer is answering, if any: one card is chosen at a time. */
+let pending = null;
+
 // The fallback path: <input webkitdirectory>, which every current browser
 // supports. It reads the whole folder into File objects up front. This is the
 // path every Firefox and Safari volunteer takes, so closing the picker has to
 // settle the promise: "change" for a folder, "cancel" for a closed picker.
+//
+// Firefox asks a second question after the folder picker -- "Are you sure you
+// want to upload all files from X?" -- and when the answer is no it tells the
+// page nothing at all: no "change", no "cancel", and the prompt is tab-modal,
+// so the window never loses focus either. There is no signal to turn that into
+// a cancellation, so such a scan stays pending for good. What keeps the page
+// usable is that nothing waits on it (see `scanCard`) and that choosing the
+// card again abandons it.
 function viaInput() {
+  pending?.();
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
     input.type = "file";
@@ -72,9 +95,12 @@ function viaInput() {
     const settle = (finish) => () => {
       if (settled) return;
       settled = true;
+      pending = null;
       input.remove();
       finish();
     };
+    const giveUp = settle(() => reject(new CancelledError()));
+    pending = giveUp;
 
     input.addEventListener(
       "change",
@@ -94,7 +120,7 @@ function viaInput() {
     // <input type=file> has fired "cancel" since Firefox 91 and Safari 16.4.
     // Somewhere older leaves the promise pending, which is what it did here
     // for every browser before this handler existed.
-    input.addEventListener("cancel", settle(() => reject(new CancelledError())));
+    input.addEventListener("cancel", giveUp);
     input.click();
   });
 }

@@ -90,20 +90,27 @@ class UploadDetails extends BaseElement {
   }
 
   #choose() {
-    return this.#work(async () => {
-      const card = await scanCard();
-      if (!card.fileCount) {
-        throw new Error("No audio files on that card — is it the right folder?");
-      }
-      if (flow.resumingCard()) {
-        const missing = await flow.storedFilesMissingFrom(card);
-        if (missing.length) {
-          this.#mismatch = { card, missing };
-          return;
+    // The button is held from the moment the card has been chosen, not from
+    // the moment the picker opens: a folder picker doesn't always come back
+    // (see card-scan.js), and a button stuck on "Reading the card…" is worse
+    // than one that can be pressed again.
+    return this.#work(
+      async (hold) => {
+        const card = await scanCard({ onWorking: hold });
+        if (!card.fileCount) {
+          throw new Error("No audio files on that card — is it the right folder?");
         }
-      }
-      await this.#register(card);
-    });
+        if (flow.resumingCard()) {
+          const missing = await flow.storedFilesMissingFrom(card);
+          if (missing.length) {
+            this.#mismatch = { card, missing };
+            return;
+          }
+        }
+        await this.#register(card);
+      },
+      { holdNow: false },
+    );
   }
 
   async #register(card) {
@@ -111,15 +118,23 @@ class UploadDetails extends BaseElement {
     navigate(flow.get().status === "done" ? "/app/upload/done" : "/app/upload/check");
   }
 
-  /** Run a step with the button held down, and show what went wrong, if anything. */
-  async #work(step) {
+  /**
+   * Run a step with the button held down, and show what went wrong, if
+   * anything. The button goes down at once, unless the step says otherwise, in
+   * which case it is handed the `hold` that puts it down.
+   */
+  async #work(step, { holdNow = true } = {}) {
     if (this.#busy) return;
-    this.#busy = true;
+    const hold = () => {
+      this.#busy = true;
+      this.render();
+    };
     this.#error = null;
     this.#mismatch = null;
-    this.render();
+    if (holdNow) hold();
+    else this.render();
     try {
-      await step();
+      await step(hold);
     } catch (error) {
       // Closing the picker isn't a failure; it's a change of mind.
       this.#error = error instanceof CancelledError ? null : error;
