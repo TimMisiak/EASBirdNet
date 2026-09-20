@@ -345,12 +345,9 @@ func (h *handlers) authCallback(w http.ResponseWriter, r *http.Request) {
 
 	h.setSession(w, me)
 	h.log.Info("signed in", "provider", name, "email", me.Email, "role", me.Role)
-	// Where the app puts someone on arrival, as the sign-in page does.
-	landing := "/app"
-	if me.Role == db.RoleAdmin {
-		landing = "/admin/people"
-	}
-	http.Redirect(w, r, landing, http.StatusFound)
+	// Where the app puts someone on arrival, as the sign-in page does. One set
+	// of tabs, whatever the role, so there is one landing for both.
+	http.Redirect(w, r, "/app", http.StatusFound)
 }
 
 // signInRefused is a sign-in that failed for a reason the person should see,

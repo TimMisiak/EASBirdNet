@@ -13,9 +13,9 @@ import "./bs-chip.js";
  * and the days it was heard. A row opens the detection's own page, to hear it
  * and review it, and that page comes back here with the filters as they were.
  *
- * Volunteers and coordinators see the same list, at /app/detections and
- * /admin/detections, and a row opens the detection under whichever it's on.
- * Only a coordinator's card column links to the card's page.
+ * Volunteers and coordinators see the same list, on the same tab, and a row
+ * opens the detection under it. Only a coordinator's card column links to the
+ * card's page.
  *
  * The filters live in the query string (/app/detections?species=Strix+varia),
  * so a reload or a link to a colleague shows the same list. The server filters,

@@ -7,5 +7,4 @@
 import "./components/bs-app.js";
 import "./components/bs-home-page.js";
 import "./components/bs-signin-page.js";
-import "./components/bs-volunteer-page.js";
-import "./components/bs-admin-page.js";
+import "./components/bs-app-page.js";

@@ -29,7 +29,7 @@ class SiteHeader extends BaseElement {
       },
       signin: () => {
         if (!session.isSignedIn()) return navigate("/signin");
-        navigate(session.isAdmin() ? "/admin" : "/app");
+        navigate("/app");
       },
       toggle: () => {
         this.#open = !this.#open;

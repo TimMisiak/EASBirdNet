@@ -16,24 +16,26 @@ const ROUTES = [
   { path: "/", tag: "bs-home-page", chrome: "public" },
   { path: "/signin", tag: "bs-signin-page", chrome: "bare" },
   { path: "/app", redirect: "/app/upload" },
-  // The volunteer's tabs. Upload holds the four steps of sending a card.
-  { path: "/app/upload", tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/app/upload/check", tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/app/upload/progress", tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/app/upload/done", tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/app/uploads", tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/app/detections", tag: "bs-volunteer-page", chrome: "app", auth: true },
+  // Everyone signed in gets <bs-app-page> and its one row of tabs; a
+  // coordinator's three extra tabs keep the /admin/ paths the guard reads.
+  { path: "/app/upload", tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/app/upload/check", tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/app/upload/progress", tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/app/upload/done", tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/app/uploads", tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true },
   // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
-  { path: "/app/detections/", prefix: true, tag: "bs-volunteer-page", chrome: "app", auth: true },
-  { path: "/admin", redirect: "/admin/people" },
-  { path: "/admin/people", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
-  { path: "/admin/recorders", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
-  { path: "/admin/uploads", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true },
+  { path: "/admin", redirect: "/admin/uploads" },
+  { path: "/admin/uploads", tag: "bs-app-page", chrome: "app", auth: true, admin: true },
   // One card: /admin/uploads/OWL-20260914-SR03.
-  { path: "/admin/uploads/", prefix: true, tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
-  { path: "/admin/detections", tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
-  // One detection, opened from that list: /admin/detections/OWL-20260914-SR03/det_….
-  { path: "/admin/detections/", prefix: true, tag: "bs-admin-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/uploads/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/recorders", tag: "bs-app-page", chrome: "app", auth: true, admin: true },
+  { path: "/admin/people", tag: "bs-app-page", chrome: "app", auth: true, admin: true },
+  // Detections is one tab for everyone now. A link a coordinator sent while it
+  // was two lands on it, filters and all.
+  { path: "/admin/detections", redirect: "/app/detections" },
+  { path: "/admin/detections/", prefix: true, redirect: (here) => `/app/detections/${here.slice("/admin/detections/".length)}` },
 ];
 
 /** The route for a path: an exact match, or a prefix route with something after the prefix. */
@@ -58,9 +60,15 @@ class BirdsenseApp extends BaseElement {
       return;
     }
 
-    const route = routeFor(path());
+    const here = path();
+    const route = routeFor(here);
 
-    if (route?.redirect) return navigate(route.redirect, { replace: true });
+    if (route?.redirect) {
+      // A redirect is a path, or a function of the path for a route with an id
+      // on the end. Either way it keeps the query string the link carried.
+      const to = typeof route.redirect === "function" ? route.redirect(here) : route.redirect;
+      return navigate(`${to}${location.search}`, { replace: true });
+    }
     if (route?.auth && !session.isSignedIn()) return navigate("/signin", { replace: true });
     if (route?.admin && !session.isAdmin()) return navigate("/app", { replace: true });
 

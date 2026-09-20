@@ -148,12 +148,13 @@ reported by the client, so a retried chunk can't count twice, and a card moves
 to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
-**Routes are paths, not hashes.** `/`, `/signin`, a volunteer's tabs
-(`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
-`/app/detections`), `/admin/people`, `/admin/uploads/{reference}`,
-`/admin/uploads/{reference}/detections/{id}`, `/admin/detections`, and a
-detection opened from either detections list, `/app/detections/{reference}/{id}`
-or `/admin/detections/{reference}/{id}`. A page
+**Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
+has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
+`/app/detections`), the three a coordinator has as well (`/admin/uploads`,
+`/admin/recorders`, `/admin/people`), a card (`/admin/uploads/{reference}`) and
+a detection opened from it
+(`/admin/uploads/{reference}/detections/{id}`), and one opened from the
+detections list, `/app/detections/{reference}/{id}`. A page
 may keep its view in the query string (`/app/detections?species=Strix+varia`):
 the router carries it through links, `replaceQuery` rewrites it without a
 history entry, and the detection page carries the list's back with it.
@@ -164,6 +165,10 @@ whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
 routes for a path with an id on the end) and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
+A route may `redirect` instead of naming a page, as a path or as a function of
+the path; the detections tab was two tabs once, so `/admin/detections` and
+`/admin/detections/{reference}/{id}` redirect to the `/app` ones, filters and
+all.
 
 **Sign-in is OpenID Connect; the roster is the allow-list.** `internal/api/auth.go`
 runs the authorization-code flow (PKCE, state and nonce in one short-lived
@@ -223,6 +228,17 @@ app, at the cost of needing Terraform credentials to deploy. So nothing runs
 *Revisit when:* deploys move to CI, which should get an identity that can push
 images and update the app but not touch state; that is the point of
 `ignore_changes` on the image (DEPLOYMENT.md, *Deploying a new version*).
+
+**One set of tabs, and the admin ones are hidden.** A coordinator is a
+volunteer with three more tabs, not a second application:
+`<bs-app-page>` is the shell for everyone signed in, and its tab table marks
+three entries `admin`, which `session.isAdmin()` filters out. So a coordinator
+uploads a card, resumes their own, and reviews detections on the same screens a
+volunteer does, and a screen only has to be built and kept working once. The
+admin tabs keep their `/admin/` paths, because that is what the route guard
+reads and what makes an admin-only page obvious in a link.
+*Revisit when:* the roster grows a third role, or a coordinator's version of a
+shared screen has to differ by more than what it lists.
 
 **Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
 `CSSStyleSheet` objects for the primitives that appear on nearly every screen
@@ -467,13 +483,14 @@ and the analysis queue runs BirdNET over it in the server process, writing
 (`/admin/uploads/{ref}`) shows each file's status, when its recording is due to
 be removed or was, and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
-Discard. The Detections tab (`/admin/detections`, and `/app/detections` on a
-volunteer's page) lists every card's detections,
+Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
-minimum confidence and the days heard, and opens the same detection page. Anyone signed in can review. A volunteer's page
-(`<bs-volunteer-page>`) has tabs like the coordinator's: Upload, the default,
-holding the card upload's four steps; My uploads, their own cards, where an
-unfinished one is resumed; and Detections. Nothing moves a card from `in_review`
+minimum confidence and the days heard, and opens the same detection page.
+Anyone signed in can review. Everyone works in the same shell
+(`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
+My uploads, their own cards, where an unfinished one is resumed; and
+Detections. A coordinator gets three more tabs after those -- All uploads,
+Recorders and People. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged; nothing backfills them.
 Nothing cleans up abandoned partial uploads, short of deleting their card or

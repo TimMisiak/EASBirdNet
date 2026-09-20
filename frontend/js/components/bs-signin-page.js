@@ -79,7 +79,7 @@ class SignInPage extends BaseElement {
     this.render();
     try {
       const user = await session.signIn(body);
-      navigate(user.role === "admin" ? "/admin/people" : "/app");
+      navigate("/app");
     } catch (error) {
       this.#busy = false;
       this.#error = error;

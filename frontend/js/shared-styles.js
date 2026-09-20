@@ -237,8 +237,8 @@ export const panels = sheet(`
 `);
 
 /**
- * A page's tabs, which are routes: the coordinator's and the volunteer's pages
- * both open with a row of them. The current one carries aria-current="page".
+ * A page's tabs, which are routes: <bs-app-page> opens with a row of them, the
+ * coordinator's included. The current one carries aria-current="page".
  */
 export const tabs = sheet(`
   .tabs {
