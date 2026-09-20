@@ -304,11 +304,13 @@ run and 1 s either side, at most 30 s around its best window) into storage at
 `analyzed`, and recounts the card. The API only calls `Enqueue` to wake it when a card's last
 file lands. At startup it resumes whatever was left, including a file cut off
 mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
-A file BirdNET can't read fails at once; a crashed run (of either script) is retried twice, 30 s
-apart and growing, and then fails, so one file can't wedge the queue. The last
-file moves the card to `in_review`, or `needs_attention` if any failed. If the
-server's Python can't `import birdnet` at startup it logs a warning and doesn't
-start the queue, so cards wait in `processing` rather than failing.
+A file BirdNET can't read fails at once; any other failure on a file -- a
+crashed run of either script, or storing its clips, its detections or its
+result -- is retried twice, 30 s apart and growing, and then fails the file, so
+nothing that keeps failing can wedge the queue. The last file moves the card to
+`in_review`, or `needs_attention` if any failed. If the server's Python can't
+`import birdnet` at startup it logs a warning and doesn't start the queue, so
+cards wait in `processing` rather than failing.
 One file per run, not a night per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in

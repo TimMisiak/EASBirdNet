@@ -83,52 +83,6 @@ quietly.
 Audio is irreplaceable: the volunteer erases the card, and originals are deleted
 after 30 days. These are the items where being wrong costs recordings.
 
-### 1.1 Retention can strand a recording's pointer forever
-`backend/internal/retention/retention.go:162-164` — **[verified]**
-
-If the blob delete succeeds but `UpdateAudioFile` fails, the loop `continue`s
-without incrementing `left`. Both sibling branches do increment it. With any
-other file on the card succeeding, the card still gets `audioDeletedAt`, and
-`Policy.ExpiresAt` (`retention.go:61`) then returns `nil` for that card for
-good — so no later sweep ever looks at it again.
-
-**If not fixed:** that file keeps a `blobName` naming a blob that no longer
-exists, with `audioDeletedAt` unset, permanently. The card page shows audio that
-isn't there, and `internal/analysis` would read it as "the audio isn't in
-storage". One line: `left++` in the error branch.
-
-### 1.2 A non-analyzer failure re-runs BirdNET forever and wedges the queue
-`backend/internal/analysis/analysis.go:306-330`
-
-`retryOrFail` and the `q.attempts` cap cover analyzer crashes only. The clip
-upload (`putFile`), `UpsertDetections` and the final `UpdateAudioFile` return
-raw errors that bypass the counter, so `Run` just pauses and loops.
-
-**If not fixed:** a persistent non-analyzer failure on one file — a blob 403
-after a role change, a store reject — re-runs the full multi-minute BirdNET pass
-over a ~300 MB file forever at 1 vCPU. The file never reaches `failed`, the card
-never reaches `needs_attention`, and every card behind it waits. CLAUDE.md's
-"one file can't wedge the queue" is narrower than it reads.
-
-### 1.3 Recording timestamps silently fall back to Pacific
-`backend/internal/analysis/analysis.go:510` — **[verified]**
-
-The `namedStart` regex is
-`(?:^|\D)(\d{8}_\d{6})(?:\D|$)(?:.*?\(([+-]\d{4})\))?`. For the format its own
-comment documents — `Marymoor_20260723_160624(-0700).wav` — the `(?:\D|$)`
-consumes the `(`, so the offset group can never match:
-
-```
-"Marymoor_20260723_160624(-0700).wav" -> ("20260723_160624", "")   <- offset lost
-"20260115_220000 (+0100).wav"         -> ("20260115_220000", "+0100")
-```
-
-**If not fixed:** every such file is read as Pacific. `recordedAt`, every
-`detectedAt` derived from it, and the `night` grouping are wrong by the offset
-difference for any recorder not on Pacific time. The existing test
-(`analysis_test.go:552`) can't catch it — its only parenthesized case is a July
-date where `-0700` *is* Pacific.
-
 ### 1.4 There is no transfer checksum, though the schema promises one — **[decide]**
 `backend/internal/db/models.go:184`, SCHEMA.md `audioFiles` table — **[verified]**
 

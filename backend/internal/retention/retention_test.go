@@ -1,6 +1,8 @@
 package retention
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -261,5 +263,52 @@ func TestExpiresAt(t *testing.T) {
 	}
 	if at := p.ExpiresAt(db.Upload{Status: db.StatusInReview}); at != nil {
 		t.Errorf("a card that was never received reports %v, want nil", at)
+	}
+}
+
+// failUpdates is a store whose UpdateAudioFile fails for one file, to stand
+// in for a store that rejects the write after the blob has already gone.
+type failUpdates struct {
+	db.Store
+	fileStatus string
+}
+
+func (s failUpdates) UpdateAudioFile(ctx context.Context, uploadID, id string, mutate func(*db.AudioFile) error) (db.AudioFile, error) {
+	f, err := s.Store.GetAudioFile(ctx, uploadID, id)
+	if err == nil && f.Status == s.fileStatus {
+		return db.AudioFile{}, errors.New("the store said no")
+	}
+	return s.Store.UpdateAudioFile(ctx, uploadID, id, mutate)
+}
+
+// TestSweepKeepsACardWhoseMarkingFailed covers the blob going but the document
+// not being marked. The card must stay unmarked, because a marked card reports
+// no expiry date and is never swept again — which would strand that file's
+// blobName on a blob that isn't there, for good.
+func TestSweepKeepsACardWhoseMarkingFailed(t *testing.T) {
+	f := newFixture(t, month)
+	ref := "OWL-20260801-SR08"
+	f.card(ref, db.StatusInReview, testNow.Add(-month-time.Hour), db.AudioAnalyzed, db.AudioFailed)
+	f.keeper.store = failUpdates{Store: f.store, fileStatus: db.AudioFailed}
+	f.keeper.Sweep(t.Context())
+
+	if u := f.upload(ref); u.AudioDeletedAt != nil {
+		t.Error("the card is marked done though one of its files wasn't marked")
+	}
+	if at := f.keeper.policy.ExpiresAt(f.upload(ref)); at == nil {
+		t.Error("the card reports no expiry date, so no later sweep will come back to it")
+	}
+
+	// With the store working again, the next sweep finishes the job.
+	f.keeper.store = f.store
+	f.keeper.Sweep(t.Context())
+
+	for _, file := range f.cardFiles(ref) {
+		if file.BlobName != "" || file.AudioDeletedAt == nil {
+			t.Errorf("%s: BlobName = %q, AudioDeletedAt = %v", file.Path, file.BlobName, file.AudioDeletedAt)
+		}
+	}
+	if u := f.upload(ref); u.AudioDeletedAt == nil {
+		t.Error("the card still isn't marked after a sweep that marked every file")
 	}
 }

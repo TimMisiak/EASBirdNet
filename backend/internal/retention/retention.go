@@ -160,7 +160,12 @@ func (s *Sweeper) sweepCard(ctx context.Context, u db.Upload, now time.Time) {
 			return nil
 		})
 		if err != nil {
+			// The blob is gone but the document still names it. Count it as
+			// still here: the card must not be marked done, or ExpiresAt
+			// reports nil for it and no later sweep ever comes back to
+			// finish the marking.
 			s.log.Error("audio retention: marking a recording removed", "upload", u.ID, "file", f.ID, "err", err)
+			left++
 			continue
 		}
 		removed++

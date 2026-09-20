@@ -54,10 +54,11 @@ var settings = birdnet.Options{
 }
 
 const (
-	// maxAttempts is how many times a file is tried when BirdNET itself fails
-	// (the process crashes or is killed), rather than reporting the file as
-	// unreadable. After that the file is failed, so one bad file can't hold up
-	// every card behind it.
+	// maxAttempts is how many times a file is tried when analyzing it fails in
+	// a way that might pass -- BirdNET crashing or being killed, or storing
+	// what it heard failing -- rather than reporting the file as unreadable.
+	// After that the file is failed, so one bad file can't hold up every card
+	// behind it.
 	maxAttempts = 3
 	// retryDelay is the wait after such a failure, times the attempt number.
 	retryDelay = 30 * time.Second
@@ -125,9 +126,9 @@ func (q *Queue) Run(ctx context.Context) {
 	}
 }
 
-// errRetry is a BirdNET run that failed and is worth trying again after a
-// pause.
-var errRetry = errors.New("analysis: BirdNET failed")
+// errRetry is an attempt on a file that failed and is worth trying again after
+// a pause.
+var errRetry = errors.New("analysis: attempt failed")
 
 // drain analyzes every queued file on every processing card, and finishes each
 // card as its last file is done. It returns early on a failure Run should
@@ -219,8 +220,9 @@ func (q *Queue) startCard(ctx context.Context, id string) (db.Upload, error) {
 
 // analyzeFile runs BirdNET over one file and stores the result. It returns an
 // error only for something that should pause the queue: the store failing, or
-// BirdNET failing in a way that may pass. What is wrong with the file itself
-// is recorded on the file.
+// an attempt that failed in a way that may pass. What is wrong with the file
+// itself is recorded on the file, and an attempt that keeps failing runs out
+// of tries (storingFailed, retryOrFail) rather than repeating for good.
 func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
 	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
 		if !queued(*f) {
@@ -301,18 +303,18 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 	// card to be deleted. Checking before anything is stored keeps a deleted
 	// card's clips out of storage.
 	if _, err := q.store.GetAudioFile(ctx, card.ID, f.ID); err != nil {
-		return err
+		return q.storingFailed(ctx, f, err)
 	}
 	for i, c := range recording.Clips {
 		name := storage.ClipName(card.ID, detections[i].ID)
 		if err := q.putFile(ctx, name, c.Path); err != nil {
-			return err
+			return q.storingFailed(ctx, f, fmt.Errorf("storing a clip: %w", err))
 		}
 		detections[i].Clip = &db.Clip{BlobName: name, StartSec: c.StartSec, EndSec: c.EndSec}
 	}
 	if len(detections) > 0 {
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {
-			return err
+			return q.storingFailed(ctx, f, fmt.Errorf("storing the detections: %w", err))
 		}
 	}
 	analyzed := q.stamp()
@@ -326,7 +328,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 		}
 		return nil
 	}); err != nil {
-		return err
+		return q.storingFailed(ctx, f, fmt.Errorf("marking the file analyzed: %w", err))
 	}
 	if res.Model != "" && card.Analysis != nil && card.Analysis.Model == "" {
 		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
@@ -386,6 +388,22 @@ func (q *Queue) putFile(ctx context.Context, name, local string) error {
 	return q.files.Put(ctx, name, src)
 }
 
+// storingFailed is a failure in the steps after BirdNET has read the file:
+// storing a clip, storing the detections, or recording the result. They go
+// through the same attempt counter as a crashed analyzer, because otherwise a
+// failure that never passes -- a blob 403 after a role change, a store that
+// keeps rejecting the write -- re-runs the whole multi-minute pass over a
+// ~300 MB file for good, and every card behind it waits.
+//
+// A card deleted from under the run is not the file's failure: its documents
+// are gone, so drain finishes the delete instead.
+func (q *Queue) storingFailed(ctx context.Context, f db.AudioFile, cause error) error {
+	if ctx.Err() != nil || errors.Is(cause, db.ErrNotFound) {
+		return cause
+	}
+	return q.retryOrFail(ctx, f, cause)
+}
+
 // retryOrFail puts a file back in the queue and pauses the queue, unless the
 // file has had its tries, in which case it fails.
 func (q *Queue) retryOrFail(ctx context.Context, f db.AudioFile, cause error) error {
@@ -393,7 +411,7 @@ func (q *Queue) retryOrFail(ctx context.Context, f db.AudioFile, cause error) er
 	if q.attempts[f.ID] >= maxAttempts {
 		delete(q.attempts, f.ID)
 		q.log.Error("analysis: giving up on a file", "upload", f.UploadID, "path", f.Path, "err", cause)
-		return q.fail(ctx, f, "BirdNET failed on this file "+fmt.Sprint(maxAttempts)+" times: "+firstLine(cause.Error()))
+		return q.fail(ctx, f, "analysis failed on this file "+fmt.Sprint(maxAttempts)+" times: "+firstLine(cause.Error()))
 	}
 	if _, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
 		if f.Status == db.AudioAnalyzing {
@@ -505,27 +523,39 @@ var pacific = func() *time.Location {
 
 // namedStart matches the start of a recording in its file name, as recorders
 // write it: "Marymoor_20260723_160624(-0700).wav" began at 16:06:24 on July 23,
-// local time, at UTC-7. The offset is optional. frontend/js/card-scan.js reads
-// the same pattern to put a file on its night.
-var namedStart = regexp.MustCompile(`(?:^|\D)(\d{8}_\d{6})(?:\D|$)(?:.*?\(([+-]\d{4})\))?`)
+// local time, at UTC-7. The trailing boundary is what keeps a longer run of
+// digits from matching. frontend/js/card-scan.js reads the same timestamp to
+// put a file on its night.
+var namedStart = regexp.MustCompile(`(?:^|\D)(\d{8}_\d{6})(?:\D|$)`)
+
+// namedOffset matches the UTC offset that may follow that time, in
+// parentheses. It is matched on its own rather than as a second group of
+// namedStart: RE2 has no lookahead, so namedStart's trailing boundary consumes
+// the "(" that opens the offset, and one pattern for both silently never
+// matches the offset of the very format it documents.
+var namedOffset = regexp.MustCompile(`\(([+-]\d{4})\)`)
 
 // RecordedAt is when a recording started, from its file name. The UTC offset
 // in the name is used when there is one; otherwise the time is Pacific.
 func RecordedAt(cardPath string) (time.Time, bool) {
-	m := namedStart.FindStringSubmatch(path.Base(cardPath))
+	name := path.Base(cardPath)
+	m := namedStart.FindStringSubmatchIndex(name)
 	if m == nil {
 		return time.Time{}, false
 	}
+	stamp := name[m[2]:m[3]]
 	loc := pacific
-	if m[2] != "" {
-		offset, err := time.Parse("-0700", m[2])
+	// Search from the end of the time itself, not the end of the match, which
+	// may have taken the offset's opening parenthesis with it.
+	if o := namedOffset.FindStringSubmatch(name[m[3]:]); o != nil {
+		offset, err := time.Parse("-0700", o[1])
 		if err != nil {
 			return time.Time{}, false
 		}
 		_, secs := offset.Zone()
-		loc = time.FixedZone(m[2], secs)
+		loc = time.FixedZone(o[1], secs)
 	}
-	t, err := time.ParseInLocation("20060102_150405", m[1], loc)
+	t, err := time.ParseInLocation("20060102_150405", stamp, loc)
 	if err != nil {
 		return time.Time{}, false
 	}

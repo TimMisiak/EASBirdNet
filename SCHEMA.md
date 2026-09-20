@@ -275,7 +275,7 @@ interruption produces the same ids instead of duplicates.
 | `uploaded` | In file storage; not analyzed yet. On a `processing` card, this is the analysis queue: the file is waiting for BirdNET. |
 | `analyzing`| BirdNET is running over it. Found at startup, it was cut off by a restart, and is run again. |
 | `analyzed` | BirdNET has run over it (it may still have zero detections). |
-| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when the analyzer itself crashed on the file three times, that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
+| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when an attempt on the file failed three times over — the analyzer crashing, or storing a clip, the detections or the result failing — that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
 
 ## `detections`
 

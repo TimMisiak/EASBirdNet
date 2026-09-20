@@ -556,6 +556,14 @@ func TestRecordedAt(t *testing.T) {
 		"a_20260231_010000.wav":                    "",
 		"recording.wav":                            "",
 		"x120260115_220000.wav":                    "",
+		// A recorder that isn't on Pacific time. Each of these is a different
+		// time from the Pacific reading of the same clock, so a lost offset
+		// shows up here rather than being masked by the two matching.
+		"Marymoor_20260723_160624(+0000).wav": "2026-07-23T16:06:24Z",
+		"Kirkland_20260723_160624(-0400).wav": "2026-07-23T20:06:24Z",
+		"20260115_220000(+0100).wav":          "2026-01-15T21:00:00Z",
+		"20260115_220000 (+0100).wav":         "2026-01-15T21:00:00Z",
+		"20260115_220000_001(+0100).wav":      "2026-01-15T21:00:00Z",
 	}
 	for p, want := range cases {
 		got, ok := RecordedAt(p)
@@ -574,5 +582,86 @@ func waitFor(t *testing.T, cond func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out waiting for the queue")
 		}
+	}
+}
+
+// rejects is a store that fails one write, to stand in for a store that goes
+// on rejecting it — a rule that won't pass, or an identity that lost its role.
+type rejects struct {
+	db.Store
+	detections bool
+	audioFile  bool
+}
+
+func (s rejects) UpsertDetections(ctx context.Context, uploadID string, ds []db.Detection) error {
+	if s.detections {
+		return errors.New("the store said no")
+	}
+	return s.Store.UpsertDetections(ctx, uploadID, ds)
+}
+
+func (s rejects) UpdateAudioFile(ctx context.Context, uploadID, id string, mutate func(*db.AudioFile) error) (db.AudioFile, error) {
+	// Only the write that records the result. The queue's other writes to a
+	// file — putting it back in the queue, failing it — have to go through, or
+	// the test is of a store that rejects everything rather than one write.
+	if s.audioFile {
+		f, err := s.Store.GetAudioFile(ctx, uploadID, id)
+		if err == nil && mutate(&f) == nil && f.Status == db.AudioAnalyzed {
+			return db.AudioFile{}, errors.New("the store said no")
+		}
+	}
+	return s.Store.UpdateAudioFile(ctx, uploadID, id, mutate)
+}
+
+// refusesPut is file storage that won't take a clip.
+type refusesPut struct{ storage.Store }
+
+func (s refusesPut) Put(context.Context, string, io.ReadSeeker) error {
+	return errors.New("PutBlob: 403 AuthorizationPermissionMismatch")
+}
+
+// TestStoringFailingIsRetriedThenTheFileFails covers the steps after BirdNET
+// has read the file. A failure there used to bypass the attempt counter, so
+// the queue re-ran the whole analysis for good and never moved on.
+func TestStoringFailingIsRetriedThenTheFileFails(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fixture)
+		want  string
+	}{
+		{"storing a clip", func(f *fixture) { f.queue.files = refusesPut{f.files} }, "storing a clip"},
+		{"storing the detections", func(f *fixture) { f.queue.store = rejects{Store: f.store, detections: true} }, "storing the detections"},
+		{"marking the file analyzed", func(f *fixture) { f.queue.store = rejects{Store: f.store, audioFile: true} }, "marking the file analyzed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.bird.answer = owls
+			f.card(db.StatusProcessing, owlFile)
+			tc.setup(f)
+
+			for attempt := 1; attempt < maxAttempts; attempt++ {
+				if err := f.queue.drain(t.Context()); !errors.Is(err, errRetry) {
+					t.Fatalf("attempt %d: err = %v, want a pause to retry", attempt, err)
+				}
+				if file := f.file(owlFile); file.Status != db.AudioUploaded {
+					t.Fatalf("attempt %d: file = %s, want it queued again", attempt, file.Status)
+				}
+			}
+			// The last attempt gives up on the file instead of trying forever.
+			if err := f.queue.drain(t.Context()); err != nil {
+				t.Fatalf("last attempt: %v", err)
+			}
+			if n := len(f.bird.calls); n != maxAttempts {
+				t.Errorf("BirdNET ran %d times, want %d", n, maxAttempts)
+			}
+			file := f.file(owlFile)
+			if file.Status != db.AudioFailed || !strings.Contains(file.StatusDetail, tc.want) {
+				t.Errorf("file = %s (%q); want failed while %s", file.Status, file.StatusDetail, tc.want)
+			}
+			// The card moves on, so nothing queued behind it waits on this file.
+			if u := f.upload(); u.Status != db.StatusNeedsAttention || u.FilesFailed != 1 {
+				t.Errorf("card = %s, %d failed; want needs_attention", u.Status, u.FilesFailed)
+			}
+		})
 	}
 }
