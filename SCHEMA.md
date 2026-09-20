@@ -552,6 +552,7 @@ What the write routes do to documents:
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
 | `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. An id outside the `recorders.id` rules is a 400; one that would share card references with a recorder already added is a 409. |
+| `POST /admin/stations`, `PUT /admin/stations/{id}` | `latitude` and `longitude` are each required: a missing one is a 400, never read as 0, so half a position can't put a recorder in the Gulf of Guinea and send that to BirdNET's geo filter. `0, 0` itself is refused as "not placed yet". A `PUT` takes the id from the path only. |
 
 One field is not a document at all: `queue`, which `GET /admin/uploads` and
 `GET /admin/uploads/{ref}` answer alongside the cards, and `GET /health` as a

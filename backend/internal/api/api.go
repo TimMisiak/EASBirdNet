@@ -1180,10 +1180,10 @@ func (h *handlers) checkAdminLeaves(r *http.Request, id string, stillAdmin bool)
 // its new name and place.
 func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ db.User) {
 	var body struct {
-		ID        string  `json:"id"`
-		Name      string  `json:"name"`
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
+		ID        string   `json:"id"`
+		Name      string   `json:"name"`
+		Latitude  *float64 `json:"latitude"`
+		Longitude *float64 `json:"longitude"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -1227,7 +1227,7 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ db.User)
 	var rec db.Recorder
 	switch {
 	case existing == nil:
-		rec, err = h.store.CreateRecorder(ctx, db.Recorder{ID: id, Name: body.Name, Latitude: body.Latitude, Longitude: body.Longitude})
+		rec, err = h.store.CreateRecorder(ctx, db.Recorder{ID: id, Name: body.Name, Latitude: *body.Latitude, Longitude: *body.Longitude})
 	case existing.RetiredAt == nil:
 		err = db.ErrConflict
 	default:
@@ -1235,7 +1235,7 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ db.User)
 			if rec.RetiredAt == nil {
 				return db.ErrConflict
 			}
-			rec.RetiredAt, rec.Name, rec.Latitude, rec.Longitude = nil, body.Name, body.Latitude, body.Longitude
+			rec.RetiredAt, rec.Name, rec.Latitude, rec.Longitude = nil, body.Name, *body.Latitude, *body.Longitude
 			return nil
 		})
 	}
@@ -1257,9 +1257,9 @@ func (h *handlers) addStation(w http.ResponseWriter, r *http.Request, _ db.User)
 // Cards already sent keep the name and place they were recorded under.
 func (h *handlers) updateStation(w http.ResponseWriter, r *http.Request, _ db.User) {
 	var body struct {
-		Name      string  `json:"name"`
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
+		Name      string   `json:"name"`
+		Latitude  *float64 `json:"latitude"`
+		Longitude *float64 `json:"longitude"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -1271,7 +1271,7 @@ func (h *handlers) updateStation(w http.ResponseWriter, r *http.Request, _ db.Us
 		return
 	}
 	h.changeStation(w, r, func(rec *db.Recorder) {
-		rec.Name, rec.Latitude, rec.Longitude = body.Name, body.Latitude, body.Longitude
+		rec.Name, rec.Latitude, rec.Longitude = body.Name, *body.Latitude, *body.Longitude
 	}, func(rec db.Recorder) {
 		h.json(w, http.StatusOK, map[string]any{"station": stationOf(rec)})
 	})
@@ -1309,13 +1309,19 @@ func (h *handlers) changeStation(w http.ResponseWriter, r *http.Request, change 
 }
 
 // stationProblem is what's wrong with a recorder's name and position, or "".
-func stationProblem(name string, lat, lon float64) string {
+// The coordinates are pointers so that a missing one is refused rather than
+// read as 0: a browser's Number("") is 0 too, so a half-filled position would
+// otherwise store a recorder in the Gulf of Guinea and send that to BirdNET's
+// geo filter.
+func stationProblem(name string, lat, lon *float64) string {
 	switch {
 	case name == "":
 		return "a station name is required"
-	case lat == 0 && lon == 0:
+	case lat == nil || lon == nil:
+		return "a latitude and a longitude are both required"
+	case *lat == 0 && *lon == 0:
 		return "place the recorder on the map first"
-	case lat < -90 || lat > 90 || lon < -180 || lon > 180:
+	case *lat < -90 || *lat > 90 || *lon < -180 || *lon > 180:
 		return "those coordinates aren't on the map"
 	}
 	return ""

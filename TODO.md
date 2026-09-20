@@ -133,16 +133,6 @@ only grows, a coordinator has no way to mark a card done or to clear a
 `needs_attention`, and the volunteer's "My uploads" never reaches a terminal
 state. (Retention still expires the audio, so nothing is stranded.)
 
-### 2.8 A half-filled coordinate puts a recorder in the Gulf of Guinea
-`frontend/js/components/bs-admin-recorders.js:76-80`, `backend/internal/api/api.go:1242-1252` — **[verified]**
-
-`Number("")` is `0`, and `stationProblem` rejects only `lat == 0 && lon == 0`.
-Latitude `47.66` with an empty longitude is accepted as `{47.66, 0}`.
-
-**If not fixed:** no pin appears, no warning is shown, and every detection from
-that recorder carries the wrong position into BirdNET's geo filter — which
-changes which species the model will report.
-
 ---
 
 ## 3. Scale and cost — this bites during the first season, not later

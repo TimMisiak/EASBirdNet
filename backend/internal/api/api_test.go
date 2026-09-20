@@ -966,6 +966,31 @@ func TestUpdateStationRejectsBadInput(t *testing.T) {
 	}
 }
 
+// A coordinator who fills in one coordinate and not the other must not get a
+// recorder at 0 -- Number("") is 0 in the browser, and the position goes to
+// BirdNET's geo filter, which changes which species the model will report.
+func TestStationRejectsHalfFilledPosition(t *testing.T) {
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/v1/admin/stations", `{"id":"SW-06","name":"Mercer Slough","latitude":47.59}`},
+		{http.MethodPost, "/api/v1/admin/stations", `{"id":"SW-06","name":"Mercer Slough","latitude":47.59,"longitude":null}`},
+		{http.MethodPost, "/api/v1/admin/stations", `{"id":"SW-06","name":"Mercer Slough","longitude":-122.18}`},
+		{http.MethodPut, "/api/v1/admin/stations/SW-02", `{"name":"Marymoor","latitude":47.66}`},
+		{http.MethodPut, "/api/v1/admin/stations/SW-02", `{"name":"Marymoor","longitude":-122.11}`},
+	} {
+		if rec := do(t, mux, tc.method, tc.path, tc.body, admin); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s %s = %d, want %d (%s)", tc.method, tc.body, rec.Code, http.StatusBadRequest, rec.Body)
+		}
+	}
+	if _, err := store.GetRecorder(t.Context(), "SW-06"); err == nil {
+		t.Error("a recorder was added with half a position")
+	}
+	if rec, err := store.GetRecorder(t.Context(), "SW-02"); err != nil || rec.Latitude != 47.66021 || rec.Longitude != -122.11384 {
+		t.Errorf("SW-02 = %+v, %v; want its position untouched", rec, err)
+	}
+}
+
 func TestRemoveStation(t *testing.T) {
 	mux, store := newTestMux(t)
 	admin := signedIn(t, mux, db.RoleAdmin)

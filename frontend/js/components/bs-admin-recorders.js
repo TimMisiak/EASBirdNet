@@ -18,6 +18,18 @@ import "./bs-station-map.js";
 
 const EMPTY = { id: "", name: "", latitude: "", longitude: "" };
 
+/**
+ * A coordinate field as a number, or null when it is blank or isn't one.
+ * Number("") is 0, so a blank field has to be caught before it is parsed:
+ * otherwise half a position saves as a point in the Gulf of Guinea.
+ */
+const coordinate = (text) => {
+  const trimmed = String(text).trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+};
+
 const draftOf = (station) => ({
   id: station.id,
   name: station.name,
@@ -73,11 +85,17 @@ class AdminRecorders extends BaseElement {
         event.preventDefault();
         if (this.#busy) return;
         const editing = this.#selected;
-        const body = {
-          name: this.#draft.name,
-          latitude: Number(this.#draft.latitude),
-          longitude: Number(this.#draft.longitude),
-        };
+        const point = this.#coords();
+        if (!point) {
+          // The same condition that keeps the pin off the map.
+          this.#formError = new Error(
+            "Click the map to place the recorder, or type both coordinates as numbers.",
+          );
+          this.#saved = false;
+          this.render();
+          return;
+        }
+        const body = { name: this.#draft.name, ...point };
         this.#busy = true;
         this.#formError = null;
         this.#saved = false;
@@ -173,13 +191,19 @@ class AdminRecorders extends BaseElement {
     this.#syncMap();
   }
 
+  /** The position typed into the form, or null unless both coordinates parse. */
+  #coords() {
+    const latitude = coordinate(this.#draft.latitude);
+    const longitude = coordinate(this.#draft.longitude);
+    if (latitude === null || longitude === null) return null;
+    return { latitude, longitude };
+  }
+
   /** The draft pin only exists once both coordinates parse. */
   #draftPin() {
-    const latitude = Number(this.#draft.latitude);
-    const longitude = Number(this.#draft.longitude);
-    if (!this.#draft.latitude || !this.#draft.longitude) return null;
-    if (Number.isNaN(latitude) || Number.isNaN(longitude)) return null;
-    return { latitude, longitude, name: this.#draft.name || this.#draft.id || "New recorder" };
+    const point = this.#coords();
+    if (!point) return null;
+    return { ...point, name: this.#draft.name || this.#draft.id || "New recorder" };
   }
 
   #syncMap() {
