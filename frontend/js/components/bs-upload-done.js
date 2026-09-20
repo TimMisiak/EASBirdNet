@@ -84,8 +84,7 @@ class UploadDone extends BaseElement {
       <div class="panel">
         <dl class="summary">
           ${entry("Reference", upload.reference)}
-          ${entry("Station", upload.stationName)}
-          ${entry("Recorder", upload.stationId)}
+          ${entry("Recorder", `${upload.stationId} · ${upload.stationName}`)}
           ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
           ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
           ${entry("Card pulled", longDate(upload.pulledOn))}

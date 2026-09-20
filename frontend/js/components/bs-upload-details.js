@@ -10,8 +10,13 @@ import "./bs-progress-bar.js";
 
 /**
  * <bs-upload-details> -- step 1. Four questions, none of which the volunteer
- * has to look up: the recorder comes from the station, the date defaults to
- * today, and the notes are optional.
+ * has to look up: the recorder is picked from the ones in the field, the date
+ * defaults to today, and the notes are optional.
+ *
+ * The recorder is chosen, never guessed. A card carries nothing that says which
+ * recorder wrote it, and a card filed against the wrong one is wrong about
+ * where every detection on it was heard -- so the list starts on "choose a
+ * recorder" and the step can't be finished until one is picked.
  *
  * Choosing the card happens at the end of this step rather than the start,
  * because the folder picker is the one moment a volunteer can get stuck, and
@@ -58,7 +63,6 @@ class UploadDetails extends BaseElement {
       },
       different: () => {
         flow.reset();
-        if (this.#stations.length) flow.setDetails({ stationId: this.#stations[0].id });
         this.#mismatch = null;
         this.#error = null;
         this.render();
@@ -79,9 +83,6 @@ class UploadDetails extends BaseElement {
       if (flow.get().status === "done") flow.reset();
       this.#stations = stations;
       this.#unfinished = mine?.uploads.find(isUnfinished) ?? null;
-      if (!flow.get().stationId && stations.length) {
-        flow.setDetails({ stationId: stations[0].id });
-      }
     } catch (error) {
       this.#error = error;
     }
@@ -154,6 +155,7 @@ class UploadDetails extends BaseElement {
           align-items: start;
         }
         .form { display: flex; flex-direction: column; gap: 1.375rem; }
+        .form .note { margin-top: var(--bs-space-2); }
         .aside { display: flex; flex-direction: column; gap: 1.125rem; }
         .aside ul {
           margin: 0;
@@ -190,23 +192,17 @@ class UploadDetails extends BaseElement {
       <div class="columns">
         <div class="form">
           <div>
-            <label class="label" for="station">Where was this card collected?</label>
+            <label class="label" for="station">Which recorder was this card in?</label>
             <select class="field" id="station" data-change="station" ${this.#busy ? "disabled" : ""}>
+              <option value="" ${stationId ? "" : "selected"}>Choose a recorder…</option>
               ${this.#stations
                 .map(
                   (s) =>
-                    `<option value="${escapeHTML(s.id)}" ${s.id === stationId ? "selected" : ""}>${escapeHTML(s.name)}</option>`,
+                    `<option value="${escapeHTML(s.id)}" ${s.id === stationId ? "selected" : ""}>${escapeHTML(s.id)} · ${escapeHTML(s.name)}</option>`,
                 )
                 .join("")}
             </select>
-          </div>
-
-          <div>
-            <span class="label">Recorder</span>
-            <div class="readout">
-              <span class="mono">${escapeHTML(station?.id ?? "—")}</span>
-              <span class="tag">filled in from the station</span>
-            </div>
+            <p class="note">The ID is printed on the unit — check it against the one you pulled the card from.</p>
           </div>
 
           <div>
