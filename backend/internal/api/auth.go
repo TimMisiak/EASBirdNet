@@ -147,10 +147,12 @@ func NewAuthenticator(ctx context.Context, cfg AuthConfig, log *slog.Logger) (*A
 	return a, nil
 }
 
-// Names is the providers offered, for the sign-in page.
+// Names is the providers offered, for the sign-in page. Never nil: the session
+// response carries it as a JSON array even when no provider is configured, so
+// the sign-in page can filter it without a null check.
 func (a *Authenticator) Names() []string {
 	if a == nil {
-		return nil
+		return []string{}
 	}
 	names := make([]string, 0, len(a.providers))
 	for _, name := range []string{ProviderMicrosoft, ProviderGoogle} {

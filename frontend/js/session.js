@@ -22,10 +22,17 @@ export const isLoaded = () => loaded;
 
 export async function load() {
   try {
-    ({ user: current, dev = false, providers = [] } = await api.fetchSession());
+    // Read the fields rather than destructuring with defaults: a default only
+    // fills in for undefined, and an older server answers with a null list.
+    const session = await api.fetchSession();
+    current = session.user ?? null;
+    dev = session.dev === true;
+    providers = session.providers ?? [];
   } catch {
     // A failed session check means anonymous; the public page still works.
     current = null;
+    dev = false;
+    providers = [];
   }
   loaded = true;
   announce();

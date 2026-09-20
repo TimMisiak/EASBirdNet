@@ -421,6 +421,17 @@ func TestSession(t *testing.T) {
 	}
 }
 
+// With no identity provider configured -- dev mode's normal state -- the
+// session still reports an empty list rather than null, because the sign-in
+// page filters it to decide which provider buttons to draw.
+func TestSessionProvidersIsAlwaysAList(t *testing.T) {
+	mux, _ := newTestMux(t)
+	rec := do(t, mux, http.MethodGet, "/api/v1/session", "", nil)
+	if !strings.Contains(rec.Body.String(), `"providers":[]`) {
+		t.Errorf("session = %s, want an empty providers list", rec.Body)
+	}
+}
+
 // The session cookie is signed, so the address in it is the server's word and
 // not the browser's. This is the whole difference from the placeholder cookie,
 // which anyone could type an admin's address into.
