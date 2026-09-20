@@ -93,11 +93,28 @@ func main() {
 		}()
 	}
 
+	// Sign-in. Reaching the provider is a network call, so a provider that is
+	// unreachable now is retried when someone signs in rather than stopping
+	// the server -- the same call BirdNET's check makes above.
+	authCtx, cancelAuth := context.WithTimeout(ctx, 30*time.Second)
+	auth, err := api.NewAuthenticator(authCtx, cfg.Auth, log)
+	cancelAuth()
+	if err != nil {
+		log.Error("bad sign-in configuration", "err", err)
+		os.Exit(1)
+	}
+	for provider, uri := range auth.RedirectURIs() {
+		log.Info("register this redirect URI with the provider", "provider", provider, "redirect_uri", uri)
+	}
+	if auth == nil {
+		log.Warn("no identity provider is configured, so the only way in is the development sign-in")
+	}
+
 	// No ReadTimeout or WriteTimeout: a PATCH carrying audio takes as long as
 	// the volunteer's upstream link needs. tusd sets deadlines per read instead.
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           requestLogger(log, newMux(cfg, store, files, queue, log)),
+		Handler:           requestLogger(log, newMux(cfg, store, files, queue, auth, log)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -130,9 +147,12 @@ func main() {
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
-	api.Register(mux, store, files, queue, log, cfg.Dev)
+	api.Register(mux, api.Options{
+		Store: store, Files: files, Queue: queue, Log: log,
+		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey,
+	})
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
 }
@@ -152,6 +172,12 @@ type config struct {
 	// BootstrapAdmin, when set, is added as an admin if the roster is empty,
 	// so a fresh deployment has someone who can add everyone else.
 	BootstrapAdmin *mail.Address
+	// Auth is OIDC sign-in. Outside dev mode it is required: there is no other
+	// way in.
+	Auth api.AuthConfig
+	// SessionKey signs the session cookie. Outside dev mode it is required, so
+	// a restart or a new revision doesn't sign everyone out.
+	SessionKey string
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -209,6 +235,10 @@ func configFromEnv() (config, error) {
 		return cfg, fmt.Errorf("BIRDSENSE_STORAGE must be %q or %q, not %q", storage.BackendLocal, storage.BackendAzure, cfg.Storage.Backend)
 	}
 
+	if err := readAuth(&cfg); err != nil {
+		return cfg, err
+	}
+
 	if v := strings.TrimSpace(os.Getenv("BIRDSENSE_BOOTSTRAP_ADMIN")); v != "" {
 		addr, err := mail.ParseAddress(v)
 		if err != nil {
@@ -240,6 +270,56 @@ func reservedDomain(email string) bool {
 		}
 	}
 	return false
+}
+
+// readAuth reads the sign-in configuration. A provider is configured when its
+// client id is set, so adding Google later is two more variables and no code.
+//
+// Outside dev mode all of it is required, because the development sign-in is
+// not registered there: a deployment with no provider has no way in at all,
+// which is better found at startup than by the first volunteer.
+func readAuth(cfg *config) error {
+	cfg.SessionKey = os.Getenv("BIRDSENSE_SESSION_KEY")
+	cfg.Auth = api.AuthConfig{PublicURL: strings.TrimSuffix(os.Getenv("BIRDSENSE_PUBLIC_URL"), "/")}
+
+	for _, p := range []struct{ name, prefix string }{
+		{api.ProviderMicrosoft, "BIRDSENSE_OIDC_MICROSOFT"},
+		{api.ProviderGoogle, "BIRDSENSE_OIDC_GOOGLE"},
+	} {
+		id := os.Getenv(p.prefix + "_CLIENT_ID")
+		if id == "" {
+			continue
+		}
+		secret := os.Getenv(p.prefix + "_CLIENT_SECRET")
+		if secret == "" {
+			return fmt.Errorf("%s_CLIENT_ID is set, so %s_CLIENT_SECRET is required too", p.prefix, p.prefix)
+		}
+		cfg.Auth.Providers = append(cfg.Auth.Providers, api.ProviderConfig{
+			Name: p.name, ClientID: id, ClientSecret: secret,
+			Tenant: os.Getenv(p.prefix + "_TENANT"),
+		})
+	}
+
+	if cfg.Dev {
+		if cfg.SessionKey == "" {
+			// Dev signs everyone out on restart rather than asking for a key.
+			cfg.SessionKey = api.RandomSessionKey()
+		}
+		if cfg.Auth.PublicURL == "" {
+			cfg.Auth.PublicURL = "http://localhost:8080"
+		}
+		return nil
+	}
+
+	switch {
+	case len(cfg.Auth.Providers) == 0:
+		return errors.New("BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID (or _GOOGLE_) is required: outside development mode, OpenID Connect is the only way to sign in")
+	case cfg.Auth.PublicURL == "":
+		return errors.New("BIRDSENSE_PUBLIC_URL is required: it is where the identity provider sends people back to, e.g. https://owls.eastsideaudubon.org")
+	case cfg.SessionKey == "":
+		return errors.New("BIRDSENSE_SESSION_KEY is required: it signs the session cookie, and a fresh one each start would sign everyone out")
+	}
+	return nil
 }
 
 // prepareDatabase is everything the server writes on its own before it serves:

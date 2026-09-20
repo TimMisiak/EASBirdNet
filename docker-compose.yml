@@ -18,6 +18,13 @@ services:
       # Storage -- see DEPLOYMENT.md.
       BIRDSENSE_STORAGE: "local"
       BIRDSENSE_STORAGE_DIR: "/app/audio"
+      # Dev mode signs in from the roster picker, so no identity provider is
+      # needed. To try the real OpenID Connect flow here instead, fill these in
+      # and register http://localhost:${HOST_PORT}/api/v1/auth/microsoft/callback
+      # as a redirect URI (providers allow plain http for localhost only).
+      # BIRDSENSE_PUBLIC_URL: "http://localhost:${HOST_PORT}"
+      # BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID: ""
+      # BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET: ""
     volumes:
       - birdsense-data:/app/data
       - birdsense-audio:/app/audio

@@ -20,7 +20,7 @@ resource "azurerm_container_app_environment" "this" {
 }
 
 resource "azurerm_container_app" "this" {
-  name                         = "ca-${local.base}"
+  name                         = local.app_name
   resource_group_name          = azurerm_resource_group.this.name
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
@@ -29,6 +29,17 @@ resource "azurerm_container_app" "this" {
   identity {
     type         = "UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.this.id]
+  }
+
+  # Sign-in secrets. Container Apps keeps these out of the revision's
+  # environment listing; the container reads them through secret_name below.
+  secret {
+    name  = "oidc-microsoft-client-secret"
+    value = var.oidc_microsoft_client_secret
+  }
+  secret {
+    name  = "session-key"
+    value = var.session_key
   }
 
   # Pulls with AcrPull as the identity above; no password, no admin user.
@@ -118,6 +129,35 @@ resource "azurerm_container_app" "this" {
       env {
         name  = "BIRDSENSE_BOOTSTRAP_ADMIN"
         value = var.bootstrap_admin
+      }
+      # Sign-in. PUBLIC_URL is where the identity provider sends people back
+      # to, and has to match a redirect URI registered with the provider: the
+      # container app's own hostname until a custom domain exists, then the
+      # custom domain. It is configuration rather than the request's Host
+      # header on purpose (see internal/api/auth.go).
+      env {
+        name  = "BIRDSENSE_PUBLIC_URL"
+        value = var.public_url != "" ? var.public_url : "https://${local.app_name}.${azurerm_container_app_environment.this.default_domain}"
+      }
+      env {
+        name  = "BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID"
+        value = var.oidc_microsoft_client_id
+      }
+      env {
+        name        = "BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET"
+        secret_name = "oidc-microsoft-client-secret"
+      }
+      # "common" accepts any organization and any personal Microsoft account,
+      # which is what volunteers with their own addresses need. A tenant id
+      # here restricts sign-in to that one directory.
+      env {
+        name  = "BIRDSENSE_OIDC_MICROSOFT_TENANT"
+        value = var.oidc_microsoft_tenant
+      }
+      # Signs the session cookie. Changing it signs everyone out.
+      env {
+        name        = "BIRDSENSE_SESSION_KEY"
+        secret_name = "session-key"
       }
       # BIRDSENSE_ADDR, BIRDSENSE_STATIC_DIR, BIRDSENSE_STORAGE_DIR and the
       # BirdNET paths are already set in the image. BIRDSENSE_COSMOS_KEY is for

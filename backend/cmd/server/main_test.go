@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -40,7 +41,7 @@ func TestRoutesCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	mux := newMux(config{StaticDir: dir}, store, testFiles(t), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := newMux(config{StaticDir: dir}, store, testFiles(t), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	cases := []struct {
 		path string
@@ -65,7 +66,21 @@ func TestRoutesCoexist(t *testing.T) {
 	}
 }
 
+// signInEnv is the sign-in configuration every deployed server needs, so a
+// test about the database or storage doesn't fail for want of a provider.
+func signInEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BIRDSENSE_PUBLIC_URL", "https://owls.eastsideaudubon.org")
+	t.Setenv("BIRDSENSE_SESSION_KEY", "a test session key")
+	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET", "a test secret")
+	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_TENANT", "")
+	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_ID", "")
+	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET", "")
+}
+
 func TestConfigFromEnvDatabase(t *testing.T) {
+	signInEnv(t)
 	for _, key := range []string{"BIRDSENSE_DB", "BIRDSENSE_LOCAL_DB_PATH", "BIRDSENSE_COSMOS_ENDPOINT", "BIRDSENSE_COSMOS_DATABASE", "BIRDSENSE_COSMOS_KEY", "BIRDSENSE_BOOTSTRAP_ADMIN", "BIRDSENSE_STORAGE", "BIRDSENSE_STORAGE_DIR", "BIRDSENSE_BLOB_ENDPOINT", "BIRDSENSE_BLOB_CONTAINER"} {
 		t.Setenv(key, "")
 	}
@@ -103,6 +118,7 @@ func TestConfigFromEnvDatabase(t *testing.T) {
 }
 
 func TestConfigFromEnvBootstrapAdmin(t *testing.T) {
+	signInEnv(t)
 	t.Setenv("BIRDSENSE_DB", "")
 	t.Setenv("BIRDSENSE_COSMOS_ENDPOINT", "https://birdsense.documents.azure.com:443/")
 	t.Setenv("BIRDSENSE_STORAGE", "")
@@ -152,6 +168,7 @@ func TestConfigFromEnvBootstrapAdmin(t *testing.T) {
 // Card audio goes where the database does unless told otherwise: Azure beside
 // Cosmos, a directory in dev mode.
 func TestConfigFromEnvStorage(t *testing.T) {
+	signInEnv(t)
 	for _, key := range []string{"BIRDSENSE_DB", "BIRDSENSE_LOCAL_DB_PATH", "BIRDSENSE_BOOTSTRAP_ADMIN", "BIRDSENSE_STORAGE", "BIRDSENSE_STORAGE_DIR", "BIRDSENSE_BLOB_ENDPOINT", "BIRDSENSE_BLOB_CONTAINER"} {
 		t.Setenv(key, "")
 	}
@@ -202,7 +219,7 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
 			t.Fatalf("prepare: %v", err)
 		}
-		mux := newMux(cfg, store, testFiles(t), nil, log)
+		mux := newMux(cfg, store, testFiles(t), nil, nil, log)
 		for _, path := range []string{"/api/v1/health", "/api/v1/session", "/api/v1/public/overview"} {
 			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
 		}
@@ -248,7 +265,7 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 			t.Fatalf("prepare: %v", err)
 		}
 	}
-	mux := newMux(cfg, store, testFiles(t), nil, log)
+	mux := newMux(cfg, store, testFiles(t), nil, nil, log)
 	get := func(path string, cookie *http.Cookie) string {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -284,5 +301,78 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 	}
 	if users, _ := store.ListUsers(ctx); len(users) != 1 {
 		t.Errorf("dev with a bootstrap admin has %d people, want only the admin", len(users))
+	}
+}
+
+// Outside dev mode there is no way in but OIDC, so a deployment that has none
+// configured has to say so at startup rather than when someone tries to sign
+// in. Dev mode fills in what it can instead.
+func TestConfigFromEnvSignIn(t *testing.T) {
+	for _, key := range []string{
+		"BIRDSENSE_DB", "BIRDSENSE_BLOB_ENDPOINT", "BIRDSENSE_COSMOS_ENDPOINT",
+		"BIRDSENSE_PUBLIC_URL", "BIRDSENSE_SESSION_KEY",
+		"BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID", "BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET",
+		"BIRDSENSE_OIDC_GOOGLE_CLIENT_ID", "BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("BIRDSENSE_COSMOS_ENDPOINT", "https://birdsense.documents.azure.com:443/")
+	t.Setenv("BIRDSENSE_BLOB_ENDPOINT", testBlobEndpoint)
+
+	for _, want := range []string{"BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID", "BIRDSENSE_PUBLIC_URL", "BIRDSENSE_SESSION_KEY"} {
+		_, err := configFromEnv()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to ask for %s", err, want)
+		}
+		switch want {
+		case "BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID":
+			t.Setenv(want, "00000000-0000-0000-0000-000000000000")
+			t.Setenv("BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET", "a test secret")
+		case "BIRDSENSE_PUBLIC_URL":
+			t.Setenv(want, "https://owls.eastsideaudubon.org/")
+		case "BIRDSENSE_SESSION_KEY":
+			t.Setenv(want, "a test session key")
+		}
+	}
+
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configured sign-in: %v", err)
+	}
+	// The trailing slash is trimmed, so the redirect URI has one separator.
+	if cfg.Auth.PublicURL != "https://owls.eastsideaudubon.org" {
+		t.Errorf("public URL = %q, want it without the trailing slash", cfg.Auth.PublicURL)
+	}
+	if len(cfg.Auth.Providers) != 1 || cfg.Auth.Providers[0].Name != api.ProviderMicrosoft {
+		t.Errorf("providers = %+v, want just microsoft", cfg.Auth.Providers)
+	}
+
+	// A client id with no secret is a half-configured provider, not a silent
+	// one.
+	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_ID", "google-client-id")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET") {
+		t.Errorf("err = %v, want it to ask for the Google secret", err)
+	}
+	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET", "a test secret")
+
+	// Dev mode asks for none of it: the development sign-in is there instead.
+	t.Setenv("BIRDSENSE_DB", "local")
+	for _, key := range []string{
+		"BIRDSENSE_PUBLIC_URL", "BIRDSENSE_SESSION_KEY",
+		"BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID", "BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET",
+		"BIRDSENSE_OIDC_GOOGLE_CLIENT_ID", "BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET",
+	} {
+		t.Setenv(key, "")
+	}
+	cfg, err = configFromEnv()
+	switch {
+	case err != nil:
+		t.Fatalf("dev config: %v", err)
+	case len(cfg.Auth.Providers) != 0:
+		t.Errorf("dev providers = %+v, want none", cfg.Auth.Providers)
+	case cfg.SessionKey == "":
+		t.Error("dev mode left the session key empty, so nothing would sign cookies")
+	case cfg.Auth.PublicURL != "http://localhost:8080":
+		t.Errorf("dev public URL = %q, want localhost", cfg.Auth.PublicURL)
 	}
 }

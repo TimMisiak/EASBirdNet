@@ -13,6 +13,10 @@ locals {
   # Storage account and registry names allow only lowercase alphanumerics.
   compact = "birdsense${var.env}${var.name_suffix}"
 
+  # The container app's name, as a local because its own default public URL is
+  # built from it: referring to the resource from inside itself is a cycle.
+  app_name = "ca-${local.base}"
+
   tags = {
     app   = "birdsense"
     env   = var.env

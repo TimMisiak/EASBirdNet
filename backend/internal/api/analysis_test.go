@@ -47,7 +47,8 @@ func TestTheLastFileQueuesTheCardForAnalysis(t *testing.T) {
 	mux := http.NewServeMux()
 	register(mux, &handlers{
 		store: store, files: files, queue: queue, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		now: func() time.Time { return testNow },
+		keys: newKeyset(testSessionKey),
+		now:  func() time.Time { return testNow },
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

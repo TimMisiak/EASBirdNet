@@ -21,3 +21,26 @@ bootstrap_admin = "Your Name <you@eastsideaudubon.org>"
 # Sized for the analysis queue. Container Apps only allows particular pairs.
 # cpu    = 1.0
 # memory = "2Gi"
+
+# --- Sign-in (DEPLOYMENT.md, "Sign-in") ---
+
+# The Entra ID app registration volunteers sign in through: its Application
+# (client) ID, and a client secret. Create the registration with the redirect
+# URI `terraform output -raw app_url` + /api/v1/auth/microsoft/callback.
+oidc_microsoft_client_id     = "00000000-0000-0000-0000-000000000000"
+oidc_microsoft_client_secret = "the client secret's *value*, not its id"
+
+# Signs the session cookie: any long random string, kept the same across
+# deploys so a new revision doesn't sign everyone out.
+#   openssl rand -base64 32
+session_key = "generate one, don't use this line"
+
+# Where browsers reach Birdsense. Empty (the default) uses the container app's
+# own hostname, which is right until a custom domain exists. Set it the same
+# day the custom domain does, and register the matching redirect URI first.
+# public_url = "https://owls.eastsideaudubon.org"
+
+# `common` accepts any organization and any personal Microsoft account, which
+# is what volunteers with their own addresses need. A tenant GUID here would
+# restrict sign-in to that one directory.
+# oidc_microsoft_tenant = "common"

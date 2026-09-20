@@ -2,8 +2,8 @@
 // /api/v1/ so the static frontend can own every other path.
 //
 // Handlers read and write through db.Store and answer in the shapes in
-// shapes.go. Sign-in is still a placeholder: it trusts the client (see
-// sessionCookie).
+// shapes.go. Sign-in is OpenID Connect against Google and Microsoft (auth.go);
+// the roster is the allow-list behind it.
 package api
 
 import (
@@ -23,20 +23,38 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
-// sessionCookie carries the signed-in person's email.
-//
-// PLACEHOLDER AUTH: there is no identity provider wired up and nothing signs
-// this cookie, so anyone can claim any roster address. Replace the whole
-// session block with real OIDC against Google and Microsoft before this is
-// reachable from outside a demo.
+// sessionCookie carries the signed-in person's email, signed with the server's
+// key (cookies.go) so it can't be edited into someone else's.
 const sessionCookie = "bs_session"
 
-// Register mounts the API routes on mux. files is where card audio goes, and
-// queue is told when a card has all its files, so BirdNET can start on it. dev
-// turns on the development-only routes -- today, the roster the sign-in page
-// lets you pick an account from.
-func Register(mux *http.ServeMux, store db.Store, files storage.Store, queue Queue, log *slog.Logger, dev bool) {
-	register(mux, &handlers{store: store, files: files, queue: queue, log: log, dev: dev, now: time.Now})
+// sessionLife is how long a signed-in volunteer is left alone. They sign in
+// once and send cards for the season.
+const sessionLife = 90 * 24 * time.Hour
+
+// Options is everything the API needs from the rest of the server.
+type Options struct {
+	Store db.Store
+	// Files is where card audio goes.
+	Files storage.Store
+	// Queue is told when a card has all its files, so BirdNET can start on it.
+	Queue Queue
+	Log   *slog.Logger
+	// Dev turns on the development-only routes -- the roster the sign-in page
+	// lets you pick an account from, and the sign-in that goes with it.
+	Dev bool
+	// Auth is OIDC sign-in. Nil offers none, which only dev mode survives.
+	Auth *Authenticator
+	// SessionKey signs the session cookie. Changing it signs everyone out.
+	SessionKey string
+}
+
+// Register mounts the API routes on mux.
+func Register(mux *http.ServeMux, o Options) {
+	register(mux, &handlers{
+		store: o.Store, files: o.Files, queue: o.Queue, log: o.Log, dev: o.Dev,
+		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
+		now: time.Now,
+	})
 }
 
 // Queue is the analysis queue (internal/analysis). A received card is queued
@@ -54,8 +72,14 @@ func register(mux *http.ServeMux, h *handlers) {
 
 	// Session.
 	mux.HandleFunc("GET /api/v1/session", h.getSession)
-	mux.HandleFunc("POST /api/v1/session", h.createSession)
 	mux.HandleFunc("DELETE /api/v1/session", h.deleteSession)
+
+	// Sign-in: a browser is redirected through these, so they answer with
+	// redirects rather than JSON (auth.go).
+	if h.auth != nil {
+		mux.HandleFunc("GET /api/v1/auth/{provider}/start", h.authStart)
+		mux.HandleFunc("GET /api/v1/auth/{provider}/callback", h.authCallback)
+	}
 
 	// Volunteer.
 	mux.HandleFunc("GET /api/v1/stations", h.requireSession(h.listStations))
@@ -89,6 +113,10 @@ func register(mux *http.ServeMux, h *handlers) {
 	// 404s instead of handing the roster to anyone who asks.
 	if h.dev {
 		mux.HandleFunc("GET /api/v1/dev/people", h.listDevPeople)
+		// Signing in as anyone on the roster, with no provider behind it. This
+		// is the development picker, and it is why it is registered here and
+		// not at all otherwise: a deployed server has no way in but OIDC.
+		mux.HandleFunc("POST /api/v1/session", h.createSession)
 	}
 
 	// Anything else under /api/ is a 404 as JSON, not as the frontend's
@@ -107,6 +135,12 @@ type handlers struct {
 	log   *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
+	// auth is OIDC sign-in, or nil when none is configured.
+	auth *Authenticator
+	// keys signs the session and sign-in cookies.
+	keys *keyset
+	// secureCookies keeps cookies to HTTPS. Off in dev, which is http://localhost.
+	secureCookies bool
 	// now is the clock, so tests can pin "this year" and "the last 7 nights".
 	now func() time.Time
 }
@@ -156,9 +190,12 @@ func (h *handlers) getSession(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		user = personOf(me)
 	}
-	h.json(w, http.StatusOK, map[string]any{"user": user, "dev": h.dev})
+	h.json(w, http.StatusOK, map[string]any{"user": user, "dev": h.dev, "providers": h.auth.Names()})
 }
 
+// createSession is the development sign-in: pick anyone on the roster, with no
+// identity provider behind it. It is only registered in dev mode (see
+// register), so a deployed server's only way in is OIDC.
 func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
@@ -179,8 +216,6 @@ func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 	case body.Email != "":
 		me, err = h.store.GetUserByEmail(ctx, body.Email)
 	case body.Role != "":
-		// PLACEHOLDER: "sign in as an admin" with no identity provider behind
-		// it. Goes away with the first real OIDC callback.
 		me, err = h.firstWithRole(r, body.Role)
 	default:
 		err = db.ErrNotFound
@@ -204,13 +239,13 @@ func (h *handlers) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSession(w, me)
+	h.setSession(w, me)
 	h.json(w, http.StatusOK, map[string]any{"user": personOf(me)})
 }
 
-// firstWithRole is how the placeholder sign-in picks an account: there is no
-// identity provider wired up, so "sign in as an admin" means "be the first
-// admin on the roster", by name.
+// firstWithRole is how the development sign-in picks an account without being
+// told an address: "sign in as an admin" means "be the first admin on the
+// roster", by name.
 func (h *handlers) firstWithRole(r *http.Request, role string) (db.User, error) {
 	roster, err := h.roster(r)
 	if err != nil {
@@ -224,11 +259,12 @@ func (h *handlers) firstWithRole(r *http.Request, role string) (db.User, error) 
 	return db.User{}, db.ErrNotFound
 }
 
-func setSession(w http.ResponseWriter, u db.User) {
-	// Volunteers sign in once and are left alone for the season.
+func (h *handlers) setSession(w http.ResponseWriter, u db.User) {
+	expires := h.now().Add(sessionLife)
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: u.Email, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 90 * 24 * 3600,
+		Name: sessionCookie, Value: h.keys.sign(u.Email, expires), Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: h.secureCookies,
+		MaxAge: int(sessionLife / time.Second),
 	})
 }
 
@@ -239,7 +275,10 @@ func (h *handlers) listDevPeople(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) deleteSession(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: h.secureCookies, MaxAge: -1,
+	})
 	h.json(w, http.StatusOK, map[string]any{"user": nil})
 }
 
@@ -250,7 +289,13 @@ func (h *handlers) signedIn(r *http.Request) (db.User, bool, error) {
 	if err != nil || c.Value == "" {
 		return db.User{}, false, nil
 	}
-	u, err := h.store.GetUserByEmail(r.Context(), c.Value)
+	// An edited or expired cookie is anonymous, not an error: the browser is
+	// told to sign in again.
+	email, err := h.keys.verify(c.Value, h.now())
+	if err != nil {
+		return db.User{}, false, nil
+	}
+	u, err := h.store.GetUserByEmail(r.Context(), email)
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		return db.User{}, false, nil
@@ -990,7 +1035,7 @@ func (h *handlers) updatePerson(w http.ResponseWriter, r *http.Request, me db.Us
 	// The session cookie is the address, so re-addressing yourself would sign
 	// you out mid-edit. Reissue it for the new one.
 	if u.ID == me.ID {
-		setSession(w, u)
+		h.setSession(w, u)
 	}
 	h.json(w, http.StatusOK, map[string]any{"person": personOf(u)})
 }

@@ -70,3 +70,47 @@ variable "grant_operator_blob_access" {
   type        = bool
   default     = true
 }
+
+variable "public_url" {
+  description = "Where browsers reach Birdsense, scheme and host, e.g. https://owls.eastsideaudubon.org. The identity provider's redirect URI is built from it, so it must be registered with the provider exactly. Empty uses the container app's own hostname, which is what to use before a custom domain exists."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.public_url == "" || can(regex("^https://[^/]+$", var.public_url))
+    error_message = "public_url must be https:// and a host with no path or trailing slash."
+  }
+}
+
+variable "oidc_microsoft_client_id" {
+  description = "Application (client) ID of the Entra ID app registration volunteers sign in through. Required: outside dev mode OpenID Connect is the only way in."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9a-fA-F-]{36}$", var.oidc_microsoft_client_id))
+    error_message = "oidc_microsoft_client_id must be the app registration's GUID."
+  }
+}
+
+variable "oidc_microsoft_client_secret" {
+  description = "Client secret of that app registration. Kept as a Container Apps secret, not in the revision's environment."
+  type        = string
+  sensitive   = true
+}
+
+variable "oidc_microsoft_tenant" {
+  description = "Directory to sign in against. `common` accepts any organization and any personal Microsoft account, which is what a roster of volunteers with their own addresses needs; a tenant GUID restricts sign-in to that one directory."
+  type        = string
+  default     = "common"
+}
+
+variable "session_key" {
+  description = "Signs the session cookie. Any long random string (openssl rand -base64 32). Changing it signs everyone out, which is how to end every session at once."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.session_key) >= 32
+    error_message = "session_key must be at least 32 characters; generate one with `openssl rand -base64 32`."
+  }
+}

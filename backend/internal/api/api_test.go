@@ -21,6 +21,10 @@ import (
 // testNow is the handlers' clock in every test: 11 a.m. Pacific.
 var testNow = time.Date(2026, time.September, 14, 18, 0, 0, 0, time.UTC)
 
+// testSessionKey signs the test server's cookies, so a test can mint a session
+// without an identity provider.
+const testSessionKey = "test session key"
+
 func newTestMux(t *testing.T) (*http.ServeMux, db.Store) {
 	t.Helper()
 	return newTestMuxMode(t, false)
@@ -57,7 +61,8 @@ func muxFor(store db.Store, files storage.Store, dev bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	register(mux, &handlers{
 		store: store, files: files, log: slog.New(slog.NewTextHandler(io.Discard, nil)), dev: dev,
-		now: func() time.Time { return testNow },
+		keys: newKeyset(testSessionKey),
+		now:  func() time.Time { return testNow },
 	})
 	return mux
 }
@@ -155,18 +160,36 @@ func seedProgram(t *testing.T, s db.Store) {
 }
 
 // signedIn returns the session cookie for the first person with the given
-// role, so a test can call the routes behind requireSession.
-func signedIn(t *testing.T, mux *http.ServeMux, role string) *http.Cookie {
+// role, so a test can call the routes behind requireSession. It signs one
+// rather than asking a route for it: real sign-in needs an identity provider,
+// and the development sign-in only exists in dev mode.
+//
+// seedProgram sorts so that the first admin is Dana and the first volunteer is
+// Jane, which is who the routes would have picked.
+func signedIn(t *testing.T, _ *http.ServeMux, role string) *http.Cookie {
 	t.Helper()
-	return signIn(t, mux, `{"role":"`+role+`"}`)
+	switch role {
+	case db.RoleAdmin:
+		return signInAs(t, nil, "dana@eastsideaudubon.org")
+	case db.RoleVolunteer:
+		return signInAs(t, nil, "jane@example.com")
+	}
+	t.Fatalf("no seeded person has the role %q", role)
+	return nil
 }
 
-func signInAs(t *testing.T, mux *http.ServeMux, email string) *http.Cookie {
+// signInAs is a session cookie for one address, as setSession would write it.
+func signInAs(t *testing.T, _ *http.ServeMux, email string) *http.Cookie {
 	t.Helper()
-	return signIn(t, mux, `{"email":"`+email+`"}`)
+	return &http.Cookie{
+		Name:  sessionCookie,
+		Value: newKeyset(testSessionKey).sign(strings.ToLower(email), testNow.Add(sessionLife)),
+	}
 }
 
-func signIn(t *testing.T, mux *http.ServeMux, body string) *http.Cookie {
+// devSignIn goes through the development sign-in route, which only a dev-mode
+// mux has.
+func devSignIn(t *testing.T, mux *http.ServeMux, body string) *http.Cookie {
 	t.Helper()
 	rec := do(t, mux, http.MethodPost, "/api/v1/session", body, nil)
 	if rec.Code != http.StatusOK {
@@ -371,18 +394,11 @@ func TestAdminRoutesRejectVolunteers(t *testing.T) {
 	}
 }
 
-func TestSignIn(t *testing.T) {
+func TestSession(t *testing.T) {
 	mux, store := newTestMux(t)
 
-	if rec := do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil); rec.Code != http.StatusForbidden {
-		t.Errorf("stranger = %d, want %d", rec.Code, http.StatusForbidden)
-	}
-
-	// Addresses match case-insensitively, and a sign-in is recorded.
+	// Addresses match case-insensitively.
 	jane := signInAs(t, mux, "Jane@Example.com")
-	if u := userByEmail(t, store, "jane@example.com"); u.LastSignInAt == nil || !u.LastSignInAt.Equal(testNow) {
-		t.Errorf("lastSignInAt = %v, want %v", u.LastSignInAt, testNow)
-	}
 	rec := do(t, mux, http.MethodGet, "/api/v1/session", "", jane)
 	if session := decodeInto[struct{ User *Person }](t, rec); session.User == nil || session.User.Name != "Jane Volunteer" {
 		t.Errorf("session = %s, want Jane", rec.Body)
@@ -396,15 +412,90 @@ func TestSignIn(t *testing.T) {
 		}
 	}
 
-	// Once Jane is removed, she can't sign in, and her open session ends.
+	// Once Jane is removed, her open session ends.
 	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/"+userByEmail(t, store, "jane@example.com").ID, "", admin); rec.Code != http.StatusOK {
+		t.Fatalf("remove Jane = %d (%s)", rec.Code, rec.Body)
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads", "", jane); rec.Code != http.StatusUnauthorized {
+		t.Errorf("removed person's session = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// The session cookie is signed, so the address in it is the server's word and
+// not the browser's. This is the whole difference from the placeholder cookie,
+// which anyone could type an admin's address into.
+func TestSessionCookieIsSigned(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signInAs(t, mux, "dana@eastsideaudubon.org")
+
+	for _, c := range []struct {
+		what   string
+		cookie *http.Cookie
+	}{
+		{"the bare address", &http.Cookie{Name: sessionCookie, Value: "dana@eastsideaudubon.org"}},
+		{"another address spliced onto a real signature", &http.Cookie{
+			Name:  sessionCookie,
+			Value: forge(newKeyset(testSessionKey).sign("jane@example.com", testNow.Add(sessionLife)), admin.Value),
+		}},
+		{"a signature from another key", &http.Cookie{
+			Name:  sessionCookie,
+			Value: newKeyset("not the server's key").sign("dana@eastsideaudubon.org", testNow.Add(time.Hour)),
+		}},
+		{"an expired session", &http.Cookie{
+			Name:  sessionCookie,
+			Value: newKeyset(testSessionKey).sign("dana@eastsideaudubon.org", testNow.Add(-time.Second)),
+		}},
+	} {
+		if rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", c.cookie); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s = %d, want %d", c.what, rec.Code, http.StatusUnauthorized)
+		}
+	}
+
+	// The real one still works, so the test isn't passing by rejecting everything.
+	if rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin); rec.Code != http.StatusOK {
+		t.Errorf("a signed session = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+// forge puts the body of one cookie under the signature of another, which is
+// what tampering with a signed cookie actually looks like.
+func forge(body, signature string) string {
+	value, _, _ := reverseCut(body)
+	_, mac, _ := reverseCut(signature)
+	return value + "." + mac
+}
+
+// Signing in as anyone on the roster is the development picker. A deployed
+// server must not offer it: OIDC is the only way in there.
+func TestPlaceholderSignInIsDevOnly(t *testing.T) {
+	prod, _ := newTestMuxMode(t, false)
+	if rec := do(t, prod, http.MethodPost, "/api/v1/session", `{"role":"admin"}`, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("POST /session outside dev = %d, want %d (%s)", rec.Code, http.StatusNotFound, rec.Body)
+	}
+
+	mux, store := newTestMuxMode(t, true)
+	if rec := do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"stranger@example.com"}`, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("stranger = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	// Signing in is recorded, and the cookie it sets is the signed one.
+	jane := devSignIn(t, mux, `{"email":"Jane@Example.com"}`)
+	if u := userByEmail(t, store, "jane@example.com"); u.LastSignInAt == nil || !u.LastSignInAt.Equal(testNow) {
+		t.Errorf("lastSignInAt = %v, want %v", u.LastSignInAt, testNow)
+	}
+	rec := do(t, mux, http.MethodGet, "/api/v1/session", "", jane)
+	if session := decodeInto[struct{ User *Person }](t, rec); session.User == nil || session.User.Name != "Jane Volunteer" {
+		t.Errorf("session = %s, want Jane", rec.Body)
+	}
+
+	// A removed person can't sign in with it either.
+	admin := devSignIn(t, mux, `{"role":"admin"}`)
+	id := userByEmail(t, store, "jane@example.com").ID
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/people/"+id, "", admin); rec.Code != http.StatusOK {
 		t.Fatalf("remove Jane = %d (%s)", rec.Code, rec.Body)
 	}
 	if rec := do(t, mux, http.MethodPost, "/api/v1/session", `{"email":"jane@example.com"}`, nil); rec.Code != http.StatusForbidden {
 		t.Errorf("removed person signs in = %d, want %d", rec.Code, http.StatusForbidden)
-	}
-	if rec := do(t, mux, http.MethodGet, "/api/v1/uploads", "", jane); rec.Code != http.StatusUnauthorized {
-		t.Errorf("removed person's session = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
 

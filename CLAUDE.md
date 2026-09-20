@@ -109,7 +109,9 @@ landing page never needs a session:
 ```
 GET    /api/v1/health
 GET    /api/v1/public/overview?days=      program stats + confirmed species
-GET    POST DELETE /api/v1/session        who you are; sign in; sign out
+GET    DELETE /api/v1/session             who you are; sign out
+GET    /api/v1/auth/{provider}/start      leave for Google or Microsoft
+GET    /api/v1/auth/{provider}/callback   come back from them, signed in
 GET    /api/v1/stations                   recorders in the field
 GET    POST /api/v1/uploads               your cards; register a card and its files
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
@@ -127,11 +129,14 @@ PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
 PUT    DELETE /api/v1/admin/stations/{id} rename, move or remove a recorder
 GET    /api/v1/dev/people                 the roster, dev mode only
+POST   /api/v1/session                    sign in as anyone on it, dev mode only
 ```
 
 Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
-there). It registers the `/dev/*` routes, and `GET /session` reports it as
-`dev`, so the sign-in page offers a picker of everyone on the roster.
+there). It registers the `/dev/*` routes *and* `POST /session`, and
+`GET /session` reports it as `dev`, so the sign-in page offers a picker of
+everyone on the roster. A deployed server registers neither, so its only way in
+is a provider.
 
 A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
 anyone else, and the `/admin/*` routes 403 for a volunteer.
@@ -158,6 +163,34 @@ whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
 routes for a path with an id on the end) and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
+
+**Sign-in is OpenID Connect; the roster is the allow-list.** `internal/api/auth.go`
+runs the authorization-code flow (PKCE, state and nonce in one short-lived
+signed cookie) against Microsoft, and Google when a second client id is set.
+Verifying the ID token is a real job, so it uses `github.com/coreos/go-oidc`
+rather than parsing JWTs by hand. What a provider proves is *which address you
+own*; what lets you in is a coordinator having put that address on the roster,
+which is why the sign-in audience can safely be "any Microsoft account,
+personal ones included" and volunteers use whatever address they already have.
+Two consequences worth knowing:
+- Accepting any Microsoft account means accepting any organization's
+  directory, and a directory's administrators choose what their users' `email`
+  claims say. So an email claim is only believed when the provider is in a
+  position to know it: a personal account (`tid` is the consumer tenant), an
+  organization that has proved it owns the domain (`xms_edov`, an optional
+  claim the app registration has to ask for), or Google's `email_verified`.
+  Anything else is refused with `unverified-email`. `trustedEmail` is the
+  whole rule.
+- Microsoft's multi-tenant endpoints report a *templated* issuer, which
+  go-oidc refuses, so discovery passes `InsecureIssuerURLContext` and the
+  issuer is checked per token against the token's own `tid` (`verifyIssuer`).
+The session cookie is the address, HMAC-signed with `BIRDSENSE_SESSION_KEY`
+(`cookies.go`); the key is configuration, not generated at startup, so a new
+revision doesn't sign everyone out -- and rotating it deliberately is how you
+end every session at once. Removing someone from the roster already ends
+theirs, so there is no session store to revoke from.
+*Revisit when:* a provider has to be something other than Google or Microsoft,
+or sessions need to be listed and revoked one at a time.
 
 **Card audio goes over tus, through the app.** A card is ~128 GB in files of a
 few hundred MB, sent over home connections that drop. The browser sends each
@@ -326,6 +359,17 @@ to re-seed. Without
 `BIRDSENSE_COSMOS_DATABASE`) and Blob Storage (`BIRDSENSE_BLOB_ENDPOINT`,
 `BIRDSENSE_BLOB_CONTAINER`), and exits if they aren't configured.
 `BIRDSENSE_STORAGE=local|azure` overrides where audio goes either way.
+Sign-in needs `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` and `_CLIENT_SECRET` (and
+`_TENANT`, default `common`; `BIRDSENSE_OIDC_GOOGLE_*` the same way),
+`BIRDSENSE_PUBLIC_URL` -- where a browser reaches the app, which the redirect
+URI is built from and which has to match what is registered with the provider
+-- and `BIRDSENSE_SESSION_KEY`. Outside dev mode the server refuses to start
+without them, because the development sign-in isn't registered there and it
+would have no way in at all. Dev mode fills all four in (a random session key,
+`http://localhost:8080`) and offers the roster picker instead, so the real flow
+is opt-in locally: set the three Microsoft variables and register
+`http://localhost:8080/api/v1/auth/microsoft/callback`, which providers allow
+over plain http for localhost only.
 `BIRDSENSE_BOOTSTRAP_ADMIN="Name <email>"` adds the first admin to an empty
 roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
 the seed, so setting it starts you from a clean roster. Outside dev mode it
@@ -383,12 +427,13 @@ is the one hard delete, and takes its audio and detections with it).
 `internal/api` tests build their own small fixed-date program in the JSON
 backend, deliberately not the dev seed.
 
-Still placeholder: sign-in (the session cookie is an unsigned email address, and
-`POST /session {"role": ...}` signs in as the first person with that role).
-The Cosmos DB backend compiles but has not been run against Azure or the
-emulator; the JSON-file backend and its tests define the behaviour it must
-match. The Blob Storage backend has run against Azurite with a shared key, not
-against Azure with a managed identity (DEPLOYMENT.md lists what to check).
+Sign-in is real: OpenID Connect against Microsoft, with the roster as the
+allow-list (see *Sign-in* above). `POST /session {"role": ...}` still signs in
+as the first person with that role, but only in dev mode. Google is written and
+untested -- it needs a client id, a secret, and someone to try it.
+The Cosmos DB backend and the Blob Storage backend have both run in Azure
+against a real card: documents, uploads and analysis all work there. The
+JSON-file backend and its tests still define the behaviour Cosmos must match.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
 and the analysis queue runs BirdNET over it in the server process, writing
 `unreviewed` detections, each with a clip. The coordinator's card page

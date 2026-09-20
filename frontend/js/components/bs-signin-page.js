@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, typography } from "../shared-styles.js";
-import { navigate } from "../router.js";
+import { navigate, query } from "../router.js";
 import * as api from "../api.js";
 import * as session from "../session.js";
 import "./bs-brand-mark.js";
@@ -9,10 +9,15 @@ import "./bs-brand-mark.js";
  * <bs-signin-page>. The roster is the allow-list: there is no password, and
  * anyone whose address a coordinator hasn't added gets told so plainly.
  *
- * The identity providers aren't wired up yet, so the provider buttons sign in
- * as the first volunteer on the roster. In dev mode a boxed picker at the
- * bottom lists everyone on the roster to sign in as; the server only offers
- * that roster in dev mode, and the page only asks for it there.
+ * A provider button leaves the app: it is a full navigation to
+ * /api/v1/auth/{provider}/start, which redirects to the provider and comes
+ * back to the callback, so nothing here is a fetch. A sign-in that failed
+ * comes back to /signin?error=<reason>, which signInError turns into a
+ * sentence.
+ *
+ * In dev mode a boxed picker at the bottom lists everyone on the roster to
+ * sign in as; the server only offers that roster in dev mode, and the page
+ * only asks for it there.
  */
 class SignInPage extends BaseElement {
   static styles = [typography, controls, forms];
@@ -36,9 +41,33 @@ class SignInPage extends BaseElement {
     this.render();
   }
 
+  /** What the callback said when it sent the browser back here. */
+  get #failure() {
+    const reason = query().get("error");
+    if (!reason) return null;
+    return (
+      {
+        "not-on-roster":
+          "That address isn't on the roster yet. Ask a coordinator to add it, then try again.",
+        "unverified-email":
+          "Your provider didn't confirm that address is yours, so we can't match it to the roster.",
+        denied: "Sign-in was cancelled.",
+        expired: "That took a while — please try again.",
+        state: "That sign-in didn't look right. Please try again.",
+        "provider-unreachable": "We couldn't reach the sign-in provider. Please try again in a moment.",
+      }[reason] ?? "Sign-in didn't work. Please try again."
+    );
+  }
+
   get actions() {
     return {
-      provider: (el) => this.#signIn({ role: "volunteer", provider: el.dataset.provider }),
+      provider: (el) => {
+        this.#busy = true;
+        this.render();
+        // A full navigation, not a fetch: the provider will redirect the
+        // browser back to the callback.
+        window.location.assign(`/api/v1/auth/${encodeURIComponent(el.dataset.provider)}/start`);
+      },
       dev: (form) => this.#signIn({ email: form.elements.email.value }),
     };
   }
@@ -56,6 +85,38 @@ class SignInPage extends BaseElement {
       this.#error = error;
       this.render();
     }
+  }
+
+  /** The one thing to tell them, whether it came from the callback or a fetch. */
+  get #message() {
+    return this.#error?.message ?? this.#failure;
+  }
+
+  /**
+   * One button per provider the server is configured for, so a button never
+   * leads to a route that isn't registered.
+   */
+  #providerButtons() {
+    const known = {
+      microsoft: { label: "Continue with Microsoft", logo: "/images/microsoft-logo.svg" },
+      google: { label: "Continue with Google", logo: "/images/google-g.svg" },
+    };
+    const offered = session.identityProviders().filter((name) => known[name]);
+    if (!offered.length) {
+      return session.isDev()
+        ? ""
+        : `<p class="error">Sign-in isn't configured on this server yet.</p>`;
+    }
+    return offered
+      .map((name) => {
+        const { label, logo } = known[name];
+        return `
+          <button class="btn provider" data-action="provider" data-provider="${escapeHTML(name)}" ${this.#busy ? "disabled" : ""}>
+            <img class="logo" src="${escapeHTML(logo)}" alt="" width="20" height="20"> ${escapeHTML(label)}
+          </button>
+        `;
+      })
+      .join("");
   }
 
   #devPicker() {
@@ -151,14 +212,9 @@ class SignInPage extends BaseElement {
           Use the email address your coordinator added to the roster.
         </p>
         <div class="providers">
-          <button class="btn provider" data-action="provider" data-provider="Google" ${this.#busy ? "disabled" : ""}>
-            <img class="logo" src="/images/google-g.svg" alt="" width="20" height="20"> Continue with Google
-          </button>
-          <button class="btn provider" data-action="provider" data-provider="Microsoft" ${this.#busy ? "disabled" : ""}>
-            <img class="logo" src="/images/microsoft-logo.svg" alt="" width="20" height="20"> Continue with Microsoft
-          </button>
+          ${this.#providerButtons()}
         </div>
-        ${this.#error ? `<p class="error">${escapeHTML(this.#error.message)}</p>` : ""}
+        ${this.#message ? `<p class="error">${escapeHTML(this.#message)}</p>` : ""}
         <div class="help">
           If we don't recognize your address, email
           <a href="mailto:owls@eastsideaudubon.org">owls@eastsideaudubon.org</a>

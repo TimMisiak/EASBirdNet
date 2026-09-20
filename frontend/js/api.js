@@ -36,12 +36,13 @@ const get = (path) => request("GET", path);
 export const fetchOverview = (days) =>
   get(`/public/overview${days ? `?days=${days}` : ""}`);
 
-/** @returns {Promise<{user: object|null, dev: boolean}>} */
+/** @returns {Promise<{user: object|null, dev: boolean, providers: string[]}>} */
 export const fetchSession = () => get("/session");
 
 /**
- * Sign in. Pass an email address, or -- until an identity provider is wired
- * up -- a role to be signed in as the first person on the roster holding it.
+ * Sign in as anyone on the roster, by address or by role. This is the
+ * development sign-in: a deployed server doesn't register the route, and the
+ * page uses /auth/{provider}/start instead.
  */
 export const createSession = (body) => request("POST", "/session", body);
 export const deleteSession = () => request("DELETE", "/session");

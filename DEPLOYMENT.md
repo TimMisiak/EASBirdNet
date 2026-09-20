@@ -224,13 +224,68 @@ environment forwards here.
 | `AZURE_CLIENT_ID` | `azurerm_user_assigned_identity.this.client_id` | Tells the SDK *which* managed identity to use. Required for a user-assigned identity. |
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
+| `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
+| `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
+| `BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET` | Container Apps secret `oidc-microsoft-client-secret` | Kept as a secret, so it isn't in the revision's environment listing. |
+| `BIRDSENSE_OIDC_MICROSOFT_TENANT` | `var.oidc_microsoft_tenant`, default `common` | `common` accepts any organization and any personal Microsoft account. A tenant GUID restricts sign-in to that directory. |
+| `BIRDSENSE_SESSION_KEY` | Container Apps secret `session-key` | Signs the session cookie. Keep it stable across deploys; changing it signs everyone out. |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
 | `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The server checks them at startup, and logs `BirdNET isn't available` (and analyzes nothing) if they don't work. |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 
 **Custom domain** (optional, when chosen): `azurerm_container_app_custom_domain`
-with a managed certificate, plus a CNAME and `asuid` TXT record at the DNS host.
+with a managed certificate, plus a CNAME and `asuid` TXT record at the DNS
+host. The records have to resolve publicly before Azure will attach the domain
+or issue the certificate, so a hosts-file entry can't stand in for them. When
+it lands, register the matching redirect URI with the provider *first*, then
+set `public_url` -- see [Sign-in](#sign-in).
+
+## Sign-in
+
+Volunteers sign in with OpenID Connect, and the roster is the allow-list: the
+provider proves which address someone owns, and a coordinator having added that
+address is what lets them in. Nothing in Azure holds passwords. The server
+refuses to start outside dev mode without a provider configured, because the
+development sign-in isn't registered there and it would have no way in at all.
+
+**The app registration** lives in Entra ID, which is a *directory* object, not
+an Azure resource: Contributor, Owner or Role Based Access Control
+Administrator on the subscription grant nothing here. Creating one needs either
+the tenant's "Users can register applications" setting left on, or the
+**Application Developer** directory role (Entra ID → Roles and administrators),
+which allows it even when that setting is off. Whoever creates a registration
+becomes its owner and can manage its redirect URIs and secrets afterwards.
+Terraform does not own it: it is created once, by hand, in a directory that may
+not be the one the subscription lives in.
+
+Set it up as:
+
+| | |
+|---|---|
+| Supported account types | **Accounts in any organizational directory and personal Microsoft accounts.** Volunteers use the address they already have, which is usually not an Eastside Audubon one. Safe because the roster, not the audience, decides who gets in. |
+| Redirect URI (Web) | `<public URL>/api/v1/auth/microsoft/callback`. Register one per hostname the app answers on -- the `azurecontainerapps.io` one for testing, the custom domain when it exists, and `http://localhost:8080/...` for development, which providers allow over plain http for localhost only. They coexist; adding one is additive. |
+| Client secret | Copy the **value**, not the secret id, into `oidc_microsoft_client_secret`. Note its expiry: a secret that lapses stops all sign-in. |
+| Optional claim (ID token) | **`xms_edov`**. See below -- without it, volunteers on a domain belonging to some *other* organization's tenant are refused. |
+| API permissions | `openid`, `profile`, `email` (Microsoft Graph, delegated). All user-consentable, so no admin consent is needed unless the tenant restricts user consent, in which case an Application Administrator grants it once. |
+
+**Why `xms_edov` matters.** Accepting any Microsoft account means accepting
+every organization's directory, and a directory's administrators choose what
+their own users' `email` claims say -- including a roster member's address.
+Birdsense therefore believes an email claim only when the provider is in a
+position to know it: a personal Microsoft account (the address *is* the
+account), an organization that has proved to Microsoft it owns the domain
+(`xms_edov`), or Google's `email_verified`. Anything else is refused and logged
+as `unverified-email`. The rule is `trustedEmail` in `internal/api/auth.go`.
+
+**The session key** (`session_key`, a Container Apps secret) signs the session
+cookie. Generate it with `openssl rand -base64 32` and keep it: a new value
+signs everyone out, which is also how to end every session at once on purpose.
+
+**Adding Google** is two more variables and no code:
+`oidc_google_client_id` and `_secret` would follow the same shape, and the
+sign-in page grows a second button on its own -- `GET /api/v1/session` reports
+which providers the server has, and the page renders a button per provider.
 
 ## Ordering
 
@@ -423,9 +478,10 @@ can't be changed in place.
 - **Audio retention**: how long originals are kept, and in which tier. This
   sets the lifecycle rule and most of the bill.
 - **Custom domain**: e.g. `birdsense.eastsideaudubon.org`, and who controls DNS.
-- **Sign-in**: real Google/Microsoft OIDC will add app registrations and
-  client secrets. Those go in Key Vault or Container Apps secrets, and get
-  their own section here.
+- **Secrets**: the client secret and session key are Container Apps secrets,
+  which means they are in the Terraform state file. Key Vault with the app's
+  managed identity reading them would keep them out of state, and would give
+  the client secret a rotation story before its expiry arrives.
 - **BirdNET processing**: analysis runs in the container app today
   (`internal/analysis`), which is why it needs `min_replicas = 1` and more CPU
   and memory than serving pages does. A Container Apps job is the natural next
