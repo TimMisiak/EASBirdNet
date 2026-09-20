@@ -19,13 +19,22 @@ import "./bs-chip.js";
  *
  * The filters live in the query string (/app/detections?species=Strix+varia),
  * so a reload or a link to a colleague shows the same list. The server filters,
- * sorts and pages; this only asks. With no dates set it also bounds the answer
- * to a window of recent days, which the list says above itself.
+ * sorts and pages; this only asks.
+ *
+ * It opens on the past DEFAULT_MONTHS months, with those dates filled into the
+ * date fields rather than left blank: a list of detections is always bounded
+ * (a date range is what keeps the query cheap), so the screen may as well say
+ * what it is bounded to and let a reviewer widen it. Clearing “Heard from” hands
+ * the bounding back to the server, which answers for a window of its own and
+ * says which, printed above the list.
  *
  * The filter fields are rendered once and only the results are redrawn, so a
  * date half typed in keeps its focus while the list catches up.
  */
 const PAGE_SIZE = 50;
+
+/** How far back the list looks until the date fields say otherwise. */
+const DEFAULT_MONTHS = 3;
 
 const STATUSES = [
   { id: "", label: "All" },
@@ -42,8 +51,24 @@ const SORTS = { heard: "desc", species: "asc", confidence: "desc" };
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** The list's view as the query string gives it, anything unreadable left at its default. */
-function viewFrom(params) {
+/** A date as YYYY-MM-DD in the browser's timezone, which is what a date field takes. */
+function dayOf(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** The dates the list starts on: the DEFAULT_MONTHS months up to today. */
+function defaultDates(now = new Date()) {
+  const from = new Date(now);
+  from.setMonth(from.getMonth() - DEFAULT_MONTHS);
+  return { from: dayOf(from), to: dayOf(now) };
+}
+
+/**
+ * The list's view as the query string gives it, anything unreadable left at
+ * its default. dates are the range a query string that names no readable ones
+ * of its own gets, so a bare /app/detections is the past DEFAULT_MONTHS months.
+ */
+function viewFrom(params, dates) {
   const sort = Object.hasOwn(SORTS, params.get("sort")) ? params.get("sort") : "heard";
   const order = params.get("order") === "asc" || params.get("order") === "desc" ? params.get("order") : SORTS[sort];
   const min = Number(params.get("min"));
@@ -52,8 +77,8 @@ function viewFrom(params) {
     status: STATUSES.some((s) => s.id === status) ? status : "",
     species: params.get("species") ?? "",
     min: CONFIDENCES.includes(min) ? min : 0,
-    from: DATE.test(params.get("from")) ? params.get("from") : "",
-    to: DATE.test(params.get("to")) ? params.get("to") : "",
+    from: DATE.test(params.get("from")) ? params.get("from") : dates.from,
+    to: DATE.test(params.get("to")) ? params.get("to") : dates.to,
     sort,
     order,
     page: Math.max(1, Number.parseInt(params.get("page"), 10) || 1),
@@ -84,7 +109,9 @@ function startOfDay(date, addDays = 0) {
 class Detections extends BaseElement {
   static styles = [typography, controls, forms, tables];
 
-  #view = viewFrom(query());
+  /** The range the list opens on, fixed when it opens so a long session doesn't drift over midnight. */
+  #dates = defaultDates();
+  #view = viewFrom(query(), this.#dates);
   /**
    * {status: loading|ready|error, detections, total, species, window, error};
    * a refresh keeps the last list showing. window is the date range the server
@@ -110,7 +137,7 @@ class Detections extends BaseElement {
       },
       page: (el) => this.#change({ page: Number(el.dataset.page) }),
       clear: () => {
-        this.#change({ status: "", species: "", min: 0, from: "", to: "" });
+        this.#change({ status: "", species: "", min: 0, ...this.#dates });
         // The fields show what they were set to; put them back.
         this.render();
       },
@@ -274,12 +301,16 @@ class Detections extends BaseElement {
     if (!results) return;
     const v = this.#view;
     const { status, detections, total, species, window: bounded, error } = this.#state;
-    const filtered = Boolean(v.status || v.species || v.min || v.from || v.to);
+    // Filtered means narrowed from how the tab opens, so the range it opens on
+    // doesn't make a program with nothing in it look like a filter nobody set.
+    const filtered = Boolean(v.status || v.species || v.min) || v.from !== this.#dates.from || v.to !== this.#dates.to;
     // What the server bounded the answer to, said once above the list rather
     // than left for someone to notice an old detection missing.
     const note = this.$(".window");
     note.hidden = !(status === "ready" && bounded && total > 0);
-    if (bounded) note.textContent = `Showing the last ${bounded.days} days. Set “Heard from” to look further back.`;
+    if (bounded) {
+      note.textContent = `No “Heard from” date, so this shows the last ${bounded.days} days. Set one to look further back.`;
+    }
 
     for (const pill of this.$$('[data-action="status"]')) {
       pill.setAttribute("aria-pressed", String(pill.dataset.status === v.status));
@@ -297,9 +328,7 @@ class Detections extends BaseElement {
     } else if (total === 0) {
       results.innerHTML = filtered
         ? `<p class="empty">No detections match those filters.</p>`
-        : bounded
-          ? `<p class="empty">BirdNET hasn't heard anything in the last ${bounded.days} days. Set “Heard from” to look further back.</p>`
-          : `<p class="empty">BirdNET hasn't heard anything yet. Detections show up here as each card is analyzed.</p>`;
+        : `<p class="empty">BirdNET hasn't heard anything in the last ${DEFAULT_MONTHS} months. Detections show up here as each card is analyzed; set “Heard from” to look further back.</p>`;
     } else {
       results.innerHTML = `
         ${error ? `<p class="error" role="alert">Couldn't refresh the list: ${escapeHTML(error.message)}</p>` : ""}

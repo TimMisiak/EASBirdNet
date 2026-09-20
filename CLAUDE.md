@@ -150,7 +150,10 @@ demoting the last one is a 409, and so is an admin removing themselves.
 
 **A list of detections is always bounded.** `GET /detections` answers for the
 last 30 days when the request names no `since`, and says which window in
-`window`, which the Detections tab prints above the list;
+`window`, which the Detections tab prints above the list. The tab itself opens
+on the past three months, with those dates filled into its date fields, so what
+bounds the list is on the screen and a reviewer can widen it; the server's
+window is what a request that names no dates at all still gets.
 `GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
 beside the page. Neither is a nicety. A season is millions of detection
 documents, and the Cosmos SDK can't page or sort a cross-partition query
@@ -539,7 +542,7 @@ each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
 minimum confidence and the days heard, and opens the same detection page. It
-shows the last 30 days until the dates say otherwise, and says so.
+opens on the past three months, with those dates in its own date fields.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
 My uploads, their own cards, where an unfinished one is resumed; and

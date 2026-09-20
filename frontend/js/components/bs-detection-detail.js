@@ -32,6 +32,14 @@ import "./bs-spectrogram.js";
  * with its query string (/app/detections?species=Strix+varia).
  */
 
+/**
+ * How many of the file's detections to ask for at once: the API's largest
+ * page. They are what Previous and Next step through, and what the spectrogram
+ * marks as also heard, so a file with more than this many is stepped through
+ * up to here rather than to its end.
+ */
+const SIBLINGS_LIMIT = 500;
+
 class DetectionDetail extends BaseElement {
   static styles = [typography, controls, panels, tables];
   static observedAttributes = ["reference", "detection", "list"];
@@ -141,7 +149,7 @@ class DetectionDetail extends BaseElement {
       const { upload, file, detection } = await api.fetchDetection(reference, id);
       // Previous and next are a convenience; the page works without them.
       const siblings = await api
-        .fetchFileDetections(reference, file.id)
+        .fetchFileDetections(reference, file.id, SIBLINGS_LIMIT)
         .then((body) => body.detections)
         .catch(() => []);
       next = { status: "ready", upload, file, detection, siblings };

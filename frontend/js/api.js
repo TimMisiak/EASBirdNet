@@ -101,9 +101,14 @@ export const fetchDetections = (params) => {
 /**
  * What BirdNET heard in one file of a card, in the order it was heard, at most
  * limit of them: {detections, total}. total is how many there are in all.
+ * Without a limit the server's own page size applies -- a caller that wants a
+ * whole file's detections has to ask for them.
  */
-export const fetchFileDetections = (reference, fileId, limit) =>
-  get(`/detections/${encodeURIComponent(reference)}?file=${encodeURIComponent(fileId)}&limit=${limit}`);
+export const fetchFileDetections = (reference, fileId, limit) => {
+  const search = new URLSearchParams({ file: fileId });
+  if (limit) search.set("limit", limit);
+  return get(`/detections/${encodeURIComponent(reference)}?${search}`);
+};
 /** One detection, with the card and the file it was heard in. */
 export const fetchDetection = (reference, id) =>
   get(`/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}`);
