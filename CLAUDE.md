@@ -330,9 +330,7 @@ A file BirdNET can't read fails at once; any other failure on a file -- a
 crashed run of either script, or storing its clips, its detections or its
 result -- is retried twice, 30 s apart and growing, and then fails the file, so
 nothing that keeps failing can wedge the queue. The last file moves the card to
-`in_review`, or `needs_attention` if any failed. If the server's Python can't
-`import birdnet` at startup it logs a warning and doesn't start the queue, so
-cards wait in `processing` rather than failing.
+`in_review`, or `needs_attention` if any failed.
 One file per run, not a night per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in
@@ -344,6 +342,21 @@ enough, not before.
 *Revisit when:* analysis moves to its own Container Apps job (see
 DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
 the job's image, and `Queue.Run` is what the job runs.
+
+**A stuck card says why.** Whether BirdNET can run at all is the queue's own
+business, not the server's: `Queue.Run` won't start until `Check` passes and
+keeps checking on a growing delay (30 s to 10 minutes), so a server whose
+Python can't `import birdnet` warns for as long as that is true instead of
+once at startup, and an environment put right underneath it is picked up
+without a restart. Cards wait in `processing` meanwhile rather than failing.
+What it is waiting for, or what a pass last stopped on, is `Queue.Status`,
+which the API serves as `queue` on `/health` (the bare state -- that route has
+no session) and on the two coordinator routes that list cards
+(`GET /admin/uploads`, `GET /admin/uploads/{ref}`), where `<bs-queue-note>`
+puts it above the cards it explains. The volunteer's own list doesn't carry it:
+the detail names server-side paths, and nothing on it is theirs to act on.
+*Revisit when:* something other than this process analyzes cards -- then the
+state is no longer one server's to report, and belongs in a document.
 
 **Originals expire; clips don't.** A card is ~128 GB of audio against a few
 megabytes of clips, and nothing reads an original once BirdNET has:
@@ -446,8 +459,9 @@ BirdNET, for the server's analysis queue, `internal/birdnet` and `cmd/analyze`
 (needs Python 3.12; models download to `$BIRDNET_APP_DATA`, default
 `~/.local/share/birdnet`, on first use). The server looks for
 `../.venv/bin/python` and `../analyzer/analyze.py` from `backend/`
-(`BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`); without them it says
-so at startup and received cards wait in `processing`:
+(`BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`); without them it keeps
+saying so in the log, the coordinator's card screens say so too, and received
+cards wait in `processing`:
 
 ```sh
 python3.12 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt

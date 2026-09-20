@@ -62,6 +62,19 @@ type Night struct {
 	Flag string `json:"flag,omitempty"`
 }
 
+// QueueStatus is where BirdNET analysis stands on this server: not a stored
+// document but the running process's own state, sent alongside the
+// coordinator's card lists so a card sitting in processing says why. States
+// are internal/analysis's, plus "off" for a server running no queue.
+type QueueStatus struct {
+	State string `json:"state"`
+	// Detail is what is wrong, when anything is. It names server-side paths,
+	// so it goes only to the admin routes.
+	Detail string `json:"detail,omitempty"`
+	// Since is when the queue entered this state, absent when it has none.
+	Since *time.Time `json:"since,omitempty"`
+}
+
 // Upload is one SD card on its way from a station into storage.
 type Upload struct {
 	Reference     string  `json:"reference"`

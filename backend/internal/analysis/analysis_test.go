@@ -31,6 +31,10 @@ type fakeBirdNET struct {
 	calls []call
 	// answer returns the result for one file's audio, or an error for the run.
 	answer func(audio string) (birdnet.File, error)
+	// check answers Check, given the number of checks so far; nil is BirdNET
+	// available every time.
+	check  func(n int) error
+	checks int
 	// cuts are the clips asked for, a slice per file; cutErr fails every cut.
 	cuts   [][]birdnet.Clip
 	cutErr error
@@ -39,6 +43,23 @@ type fakeBirdNET struct {
 type call struct {
 	path, audio string
 	opts        birdnet.Options
+}
+
+func (f *fakeBirdNET) Check(context.Context) error {
+	f.mu.Lock()
+	f.checks++
+	n, check := f.checks, f.check
+	f.mu.Unlock()
+	if check == nil {
+		return nil
+	}
+	return check(n)
+}
+
+func (f *fakeBirdNET) checkCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checks
 }
 
 func (f *fakeBirdNET) Analyze(_ context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error) {
@@ -110,6 +131,7 @@ func newFixture(t *testing.T) *fixture {
 	f.queue = New(store, files, f.bird, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	f.queue.now = func() time.Time { return testNow }
 	f.queue.retryDelay = time.Millisecond
+	f.queue.checkDelay = time.Millisecond
 	return f
 }
 
@@ -431,6 +453,88 @@ func TestRunPicksUpWhereARestartLeftOff(t *testing.T) {
 	if u, _ := f.store.GetUpload(t.Context(), sending); u.Status != db.StatusInProgress || u.Analysis != nil {
 		t.Errorf("a card still being sent was analyzed: %+v", u)
 	}
+}
+
+// A server whose BirdNET can't run doesn't give up on it, and says what it is
+// waiting for: its cards sit in processing, and the only thing that tells a
+// coordinator why is Status.
+func TestTheQueueWaitsForBirdNETAndSaysWhy(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	available := make(chan struct{})
+	f.bird.check = func(int) error {
+		select {
+		case <-available:
+			return nil
+		default:
+			return errors.New("no module named birdnet")
+		}
+	}
+	f.card(db.StatusProcessing, owlFile)
+
+	if s := f.queue.Status(); s.State != StateStarting {
+		t.Errorf("before Run, state = %q, want %q", s.State, StateStarting)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.queue.Run(ctx)
+	}()
+
+	// While BirdNET can't run, nothing is analyzed and the reason is the
+	// error the check gave.
+	waitFor(t, func() bool { return f.queue.Status().State == StateUnavailable })
+	if s := f.queue.Status(); !strings.Contains(s.Detail, "no module named birdnet") || s.Since.IsZero() {
+		t.Errorf("unavailable status = %+v, want the check's error and when it started", s)
+	}
+	if u := f.upload(); u.Status != db.StatusProcessing || u.Analysis != nil {
+		t.Errorf("card = %+v, want it still waiting in processing", u)
+	}
+
+	// It keeps checking, so BirdNET arriving starts the card without a restart.
+	close(available)
+	waitFor(t, func() bool { return f.upload().Status == db.StatusInReview })
+	cancel()
+	<-done
+
+	if s := f.queue.Status(); s.State != StateReady || s.Detail != "" {
+		t.Errorf("after the card was analyzed, status = %+v, want ready with no detail", s)
+	}
+	if n := f.bird.checkCount(); n < 2 {
+		t.Errorf("BirdNET was checked %d times, want it checked again after it failed", n)
+	}
+}
+
+// listFails is a store whose card list never answers, standing in for the
+// database being unreachable: a failure the queue can only keep retrying.
+type listFails struct{ db.Store }
+
+func (listFails) ListUploads(context.Context, db.UploadFilter) ([]db.Upload, error) {
+	return nil, errors.New("the database is unreachable")
+}
+
+// A pass that fails on something other than BirdNET -- the store, storage --
+// leaves cards stuck just the same, and says so rather than only logging it.
+func TestAFailingPassIsReported(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile)
+	f.queue.store = listFails{f.store}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.queue.Run(ctx)
+	}()
+	waitFor(t, func() bool { return f.queue.Status().State == StateFailing })
+	if s := f.queue.Status(); !strings.Contains(s.Detail, "unreachable") {
+		t.Errorf("failing status = %+v, want what the pass failed on", s)
+	}
+	cancel()
+	<-done
 }
 
 func TestBirdNETFailingIsRetriedThenTheFileFails(t *testing.T) {

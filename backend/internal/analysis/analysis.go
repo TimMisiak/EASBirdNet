@@ -16,6 +16,11 @@
 // the files still waiting, and a file that was mid-analysis is run again.
 // Detection ids are derived from what was heard, so running a file twice
 // overwrites its detections rather than duplicating them.
+//
+// Run won't start until BirdNET answers a Check, and keeps checking until it
+// does. What it is waiting for, or what a pass last failed on, is Status,
+// which the admin API serves: a card stuck in processing should say why on the
+// screen that lists it.
 package analysis
 
 import (
@@ -30,6 +35,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	_ "time/tzdata" // the runtime image has no zoneinfo
 
@@ -41,6 +47,9 @@ import (
 // Analyzer is what runs BirdNET and cuts clips: birdnet.Analyzer, or a fake in
 // tests.
 type Analyzer interface {
+	// Check reports whether Analyze and Cut can run at all. The queue calls it
+	// before it starts, and again until it passes.
+	Check(ctx context.Context) error
 	Analyze(ctx context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error)
 	Cut(ctx context.Context, source string, clips []birdnet.Clip) (birdnet.Recording, error)
 }
@@ -62,7 +71,42 @@ const (
 	maxAttempts = 3
 	// retryDelay is the wait after such a failure, times the attempt number.
 	retryDelay = 30 * time.Second
+	// checkDelay is the first wait between BirdNET checks while it can't run,
+	// doubling up to maxCheckDelay. checkTimeout bounds one check.
+	checkDelay    = 30 * time.Second
+	maxCheckDelay = 10 * time.Minute
+	checkTimeout  = time.Minute
 )
+
+// What Status.State can be.
+const (
+	// StateStarting is before the queue has established anything, which lasts
+	// as long as the first BirdNET check.
+	StateStarting = "starting"
+	// StateReady is BirdNET running and the cards moving.
+	StateReady = "ready"
+	// StateUnavailable is BirdNET not running here at all: the scripts or the
+	// Python are missing or wrong, so every card waits in processing.
+	StateUnavailable = "unavailable"
+	// StateFailing is BirdNET running but a pass over the cards stopping on
+	// something else -- the store or storage -- which the queue is retrying.
+	StateFailing = "failing"
+)
+
+// Status is why the queue is or isn't working through cards. Nothing stores
+// it: it is this process's own state, and what a coordinator is shown against
+// a card sitting in processing, so a stuck card gives a reason without anyone
+// reading container logs.
+type Status struct {
+	// State is one of the State* constants above.
+	State string
+	// Detail is what went wrong, when State isn't ready. It names server-side
+	// paths and commands, so it is for coordinators, not volunteers.
+	Detail string
+	// Since is when the queue entered this state, and CheckedAt when it last
+	// confirmed it.
+	Since, CheckedAt time.Time
+}
 
 // Queue works through received cards. Create it with New and start it with
 // Run; Enqueue tells it a card has arrived.
@@ -78,19 +122,50 @@ type Queue struct {
 	// tries.
 	attempts map[string]int
 
-	// Clock and retry wait, so tests don't sleep.
+	// mu guards status, which Run writes and Status reads from whatever
+	// goroutine an HTTP handler is on.
+	mu     sync.Mutex
+	status Status
+
+	// Clock and waits, so tests don't sleep.
 	now        func() time.Time
 	retryDelay time.Duration
+	checkDelay time.Duration
 }
 
 // New returns a queue that reads audio from files and writes to store.
 func New(store db.Store, files storage.Store, analyzer Analyzer, log *slog.Logger) *Queue {
-	return &Queue{
+	q := &Queue{
 		store: store, files: files, analyzer: analyzer, log: log,
 		wake:     make(chan struct{}, 1),
 		attempts: map[string]int{},
-		now:      time.Now, retryDelay: retryDelay,
+		now:      time.Now, retryDelay: retryDelay, checkDelay: checkDelay,
 	}
+	q.status = Status{State: StateStarting, Since: q.stamp(), CheckedAt: q.stamp()}
+	return q
+}
+
+// Status reports why the queue is or isn't working through cards. It is safe
+// to call from any goroutine, and on a queue whose Run isn't started.
+func (q *Queue) Status() Status {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.status
+}
+
+// setStatus records where the queue stands. Since only moves when the state
+// itself does, so "unavailable since" is when it broke, not when it was last
+// looked at.
+func (q *Queue) setStatus(state, detail string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	now := q.stamp()
+	if q.status.State != state {
+		q.status.Since = now
+	}
+	// Trimmed because a subprocess's error ends in a newline, and this is read
+	// on a screen.
+	q.status.State, q.status.Detail, q.status.CheckedAt = state, strings.TrimSpace(detail), now
 }
 
 // Enqueue tells the queue a card has been received. It never blocks: the card
@@ -102,27 +177,66 @@ func (q *Queue) Enqueue(reference string) {
 	}
 }
 
-// Run analyzes queued files until ctx is cancelled. It starts with whatever
-// was left queued, then waits for Enqueue. Cancelling ctx kills a BirdNET run
-// in flight; its file is run again next time.
+// Run analyzes queued files until ctx is cancelled. It waits for BirdNET to be
+// available, works through whatever was left queued, then waits for Enqueue.
+// Cancelling ctx kills a BirdNET run in flight; its file is run again next
+// time.
 func (q *Queue) Run(ctx context.Context) {
+	if !q.waitReady(ctx) {
+		return
+	}
 	for {
 		err := q.drain(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
+			q.setStatus(StateFailing, err.Error())
 			q.log.Error("analysis: pausing after a failure", "err", err, "retry_in", q.retryDelay)
 			if !sleep(ctx, q.retryDelay) {
 				return
 			}
 			continue
 		}
+		q.setStatus(StateReady, "")
 		select {
 		case <-ctx.Done():
 			return
 		case <-q.wake:
 		}
+	}
+}
+
+// waitReady blocks until BirdNET can run, checking again on a delay that grows
+// to maxCheckDelay, and reports whether it got there before ctx was cancelled.
+//
+// The check lives here rather than at startup because a server that can't run
+// BirdNET is a server whose cards pile up in processing with nothing to show
+// for it: checking on a loop means the warning keeps being logged for as long
+// as it is true, Status can say so on the coordinator's screens, and an
+// environment put right underneath a running server (a mounted venv, a model
+// download that hadn't finished) is picked up without a restart.
+func (q *Queue) waitReady(ctx context.Context) bool {
+	delay := q.checkDelay
+	for {
+		checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+		err := q.analyzer.Check(checkCtx)
+		cancel()
+		if ctx.Err() != nil {
+			return false
+		}
+		if err == nil {
+			q.setStatus(StateReady, "")
+			q.log.Info("analysis: BirdNET is available; working through received cards")
+			return true
+		}
+		q.setStatus(StateUnavailable, err.Error())
+		q.log.Warn("BirdNET isn't available, so received cards will wait in processing; set BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_BIRDNET_SCRIPT",
+			"err", err, "retry_in", delay)
+		if !sleep(ctx, delay) {
+			return false
+		}
+		delay = min(2*delay, maxCheckDelay)
 	}
 }
 

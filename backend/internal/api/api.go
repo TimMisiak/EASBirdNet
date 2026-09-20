@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -62,9 +63,11 @@ func Register(mux *http.ServeMux, o Options) {
 }
 
 // Queue is the analysis queue (internal/analysis). A received card is queued
-// by its status already; Enqueue only says to look now.
+// by its status already; Enqueue only says to look now, and Status says
+// whether anything is looking at all.
 type Queue interface {
 	Enqueue(reference string)
+	Status() analysis.Status
 }
 
 func register(mux *http.ServeMux, h *handlers) {
@@ -152,8 +155,29 @@ type handlers struct {
 	now func() time.Time
 }
 
+// health is unconditionally ok: it is the liveness probe, and a dependency
+// being down is not a reason to restart the container. queue is the one thing
+// it reports, as a bare state with no detail -- this route needs no session,
+// and a card sitting in processing forever is the failure nobody would
+// otherwise see from outside.
 func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
-	h.json(w, http.StatusOK, map[string]string{"status": "ok"})
+	h.json(w, http.StatusOK, map[string]string{"status": "ok", "queue": h.queueStatus().State})
+}
+
+// queueStatus is where analysis stands in this process. A nil queue is a
+// server running none at all, so its cards would stay in processing: that is
+// "off" rather than an error.
+func (h *handlers) queueStatus() QueueStatus {
+	if h.queue == nil {
+		return QueueStatus{State: "off"}
+	}
+	s := h.queue.Status()
+	out := QueueStatus{State: s.State, Detail: s.Detail}
+	if !s.Since.IsZero() {
+		since := s.Since.UTC()
+		out.Since = &since
+	}
+	return out
 }
 
 // stamp is the current instant as the store keeps it: UTC, whole seconds.
@@ -358,18 +382,25 @@ func (h *handlers) listStations(w http.ResponseWriter, r *http.Request, _ db.Use
 }
 
 func (h *handlers) listUploads(w http.ResponseWriter, r *http.Request, me db.User) {
-	h.writeUploads(w, r, db.UploadFilter{UserID: me.ID})
+	h.writeUploads(w, r, db.UploadFilter{UserID: me.ID}, false)
 }
 
-func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.UploadFilter) {
+// writeUploads answers a list of cards. Only the coordinator's list carries
+// the analysis queue's state: its detail names server-side paths, and acting
+// on it is a coordinator's job, not a volunteer's.
+func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.UploadFilter, withQueue bool) {
 	uploads, err := h.store.ListUploads(r.Context(), f)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"uploads": mapAll(uploads, func(u db.Upload) Upload {
+	body := map[string]any{"uploads": mapAll(uploads, func(u db.Upload) Upload {
 		return uploadOf(u, h.retention)
-	})})
+	})}
+	if withQueue {
+		body["queue"] = h.queueStatus()
+	}
+	h.json(w, http.StatusOK, body)
 }
 
 // createUpload registers a card the volunteer is about to send, with the list
@@ -713,7 +744,7 @@ func (h *handlers) recordProgress(w http.ResponseWriter, r *http.Request, me db.
 // --- admin ---
 
 func (h *handlers) listAllUploads(w http.ResponseWriter, r *http.Request, _ db.User) {
-	h.writeUploads(w, r, db.UploadFilter{})
+	h.writeUploads(w, r, db.UploadFilter{}, true)
 }
 
 // getCardFiles is one card with every file on it, where each stands in upload
@@ -737,7 +768,9 @@ func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.Use
 				out = append(out, audioFileOf(f))
 			}
 		}
-		h.json(w, http.StatusOK, map[string]any{"upload": uploadOf(u, h.retention), "files": out})
+		h.json(w, http.StatusOK, map[string]any{
+			"upload": uploadOf(u, h.retention), "files": out, "queue": h.queueStatus(),
+		})
 	}
 }
 

@@ -237,7 +237,7 @@ environment forwards here.
 | `BIRDSENSE_OIDC_MICROSOFT_TENANT` | `var.oidc_microsoft_tenant`, default `common` | `common` accepts any organization and any personal Microsoft account. A tenant GUID restricts sign-in to that directory. |
 | `BIRDSENSE_SESSION_KEY` | Container Apps secret `session-key` | Signs the session cookie. Keep it stable across deploys; changing it signs everyone out. |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
-| `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The server checks them at startup, and logs `BirdNET isn't available` (and analyzes nothing) if they don't work. |
+| `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The analysis queue checks them before it starts, and again on a growing delay until they work, logging `BirdNET isn't available` (and analyzing nothing) meanwhile. `/api/v1/health` reports `"queue":"unavailable"`, and the coordinator's card screens say so; see *When cards sit in processing*. |
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 
@@ -373,6 +373,53 @@ Two rules the script enforces, both about the tag being the commit sha:
 Terraform's own state lives in a storage account created by hand, outside this
 configuration (see [README.md](README.md#one-time-setup)). Terraform owning the
 state it depends on is a knot nobody wants to untie at 11pm.
+
+## When cards sit in processing
+
+A card that has been received is analyzed by the queue inside the running app
+(CLAUDE.md, *The analysis queue is the database*). There is one replica, so if
+that queue isn't working, every received card stops where it is -- and audio
+that hasn't been analyzed is audio that retention refuses to delete, so nothing
+is lost while it waits.
+
+**Ask the app first.** `GET /api/v1/health` answers `"queue"` with one word,
+without a session:
+
+| `queue` | What it means |
+|---------|---------------|
+| `ready` | BirdNET runs here and the last pass got through. |
+| `starting` | The first BirdNET check is still running (seconds, at most a minute). |
+| `unavailable` | BirdNET can't run in this container at all. |
+| `failing` | BirdNET runs, but a pass stopped on something else -- Cosmos, blob storage -- and is being retried. |
+| `off` | This build runs no queue. Not a thing the deployed image does. |
+
+Signed in as a coordinator, *All uploads* and any card's page say the same
+thing in words, with the error the server got and since when. That is the
+first place to look, and it is there so that nobody has to read container logs
+to find out why a volunteer's card hasn't moved.
+
+**Recovering.** The queue keeps checking, so most of this fixes itself:
+
+- `unavailable` means the image or its settings are wrong -- the venv,
+  `analyze.py` or the models aren't where `BIRDSENSE_BIRDNET_*` says. Nothing
+  at runtime fixes that: deploy a good image (or apply an older `image_tag`,
+  *Deploying a new version*). The cards are picked up as soon as the new
+  revision comes up, in the order they were received.
+- `failing` is usually the identity losing a role, or Cosmos throttling. Fix
+  the cause; no restart is needed, because the queue retries the pass on its
+  own.
+- If a restart really is wanted -- to clear a wedged run rather than a
+  configuration -- restart the revision, which changes nothing Terraform owns:
+
+  ```sh
+  az containerapp revision restart -n ca-birdsense-prod -g rg-birdsense-prod \
+     --revision "$(az containerapp show -n ca-birdsense-prod -g rg-birdsense-prod \
+                   --query properties.latestRevisionName -o tsv)"
+  ```
+
+  This is not `az containerapp update`, which would be drift the next
+  `terraform apply` reverts. Nothing is lost by it: a file cut off mid-run is
+  queued again, and detection ids are deterministic, so a re-run overwrites.
 
 ## Blob storage for uploads
 

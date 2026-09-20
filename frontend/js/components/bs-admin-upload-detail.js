@@ -5,6 +5,7 @@ import { analyzedSoFar, audioNote, fileChip, isMoving, reviewChip, statusChip } 
 import * as api from "../api.js";
 import "./bs-chip.js";
 import "./bs-progress-bar.js";
+import "./bs-queue-note.js";
 
 /**
  * <bs-admin-upload-detail reference="OWL-20260914-SR03"> -- one card, file by
@@ -29,7 +30,7 @@ class AdminUploadDetail extends BaseElement {
   static styles = [typography, controls, panels, tables];
   static observedAttributes = ["reference"];
 
-  #state = { status: "loading", upload: null, files: [], error: null };
+  #state = { status: "loading", upload: null, files: [], queue: null, error: null };
   #filter = "all";
   /** Ids of the files whose detections are showing. */
   #open = new Set();
@@ -48,7 +49,7 @@ class AdminUploadDetail extends BaseElement {
 
   attributeChangedCallback() {
     if (!this.isConnected) return;
-    this.#state = { status: "loading", upload: null, files: [], error: null };
+    this.#state = { status: "loading", upload: null, files: [], queue: null, error: null };
     this.#open.clear();
     this.#heard.clear();
     this.render();
@@ -81,15 +82,15 @@ class AdminUploadDetail extends BaseElement {
   async #load() {
     const reference = this.reference;
     try {
-      const { upload, files } = await api.fetchCardFiles(reference);
+      const { upload, files, queue } = await api.fetchCardFiles(reference);
       if (reference !== this.reference) return;
-      this.#state = { status: "ready", upload, files, error: null };
+      this.#state = { status: "ready", upload, files, queue, error: null };
       // A file that has been analyzed again since its detections were fetched
       // shows what it has now.
       for (const id of this.#open) this.#fetchHeard(files.find((f) => f.id === id));
     } catch (error) {
       if (reference !== this.reference) return;
-      if (this.#state.status !== "ready") this.#state = { status: "error", upload: null, files: [], error };
+      if (this.#state.status !== "ready") this.#state = { status: "error", upload: null, files: [], queue: null, error };
     }
     if (!this.isConnected) return;
     this.render();
@@ -117,7 +118,7 @@ class AdminUploadDetail extends BaseElement {
   }
 
   render() {
-    const { status, upload, files, error } = this.#state;
+    const { status, upload, files, queue, error } = this.#state;
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -200,6 +201,11 @@ class AdminUploadDetail extends BaseElement {
             : this.#card(upload, files)
       }
     `;
+
+    // Only a card that is waiting for BirdNET has anything to learn from the
+    // queue's state; #card leaves the element out otherwise.
+    const note = this.$("bs-queue-note");
+    if (note) note.queue = queue;
   }
 
   #card(upload, files) {
@@ -221,6 +227,7 @@ class AdminUploadDetail extends BaseElement {
         pulled ${escapeHTML(longDate(upload.pulledOn))}
       </p>
       ${upload.notes ? `<p class="note-line">“${escapeHTML(upload.notes)}”</p>` : ""}
+      ${upload.status === "processing" ? `<bs-queue-note></bs-queue-note>` : ""}
 
       <dl class="stats">
         <div class="stat"><dt>Received</dt><dd>${count(upload.filesUploaded)} <small>of ${count(upload.fileCount)}</small></dd></div>

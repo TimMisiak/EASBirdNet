@@ -76,24 +76,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// BirdNET runs in this process, over received cards. Without a Python that
-	// has it, cards wait in processing until the server starts with one.
+	// BirdNET runs in this process, over received cards. Whether it can run is
+	// the queue's own business: it checks before it starts and keeps checking,
+	// reports what it is waiting for through the admin API, and needs no
+	// restart once the environment is right. So the server starts it either
+	// way -- an unanalyzable card waits in processing rather than being lost.
 	queue := analysis.New(store, files, cfg.Analyzer, log)
 	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
 	analysisDone := make(chan struct{})
-	checkCtx, cancelCheck := context.WithTimeout(ctx, time.Minute)
-	err = cfg.Analyzer.Check(checkCtx)
-	cancelCheck()
-	if err != nil {
-		close(analysisDone)
-		log.Warn("BirdNET isn't available, so received cards will wait in processing; set BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_BIRDNET_SCRIPT", "err", err)
-	} else {
-		log.Info("analysis queue started", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script)
-		go func() {
-			defer close(analysisDone)
-			queue.Run(analysisCtx)
-		}()
-	}
+	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script)
+	go func() {
+		defer close(analysisDone)
+		queue.Run(analysisCtx)
+	}()
 
 	// Audio retention: the originals of a card BirdNET has finished with go
 	// after their window, and its detections and clips stay. Unlike analysis

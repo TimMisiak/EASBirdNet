@@ -133,18 +133,6 @@ only grows, a coordinator has no way to mark a card done or to clear a
 `needs_attention`, and the volunteer's "My uploads" never reaches a terminal
 state. (Retention still expires the audio, so nothing is stranded.)
 
-### 2.7 A stuck card gives no reason
-`backend/cmd/server/main.go:84-96`
-
-`Analyzer.Check` runs once at startup; on failure it logs a warning, the queue
-never starts, and it never retries. Nothing surfaces this on `/health`, on the
-card, or in the admin UI.
-
-**If not fixed:** a volunteer uploads 128 GB, the card sits in `processing`
-indefinitely (retention correctly refuses to sweep it), and nobody learns why
-until someone reads container logs. There is also no script, button or
-documented command to restart the revision, which is the only recovery.
-
 ### 2.8 A half-filled coordinate puts a recorder in the Gulf of Guinea
 `frontend/js/components/bs-admin-recorders.js:76-80`, `backend/internal/api/api.go:1242-1252` — **[verified]**
 
@@ -328,9 +316,10 @@ readiness probe with the same defaults 503s the site during analysis. This is
 the most likely way the first real card fails.
 
 ### 5.2 `/api/v1/health` can't fail
-`backend/internal/api/api.go:155-157`, `infra/app.tf:174-189` — **[verified]**
+`backend/internal/api/api.go:163-165`, `infra/app.tf:174-189` — **[verified]**
 
-It returns `{"status":"ok"}` unconditionally and is wired as the liveness,
+It answers 200 unconditionally — the `queue` field it carries reports the
+analysis queue but never changes the status — and is wired as the liveness,
 readiness *and* startup probe.
 
 **If not fixed:** a replica that has lost Cosmos or Blob access stays "healthy"

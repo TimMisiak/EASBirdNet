@@ -541,7 +541,7 @@ What the write routes do to documents:
 | `POST /uploads/{ref}/progress` | Sets `status` to the client's `in_progress` or `interrupted`, only while the card is one of those. The client can't report counts. |
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
-| `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list. |
+| `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list, and `queue`. |
 | `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`) as `{detections, total, species}`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (`uploads.recorder.name`) and `night`. `species[]` counts every match before the species filter. |
 | `GET /detections/{ref}?file={id}` | Answers the card's detections, or with `file` that file's, in the order heard. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
@@ -553,11 +553,21 @@ What the write routes do to documents:
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
 | `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. An id outside the `recorders.id` rules is a 400; one that would share card references with a recorder already added is a 409. |
 
+One field is not a document at all: `queue`, which `GET /admin/uploads` and
+`GET /admin/uploads/{ref}` answer alongside the cards, and `GET /health` as a
+bare string. It is the running server's own analysis state -- `{state, detail,
+since}`, where `state` is `ready`, `starting`, `unavailable`, `failing` or
+`off` -- so that a card sitting in `processing` can say why on the screen that
+lists it. Nothing stores it, nothing reads it back, and it restarts with the
+process. The volunteer's `GET /uploads` doesn't carry it: `detail` is a
+server-side error, naming paths and commands.
+
 What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 `receivedAt` first:
 
 | Step | Effect |
 |------|--------|
+| Before it starts | Checks BirdNET can run, and keeps checking until it can. Touches no document: cards stay in `processing`, and `queue` says what it is waiting for. |
 | First file on a card | Sets `analysis` (settings, `startedAt`). |
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
 | BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.wav`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |

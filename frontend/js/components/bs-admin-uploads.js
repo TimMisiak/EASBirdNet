@@ -4,6 +4,7 @@ import { count } from "../format.js";
 import { isMoving, isUnfinished, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
 import "./bs-chip.js";
+import "./bs-queue-note.js";
 
 /**
  * <bs-admin-uploads> -- every card in the program. A coordinator opens this to
@@ -27,7 +28,7 @@ const FILTERS = [
 class AdminUploads extends BaseElement {
   static styles = [typography, controls, forms, panels, tables];
 
-  #state = { status: "loading", uploads: [], error: null };
+  #state = { status: "loading", uploads: [], queue: null, error: null };
   #filter = "all";
   #timer = 0;
 
@@ -92,11 +93,11 @@ class AdminUploads extends BaseElement {
 
   async #load() {
     try {
-      const { uploads } = await api.fetchAllUploads();
-      this.#state = { status: "ready", uploads, error: null };
+      const { uploads, queue } = await api.fetchAllUploads();
+      this.#state = { status: "ready", uploads, queue, error: null };
     } catch (error) {
       // A failed refresh keeps the table that's already showing.
-      if (this.#state.status !== "ready") this.#state = { status: "error", uploads: [], error };
+      if (this.#state.status !== "ready") this.#state = { status: "error", uploads: [], queue: null, error };
     }
     if (!this.isConnected) return;
     // A refresh would take the focus off an open confirmation; it shows when that closes.
@@ -107,7 +108,7 @@ class AdminUploads extends BaseElement {
   }
 
   render() {
-    const { status, uploads, error } = this.#state;
+    const { status, uploads, queue, error } = this.#state;
     const active = FILTERS.find((f) => f.id === this.#filter) ?? FILTERS[0];
     const shown = uploads.filter(active.match);
     const needing = uploads.filter((u) => u.status === "needs_attention").length;
@@ -158,6 +159,8 @@ class AdminUploads extends BaseElement {
         .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
       </style>
 
+      <bs-queue-note></bs-queue-note>
+
       <div class="filters">
         ${FILTERS.map(
           (f) =>
@@ -196,6 +199,8 @@ class AdminUploads extends BaseElement {
                  </div>`
       }
     `;
+
+    this.$("bs-queue-note").queue = queue;
   }
 
   /** One card's row, plus the confirmation or error row under it if any. */

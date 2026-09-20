@@ -2,7 +2,7 @@
 // when a coordinator needs to know why, a short detail; the wording and the
 // chip colour are a presentation decision and live here.
 
-import { count, longDate } from "./format.js";
+import { count, dateAtTime, longDate } from "./format.js";
 
 const LABELS = {
   in_progress: "In progress",
@@ -86,6 +86,44 @@ export function audioNote(upload) {
     return `Original recordings kept until ${longDate(upload.audioExpiresAt)}. Detections and their clips are kept.`;
   }
   return "";
+}
+
+// Why nothing is being analyzed, by the state internal/analysis reports. A
+// state not listed here -- "ready", or "starting" while the server's first
+// BirdNET check runs -- has nothing to say.
+const QUEUE_NOTES = {
+  unavailable: {
+    headline: "BirdNET isn’t running on this server.",
+    what: "Received cards wait in Processing until it is. Nothing is lost: analysis starts on its own once the server can run it, and picks up where it left off.",
+  },
+  failing: {
+    headline: "Analysis stopped on an error.",
+    what: "The queue is retrying it. Cards may sit in Processing until it gets through.",
+  },
+  off: {
+    headline: "This server runs no analysis.",
+    what: "Received cards stay in Processing.",
+  },
+};
+
+/**
+ * Why cards aren’t moving, for the coordinator’s screens. Every card reaches
+ * BirdNET through the one server process, so when that can’t run, every card
+ * in Processing is waiting on the same thing -- and the screens that list them
+ * are where a coordinator should find that out, rather than in container logs.
+ *
+ * @returns {{headline: string, what: string, detail: string} | null} null when
+ *   analysis is running, which is the usual answer.
+ */
+export function queueNote(queue) {
+  const note = QUEUE_NOTES[queue?.state];
+  if (!note) return null;
+  // Separated rather than punctuated: dateAtTime ends in "a.m." often enough
+  // that a full stop after it reads as a typo.
+  const detail = [queue.since ? `Since ${dateAtTime(queue.since)}` : "", queue.detail ?? ""]
+    .filter(Boolean)
+    .join(" · ");
+  return { ...note, detail };
 }
 
 /** True when the volunteer still has work to do on this card. */

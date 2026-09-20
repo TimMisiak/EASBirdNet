@@ -10,15 +10,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
-// recordingQueue is an analysis queue that only notes what it was told.
+// recordingQueue is an analysis queue that only notes what it was told, and
+// reports whatever status a test set on it.
 type recordingQueue struct {
-	mu   sync.Mutex
-	refs []string
+	mu     sync.Mutex
+	refs   []string
+	status analysis.Status
+}
+
+func (q *recordingQueue) Status() analysis.Status {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.status
 }
 
 func (q *recordingQueue) Enqueue(ref string) {
@@ -313,5 +322,63 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 	if stored, err := store.GetDetection(ctx, ref, owl.ID); err != nil || stored.ReviewStatus != db.ReviewConfirmed ||
 		stored.Review == nil || stored.Review.UserName != "Jane Volunteer" {
 		t.Errorf("after Jane's review, stored = %+v (%v)", stored, err)
+	}
+}
+
+// A card that isn't moving is only explained by the queue's own state, so the
+// coordinator's routes carry it -- and the volunteer's, whose detail would
+// name server-side paths they can't act on, doesn't.
+func TestAStuckCardSaysWhyOnTheAdminRoutes(t *testing.T) {
+	store, files := newTestStore(t), testFiles(t)
+	since := testNow.Add(-2 * time.Hour)
+	queue := &recordingQueue{status: analysis.Status{
+		State: analysis.StateUnavailable, Detail: "no module named birdnet", Since: since,
+	}}
+	mux := http.NewServeMux()
+	register(mux, &handlers{
+		store: store, files: files, queue: queue, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		keys: newKeyset(testSessionKey),
+		now:  func() time.Time { return testNow },
+	})
+	admin, volunteer := signedIn(t, mux, db.RoleAdmin), signedIn(t, mux, db.RoleVolunteer)
+
+	// The liveness probe stays 200 -- BirdNET being absent is not a reason to
+	// restart the container -- but says so, without the detail: no session
+	// reaches this route.
+	rec := do(t, mux, http.MethodGet, "/api/v1/health", "", nil)
+	health := decodeInto[map[string]string](t, rec)
+	if rec.Code != http.StatusOK || health["status"] != "ok" || health["queue"] != analysis.StateUnavailable {
+		t.Errorf("health = %d %s, want 200 with the queue unavailable", rec.Code, rec.Body)
+	}
+
+	ref := db.UploadID("2026-09-07", "SW-02")
+	for _, path := range []string{"/api/v1/admin/uploads", "/api/v1/admin/uploads/" + ref} {
+		rec := do(t, mux, http.MethodGet, path, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d (%s)", path, rec.Code, rec.Body)
+		}
+		got := decodeInto[struct {
+			Queue QueueStatus `json:"queue"`
+		}](t, rec).Queue
+		if got.State != analysis.StateUnavailable || got.Detail != "no module named birdnet" {
+			t.Errorf("GET %s queue = %+v, want why nothing is being analyzed", path, got)
+		}
+		if got.Since == nil || !got.Since.Equal(since) {
+			t.Errorf("GET %s queue.since = %v, want %v", path, got.Since, since)
+		}
+	}
+
+	rec = do(t, mux, http.MethodGet, "/api/v1/uploads", "", volunteer)
+	if strings.Contains(rec.Body.String(), "birdnet") {
+		t.Errorf("the volunteer's own cards carried the queue's detail: %s", rec.Body)
+	}
+}
+
+// A server running no queue at all still answers for it, so the screens say
+// cards will sit rather than showing nothing.
+func TestNoQueueReportsItself(t *testing.T) {
+	h := &handlers{now: func() time.Time { return testNow }}
+	if s := h.queueStatus(); s.State != "off" || s.Since != nil {
+		t.Errorf("queueStatus with no queue = %+v, want off", s)
 	}
 }
