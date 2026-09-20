@@ -219,6 +219,22 @@ writes its own warnings to stdout.
 *Revisit when:* the app needs more than one replica, or the container's share
 of a card upload (CPU, bandwidth) costs more than direct-to-blob uploads would.
 
+**A file's length is the whole integrity check.** A file may only be sent if it
+is on the list its card was registered with, at that length, and a tus upload
+isn't complete until its last byte lands -- so a truncated or mis-stitched file
+can never be marked `uploaded`, and TLS covers the wire. There is no checksum,
+and no `sha256` field. A checksum is only worth having if it is verified before
+the volunteer is told the card is safe to erase, and every cheap place to verify
+it is after that moment: Web Crypto has no streaming digest, so the browser
+would have to read all ~128 GB a second time, and the server would have to carry
+a running hash across a file's PATCHes and read the blob back to resume one.
+What length doesn't catch is a byte flipped in place by a failing reader or bad
+memory, which BirdNET then reports as a file it can't read.
+*Revisit when:* a real card yields files BirdNET can't read and we can't tell a
+corrupt transfer from a corrupt card. Then hash in the browser and verify in
+tusd's finish hook, before the file counts as received -- not at analysis time,
+which is a day after the card was erased.
+
 **Terraform owns what is deployed.** `infra/` is the whole Azure stack and
 `scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
 `terraform apply -var image_tag=<sha>`. One owner for the running image means a

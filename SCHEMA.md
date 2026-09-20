@@ -237,10 +237,9 @@ interruption produces the same ids instead of duplicates.
 | `recordedAt?`    | instant | Recording start, when known. The analysis queue fills it in from the file name (`20260723_160624`, local time, with an optional `(-0700)` offset; Pacific without one). |
 | `durationSec?`   | number  | Filled in by the analysis queue, which reads it while cutting clips. |
 | `sampleRate?`    | integer | Hz, filled in the same way. |
-| `sha256?`        | string  | Hex checksum, to tell a corrupt transfer from a corrupt card. |
 | `blobName?`      | string  | Where the audio is stored, set when its last byte lands; see [Blob naming](#blob-naming). |
 | `status`         | string  | `pending` → `uploaded` → `analyzing` → `analyzed`, or `failed`. |
-| `statusDetail?`  | string  | Why it failed, e.g. `checksum mismatch`. |
+| `statusDetail?`  | string  | Why it failed, e.g. `unreadable audio`. |
 | `uploadedAt?`    | instant | |
 | `analyzedAt?`    | instant | When BirdNET finished with it, or gave up on it. |
 | `audioDeletedAt?`| instant | When the recording itself was removed under [Audio retention](#audio-retention). `blobName` is cleared with it; `status` is unchanged, because it still says what BirdNET made of the file. |
@@ -275,7 +274,7 @@ interruption produces the same ids instead of duplicates.
 | `uploaded` | In file storage; not analyzed yet. On a `processing` card, this is the analysis queue: the file is waiting for BirdNET. |
 | `analyzing`| BirdNET is running over it. Found at startup, it was cut off by a restart, and is run again. |
 | `analyzed` | BirdNET has run over it (it may still have zero detections). |
-| `failed`   | Unreadable, checksum mismatch, or analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when an attempt on the file failed three times over — the analyzer crashing, or storing a clip, the detections or the result failing — that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
+| `failed`   | Unreadable, or an analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when an attempt on the file failed three times over — the analyzer crashing, or storing a clip, the detections or the result failing — that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
 
 ## `detections`
 

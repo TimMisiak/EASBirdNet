@@ -160,7 +160,7 @@ const (
 	AudioUploaded  = "uploaded"  // in blob storage, not yet analyzed
 	AudioAnalyzing = "analyzing" // BirdNET is running over it
 	AudioAnalyzed  = "analyzed"  // BirdNET has run over it
-	AudioFailed    = "failed"    // unreadable, bad checksum, or analysis failed
+	AudioFailed    = "failed"    // unreadable or analysis failed
 )
 
 // AudioDetailNotOnCard is the StatusDetail of a failed file that was on a
@@ -181,7 +181,6 @@ type AudioFile struct {
 	RecordedAt  *time.Time `json:"recordedAt,omitempty"`
 	DurationSec float64    `json:"durationSec,omitempty"`
 	SampleRate  int        `json:"sampleRate,omitempty"`
-	SHA256      string     `json:"sha256,omitempty"`
 	// BlobName is where the audio lives in file storage (storage.Name of its
 	// tus upload), set when the last byte lands.
 	BlobName     string     `json:"blobName,omitempty"`

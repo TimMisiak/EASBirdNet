@@ -88,22 +88,6 @@ quietly.
 Audio is irreplaceable: the volunteer erases the card, and originals are deleted
 after 30 days. These are the items where being wrong costs recordings.
 
-### 1.4 There is no transfer checksum, though the schema promises one — **[decide]**
-`backend/internal/db/models.go:184`, SCHEMA.md `audioFiles` table — **[verified]**
-
-`audioFiles.sha256` is documented as "Hex checksum, to tell a corrupt transfer
-from a corrupt card", and `checksum mismatch` is a documented `statusDetail`.
-The field exists in the Go model. Nothing in the repo ever computes, stores or
-verifies it — the only integrity check on a 128 GB card is byte length.
-
-**If not fixed:** a card corrupted in transfer is indistinguishable from one
-BirdNET simply couldn't read, and the documented failure reason can never
-occur. The UI meanwhile tells the volunteer the card was "checked against what
-was on the card" and is "safe to erase", after which the original is gone. Either
-implement it (a browser-side hash per file, verified in the tus finish hook) or
-drop the field and the copy — but shipping as-is means the schema lies about a
-data-integrity guarantee.
-
 ### 1.5 Re-registering a card at a different size orphans stored bytes
 `backend/internal/api/api.go:561-569`
 
