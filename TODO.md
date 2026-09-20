@@ -202,20 +202,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.1 The build context ships both production secrets to ACR
-`.dockerignore`, `scripts/deploy.ps1:100` — **[verified]**
-
-`.dockerignore` excludes `.git`, `*.md`, `backend/data`, `.venv` and `test` —
-but not `infra/`, `scripts/`, `*.tfvars` or `.terraform/`. `az acr build ... '.'`
-packs the whole context. `deploy.ps1:57` *requires* `infra/prod.tfvars` to
-exist, and that file holds `oidc_microsoft_client_secret` and `session_key` in
-plaintext.
-
-**If not fixed:** every deploy uploads both production secrets into ACR's source
-storage, along with 234 MB of `infra/.terraform` (measured). Add `infra/`,
-`scripts/`, `**/*.tfvars`, `**/*.tfstate*`. Note also that `*.md` only matches
-root-level files — Docker patterns don't cross `/`.
-
 ### 4.2 There are no security response headers at all
 `backend/cmd/server/main.go:414-420`, `backend/internal/web/web.go` — **[verified]**
 
@@ -424,15 +410,14 @@ the larger of the two, not the smaller) or treat a Shutdown deadline as a normal
 outcome logged at Warn.
 
 ### 5.11 Every deploy rebuilds the BirdNET stage from scratch
-`scripts/deploy.ps1:100`, `Dockerfile:21-37`
+`scripts/deploy.ps1:110`, `Dockerfile:21-37`
 
 `az acr build` runs on a fresh agent with no `--cache-from` and no registry
 cache, so every deploy pip-installs the pinned requirements and re-downloads
 ~90 MB of models from Zenodo.
 
 **If not fixed:** multi-minute deploys, and a deploy — including an emergency
-rollback — that can fail because PyPI or Zenodo is having a bad day. Compounded
-by the 234 MB context upload in 4.1.
+rollback — that can fail because PyPI or Zenodo is having a bad day.
 
 ### 5.12 DEPLOYMENT.md's own pre-flight checks are still outstanding — **[needs Azure]**
 

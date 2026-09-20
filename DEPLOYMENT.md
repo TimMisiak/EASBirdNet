@@ -362,6 +362,15 @@ than yours, and produces a `linux/amd64` image whatever the machine running it
 is -- an arm64 image (an Apple Silicon `docker build`) starts and dies in
 Container Apps with an exec format error.
 
+`az acr build` uploads the whole build context to the registry's source
+storage, and the repo it is run from holds `infra/prod.tfvars` -- the OIDC
+client secret and the session key in plaintext -- next to `infra/.terraform`.
+So `.dockerignore` is an allow-list: `*`, then back in only the three
+directories the Dockerfile copies (`backend`, `analyzer`, `frontend`). A new
+file has to be named there before it can leave the machine, which is the right
+way round for a context that goes to a registry. The script checks that shape
+before it builds, because the failure is silent from this end.
+
 Two rules the script enforces, both about the tag being the commit sha:
 
 - It refuses a dirty working tree, so what's deployed is something that can be

@@ -91,6 +91,22 @@ try {
         Die 'could not read acr_name from Terraform (first deploy?): run the one-time setup in README.md, or pass it, e.g. $env:BIRDSENSE_ACR = "crbirdsenseprod"'
     }
 
+    # `az acr build` uploads the whole build context to the registry, and
+    # infra/prod.tfvars -- sitting right here, required above -- holds the OIDC
+    # client secret and the session key. .dockerignore keeps them out by being
+    # an allow-list: everything excluded, then the three directories the
+    # Dockerfile copies added back. That property lives or dies on the bare `*`
+    # coming first, so check it here rather than find out from ACR.
+    $ignore = @(Get-Content '.dockerignore' | Where-Object { $_.Trim() -ne '' -and -not $_.TrimStart().StartsWith('#') })
+    if ($ignore.Count -eq 0 -or $ignore[0].Trim() -ne '*') {
+        Die '.dockerignore is no longer an allow-list (it must start with `*`); the build context would carry infra/prod.tfvars to ACR'
+    }
+    foreach ($line in $ignore) {
+        if ($line.Trim() -match '^!\s*(infra|scripts)\b') {
+            Die ".dockerignore re-includes $($line.Trim()) -- that sends secrets or Terraform state to ACR"
+        }
+    }
+
     # Built in ACR rather than locally: no local Docker, the model download in
     # the Dockerfile's birdnet stage happens on Azure's network rather than
     # yours, and the result is linux/amd64 whatever this machine is. An arm64
