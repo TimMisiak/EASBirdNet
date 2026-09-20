@@ -16,7 +16,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -364,13 +366,25 @@ func (s *azure) Open(ctx context.Context, name string) (io.ReadCloser, error) {
 	return r, err
 }
 
-// DeleteAll deletes one blob at a time: a card is a few hundred files, which
-// is seconds of requests inside Azure.
+const (
+	// deleteBatch is how many blobs go in one Blob Batch request; the service
+	// takes at most 256.
+	deleteBatch = 256
+	// deleteWorkers is how many of those requests are in flight at once.
+	deleteWorkers = 8
+)
+
+// DeleteAll removes a card's blobs in Blob Batch requests, deleteBatch at a
+// time and deleteWorkers of those at once. A card is a few hundred recordings
+// but its detections, and so its clips, run to tens of thousands: one request
+// per blob takes longer than the Container Apps ingress lets a request run
+// (DEPLOYMENT.md, *Request time*).
 func (s *azure) DeleteAll(ctx context.Context, prefix string) error {
 	names, err := under(prefix)
 	if err != nil {
 		return err
 	}
+	var blobs []string
 	for _, name := range names {
 		// A file that was never finished is uncommitted blocks, which are only
 		// listed when asked for.
@@ -384,14 +398,60 @@ func (s *azure) DeleteAll(ctx context.Context, prefix string) error {
 				return fmt.Errorf("storage: listing %s: %w", name, err)
 			}
 			for _, item := range page.Segment.BlobItems {
-				_, err := s.container.NewBlobClient(*item.Name).Delete(ctx, &blob.DeleteOptions{
-					DeleteSnapshots: to.Ptr(blob.DeleteSnapshotsOptionTypeInclude),
-				})
-				if err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
-					return fmt.Errorf("storage: deleting %s: %w", *item.Name, err)
-				}
+				blobs = append(blobs, *item.Name)
 			}
 		}
+	}
+
+	chunks := slices.Collect(slices.Chunk(blobs, deleteBatch))
+	errs := make([]error, len(chunks))
+	running := make(chan struct{}, deleteWorkers)
+	var wg sync.WaitGroup
+	for i, chunk := range chunks {
+		running <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-running }()
+			errs[i] = s.deleteBlobs(ctx, chunk)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteBlobs deletes up to deleteBatch blobs in one request. A Blob Batch is
+// not a transaction: every sub-request answers for itself, so one blob already
+// gone leaves the rest deleted.
+func (s *azure) deleteBlobs(ctx context.Context, names []string) error {
+	batch, err := s.container.NewBatchBuilder()
+	if err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	for _, name := range names {
+		err := batch.Delete(name, &container.BatchDeleteOptions{
+			DeleteOptions: blob.DeleteOptions{DeleteSnapshots: to.Ptr(blob.DeleteSnapshotsOptionTypeInclude)},
+		})
+		if err != nil {
+			return fmt.Errorf("storage: deleting %s: %w", name, err)
+		}
+	}
+	resp, err := s.container.SubmitBatch(ctx, batch, nil)
+	if err != nil {
+		return fmt.Errorf("storage: deleting %d blobs: %w", len(names), err)
+	}
+	for _, sub := range resp.Responses {
+		if sub.Error == nil || bloberror.HasCode(sub.Error, bloberror.BlobNotFound) {
+			continue
+		}
+		name := ""
+		if sub.BlobName != nil {
+			name = *sub.BlobName
+		}
+		return fmt.Errorf("storage: deleting %s: %w", name, sub.Error)
 	}
 	return nil
 }

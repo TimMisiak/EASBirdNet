@@ -88,22 +88,6 @@ quietly.
 Audio is irreplaceable: the volunteer erases the card, and originals are deleted
 after 30 days. These are the items where being wrong costs recordings.
 
-### 1.7 Deleting a real card will exceed the ingress timeout
-`backend/internal/db/cosmos.go:429-442`, `backend/internal/storage/storage.go:367-397`,
-called synchronously from `backend/internal/api/api.go:722-762`
-
-For a real card (~336 files, tens of thousands of detections) the handler does
-serial blob deletes (~672 round-trips plus clips) and then one `DeleteItem` per
-document, 8 at a time, across two containers. The Container Apps ingress ends a
-request at 240 s (DEPLOYMENT.md).
-
-**If not fixed:** the coordinator gets a 504 and the card is still listed. The
-operation is re-runnable by design so nothing is lost, but delete looks broken.
-`azcosmos` v1.5.0 has `NewTransactionalBatch` (100 same-partition ops per
-request), which turns 30,000 requests into ~300.
-
----
-
 ## 2. The app tells volunteers and coordinators things that aren't true
 
 The program depends on volunteers trusting what the screen says about a card

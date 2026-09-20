@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -141,8 +142,25 @@ func testStore(t *testing.T, s Store) {
 		t.Fatal(err)
 	}
 
+	// More clips than one delete request holds, so a card whose clips span
+	// several batches loses every one of them.
+	var clips []string
+	for i := range deleteBatch + 3 {
+		name := ClipName("OWL-20260907-SR02", fmt.Sprintf("det_%s_%d", t.Name(), i))
+		if err := s.Put(ctx, name, strings.NewReader("RIFF clip")); err != nil {
+			t.Fatal(err)
+		}
+		clips = append(clips, name)
+	}
+
 	if err := s.DeleteAll(ctx, "OWL-20260907-SR02"); err != nil {
 		t.Fatalf("delete the card's audio: %v", err)
+	}
+	for _, gone := range clips {
+		if _, err := s.Open(ctx, gone); !errors.Is(err, ErrNotFound) {
+			t.Errorf("open deleted %s: err = %v, want ErrNotFound", gone, err)
+			break
+		}
 	}
 	for _, gone := range []string{Name(id), clip} {
 		if _, err := s.Open(ctx, gone); !errors.Is(err, ErrNotFound) {

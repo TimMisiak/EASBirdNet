@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,9 @@ const (
 	maxUpdateAttempts = 5
 	// batchWorkers is how many writes a batch runs at once.
 	batchWorkers = 8
+	// batchOps is how many operations go in one transactional batch; Cosmos
+	// takes at most 100.
+	batchOps = 100
 )
 
 type cosmosStore struct {
@@ -424,21 +428,49 @@ type docID struct {
 	ID string `json:"id"`
 }
 
-// deletePartition deletes every document in one logical partition, a few at a
-// time. A document that is already gone counts as deleted.
+// deletePartition deletes every document in one logical partition, in
+// transactional batches of batchOps and batchWorkers of those at once. A
+// card's detections run to tens of thousands: one request per document takes
+// longer than the Container Apps ingress lets a request run (DEPLOYMENT.md,
+// *Request time*).
 func deletePartition(ctx context.Context, c *azcosmos.ContainerClient, partition string) error {
 	docs, err := queryDocs[docID](ctx, c, partition, "SELECT c.id FROM c")
 	if err != nil {
 		return err
 	}
 	pk := azcosmos.NewPartitionKeyString(partition)
-	return inParallel(ctx, docs, func(ctx context.Context, doc docID) error {
-		_, err := c.DeleteItem(ctx, pk, doc.ID, nil)
-		if hasStatus(err, http.StatusNotFound) {
+	chunks := slices.Collect(slices.Chunk(docs, batchOps))
+	return inParallel(ctx, chunks, func(ctx context.Context, chunk []docID) error {
+		batch := c.NewTransactionalBatch(pk)
+		for _, doc := range chunk {
+			batch.DeleteItem(doc.ID, nil)
+		}
+		resp, err := c.ExecuteTransactionalBatch(ctx, batch, nil)
+		if err != nil {
+			return cosmosErr(err)
+		}
+		if resp.Success {
 			return nil
 		}
-		return cosmosErr(err)
+		// A batch is all or nothing, so one document that went between the
+		// query and here rolls back the other ninety-nine. That happens when
+		// two deletes of the same card overlap -- the analysis queue deletes a
+		// card whose file it finds missing -- so finish the chunk a document
+		// at a time, where already gone counts as deleted.
+		return deleteEach(ctx, c, pk, chunk)
 	})
+}
+
+// deleteEach deletes documents one request at a time. A document that is
+// already gone counts as deleted.
+func deleteEach(ctx context.Context, c *azcosmos.ContainerClient, pk azcosmos.PartitionKey, docs []docID) error {
+	for _, doc := range docs {
+		_, err := c.DeleteItem(ctx, pk, doc.ID, nil)
+		if err != nil && !hasStatus(err, http.StatusNotFound) {
+			return cosmosErr(err)
+		}
+	}
+	return nil
 }
 
 // inParallel runs do over items, batchWorkers at a time, and stops at the
