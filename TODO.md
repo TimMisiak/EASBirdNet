@@ -38,9 +38,14 @@ today. Gaps in the numbering are correct and should be left alone.
 
 **Finishing an item:**
 
-1. Do the work, and leave behind something that fails if it regresses — a test,
-   a Terraform `precondition`, a startup check. That check is what replaces the
-   entry here; it is the reason the entry doesn't need to stay.
+1. Do the work. Where a regression is likely or would be expensive — anything
+   that could lose or corrupt data, a rule the API enforces, a shape both
+   database backends have to agree on, a check that only fires on deploy —
+   leave behind something that fails if it comes back: a test, a Terraform
+   `precondition`, a startup check. That check is what replaces the entry here.
+   Where a regression would be obvious the moment someone looks at the screen,
+   skip it; UI behaviour rarely earns a test. Don't add one for the sake of
+   having added one, and don't leave an item unfinished for want of a test.
 2. Put any lasting fact where that kind of fact already lives:
    - a stored field or document shape → SCHEMA.md, together with
      `internal/db/models.go`
@@ -794,7 +799,10 @@ being rediscovered.
 - **No CI.** There is no `.github/`; `gofmt`, `go vet`, `go test` and
   `govulncheck` are manual. A single workflow running the command CLAUDE.md
   already documents would have caught 4.5.
-- **No frontend tests at all** — 7,120 lines of JavaScript, zero.
+- **No frontend tests at all** — 7,120 lines of JavaScript, zero. Mostly fine
+  (UI regressions show themselves), but there is no harness at all should a
+  piece of frontend logic ever warrant one — `upload-flow.js`'s state machine
+  and `format.js` are the candidates.
 - **`${HOST_PORT}` has no default** (`docker-compose.yml:9`). Unset, compose
   publishes on a random host port, contradicting README.md and CLAUDE.md's
   `http://localhost:8080`. Use `${HOST_PORT:-8080}`.
