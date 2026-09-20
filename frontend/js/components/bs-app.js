@@ -69,7 +69,12 @@ class BirdsenseApp extends BaseElement {
       const to = typeof route.redirect === "function" ? route.redirect(here) : route.redirect;
       return navigate(`${to}${location.search}`, { replace: true });
     }
-    if (route?.auth && !session.isSignedIn()) return navigate("/signin", { replace: true });
+    if (route?.auth && !session.isSignedIn()) {
+      // A session that ended under them says so, in the same way the OIDC
+      // callback reports a sign-in that didn't work.
+      const to = session.wasEnded() ? "/signin?error=session-ended" : "/signin";
+      return navigate(to, { replace: true });
+    }
     if (route?.admin && !session.isAdmin()) return navigate("/app", { replace: true });
 
     this.#route = route;

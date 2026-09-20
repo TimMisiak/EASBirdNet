@@ -55,6 +55,7 @@ class SignInPage extends BaseElement {
         expired: "That took a while — please try again.",
         state: "That sign-in didn't look right. Please try again.",
         "provider-unreachable": "We couldn't reach the sign-in provider. Please try again in a moment.",
+        "session-ended": "You've been signed out. Sign in again to carry on.",
       }[reason] ?? "Sign-in didn't work. Please try again."
     );
   }

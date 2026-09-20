@@ -12,6 +12,16 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Told when the server says a session has ended, so one 401 anywhere signs the
+ * whole app out. session.js sets it at startup; api.js can't import session.js,
+ * which imports this, and api.js is the module everything else is built on.
+ */
+let signedOut = () => {};
+export const onUnauthorized = (handler) => {
+  signedOut = handler;
+};
+
 async function request(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -25,6 +35,10 @@ async function request(method, path, body) {
   // dropped connection might not, so don't assume the body parses.
   const payload = await res.json().catch(() => null);
   if (!res.ok) {
+    // The session cookie lasts 90 days, but a roster removal or a rotated
+    // signing key ends a session at once, and only a call finds that out.
+    // GET /session answers 200 either way, so a 401 is always this.
+    if (res.status === 401) signedOut();
     throw new ApiError(res.status, payload?.error ?? `${method} ${path} failed (${res.status})`);
   }
   return payload;

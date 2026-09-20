@@ -110,18 +110,6 @@ change the copy to say what actually happens (the card page shows progress; come
 back and look). The copy change is small and can ship now; email is its own
 piece of work.
 
-### 2.4 An ended session shows raw errors instead of the sign-in page
-`frontend/js/api.js:15-31`, `frontend/js/session.js:23-40`
-
-`session.load()` runs once, at `bs-app.js:52`. Nothing re-checks it, and no
-caller inspects `error.status`. The cookie lasts 90 days, and roster removal or
-a `BIRDSENSE_SESSION_KEY` rotation ends a session immediately.
-
-**If not fixed:** after that, every tab renders "Couldn't load your cards: sign
-in first" while the header still shows the person's name and all their tabs. One
-`if (status === 401)` in `api.js`'s `request()` covers the whole app; the tus
-path already does it (`upload-flow.js:385-394`).
-
 ### 2.5 A placeholder graphic ships on the public landing page
 `frontend/js/components/bs-home-page.js:105-121`, `:173-176` — **[verified]**
 

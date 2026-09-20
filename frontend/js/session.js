@@ -7,6 +7,7 @@ let current = null;
 let loaded = false;
 let dev = false;
 let providers = [];
+let ended = false;
 const listeners = new Set();
 
 /** The signed-in person, or null. Synchronous: call load() once at startup. */
@@ -19,6 +20,8 @@ export const isDev = () => dev;
 export const identityProviders = () => providers;
 /** False until the first load() resolves, so the shell can hold off routing. */
 export const isLoaded = () => loaded;
+/** True when a session ended under them, rather than never having existed. */
+export const wasEnded = () => ended;
 
 export async function load() {
   try {
@@ -39,8 +42,23 @@ export async function load() {
   return current;
 }
 
+/**
+ * The other half of load(). The server is the last word on whether a session
+ * is still good: the cookie lasts 90 days, but a roster removal or a rotated
+ * BIRDSENSE_SESSION_KEY ends one the moment it happens, and only a call finds
+ * out. Whichever call it was, sign out here -- otherwise every screen reports
+ * "sign in first" under a header that still has their name and tabs in it.
+ */
+api.onUnauthorized(() => {
+  if (current === null) return;
+  current = null;
+  ended = true;
+  announce();
+});
+
 export async function signIn(body) {
   ({ user: current } = await api.createSession(body));
+  ended = false;
   announce();
   return current;
 }

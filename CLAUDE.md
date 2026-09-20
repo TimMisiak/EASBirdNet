@@ -195,6 +195,12 @@ The session cookie is the address, HMAC-signed with `BIRDSENSE_SESSION_KEY`
 revision doesn't sign everyone out -- and rotating it deliberately is how you
 end every session at once. Removing someone from the roster already ends
 theirs, so there is no session store to revoke from.
+The browser finds out the same way it finds out anything: `api.js` turns any
+401 into a sign-out in `session.js`, so one ended session bounces the app to
+the sign-in page (`/signin?error=session-ended`) instead of leaving every
+screen reporting "sign in first" under a header that still has your name in
+it. That is the only re-check there is -- `session.load()` runs once, at
+startup -- so a page that makes no API call won't notice.
 *Revisit when:* a provider has to be something other than Google or Microsoft,
 or sessions need to be listed and revoked one at a time.
 
