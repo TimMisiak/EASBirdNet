@@ -1,7 +1,8 @@
 # Birdsense — what's left before it goes live
 
-Written against `dd72866`, 2026-09-19. This is a review of the whole repo
-against the plan already written down in [CLAUDE.md](CLAUDE.md),
+Last full review: `dd72866`, 2026-09-19 — update that line when the list is
+swept again; individual items don't carry dates. This is a review of the whole
+repo against the plan already written down in [CLAUDE.md](CLAUDE.md),
 [SCHEMA.md](SCHEMA.md) and [DEPLOYMENT.md](DEPLOYMENT.md). Nothing here is a new
 idea for the product: every item is either something those documents already
 promise and the code doesn't do, or something that will go wrong on the first
@@ -20,6 +21,58 @@ and `go test ./...` are all clean. What follows is what sits around that path.
 
 Items marked **[verified]** were reproduced by running the code, not only by
 reading it.
+
+---
+
+## How to work this list
+
+**Picking an item.** "The next item" is the first one still listed in Part 1,
+reading top to bottom. Part 1 is in working order — if something else matters
+more, move it up the file rather than skipping past it. Part 2 isn't ordered:
+take a cleanup item when it's asked for, or when you're already editing that
+file for another reason.
+
+**Item numbers are permanent addresses.** Never renumber. When an item goes, its
+number retires with it, so `4.1` means the same thing next month as it does
+today. Gaps in the numbering are correct and should be left alone.
+
+**Finishing an item:**
+
+1. Do the work, and leave behind something that fails if it regresses — a test,
+   a Terraform `precondition`, a startup check. That check is what replaces the
+   entry here; it is the reason the entry doesn't need to stay.
+2. Put any lasting fact where that kind of fact already lives:
+   - a stored field or document shape → SCHEMA.md, together with
+     `internal/db/models.go`
+   - an Azure resource or setting → DEPLOYMENT.md
+   - a decision, or a constraint someone could undo without noticing →
+     CLAUDE.md, in the same shape as the decisions already there, with its
+     *Revisit when*
+   - how to run, build or deploy it → README.md
+3. Delete the entry. No strikethrough, no "DONE", no completed section. Git
+   history is the record of what happened; this file is only what's left.
+
+**Write the state, not the journey.** The docs say what is true now. No
+changelog entries, no "this used to be…", no notes on what was tried before it
+worked. A reader should not be able to tell from the docs that this list ever
+existed.
+
+**The one exception** is a dead end that would cost the next person real time:
+the obvious approach that doesn't work, and one line on why. Put it next to what
+it protects — a comment on the code, or a *Gotcha* in the doc that owns that
+area — never in this file. `internal/storage/storage.go`'s note on tusd's empty
+sentinel block is the model to copy.
+
+**Two kinds of item you should not simply carry out:**
+
+- **[decide]** — the item names a choice that isn't an implementer's to make.
+  Bring the options and a recommendation, and stop.
+- **[needs Azure]**, **[needs a real card]**, **[needs credentials]** — can't be
+  finished from a laptop. Leave them listed; don't approximate them.
+
+**If an item turns out to be wrong** — the bug isn't real, or the fix belongs
+somewhere else — rewrite the entry to say what is actually true. Don't delete it
+quietly.
 
 ---
 
@@ -76,7 +129,7 @@ difference for any recorder not on Pacific time. The existing test
 (`analysis_test.go:552`) can't catch it — its only parenthesized case is a July
 date where `-0700` *is* Pacific.
 
-### 1.4 There is no transfer checksum, though the schema promises one
+### 1.4 There is no transfer checksum, though the schema promises one — **[decide]**
 `backend/internal/db/models.go:184`, SCHEMA.md `audioFiles` table — **[verified]**
 
 `audioFiles.sha256` is documented as "Hex checksum, to tell a corrupt transfer
@@ -141,7 +194,7 @@ request), which turns 30,000 requests into ~300.
 The program depends on volunteers trusting what the screen says about a card
 they are about to erase.
 
-### 2.1 Four screens promise emails that are never sent
+### 2.1 Four screens promise emails that are never sent — **[decide]**
 `bs-upload-done.js:81`, `:99`; `bs-upload-details.js:232`;
 `bs-upload-progress.js:227` — **[verified]**
 
@@ -277,7 +330,7 @@ Cosmos RUs and CPU on the single replica that is also running BirdNET. The
 response's `updatedAt` is already truncated to the minute — caching it for that
 minute is nearly free.
 
-### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it
+### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it — **[needs a real card]** for the measurement; the per-file cap is implementable now
 `backend/internal/analysis/analysis.go:276-312`, `backend/internal/analysis/merge.go:15-25` — **[verified]**
 
 Measured on the test clip: a 13.96 s detection produced a **1.23 MB** clip
@@ -380,7 +433,7 @@ caller can see, and only the server picks ids — so there is no known exposure.
 Worth a shape check anyway, because the containment is incidental rather than
 intended.
 
-### 4.7 Two decisions to make deliberately, not by default
+### 4.7 Two decisions to make deliberately, not by default — **[decide]**
 
 - **Volunteer addresses in logs.** `auth.go:337,347` and `main.go:398-402` log
   email addresses into Log Analytics. Defensible as an audit trail, but it puts
@@ -539,7 +592,7 @@ cache, so every deploy pip-installs the pinned requirements and re-downloads
 rollback — that can fail because PyPI or Zenodo is having a bad day. Compounded
 by the 234 MB context upload in 4.1.
 
-### 5.12 DEPLOYMENT.md's own pre-flight checks are still outstanding
+### 5.12 DEPLOYMENT.md's own pre-flight checks are still outstanding — **[needs Azure]**
 
 *First checks once we have Azure access* lists three, and they remain the right
 list: (1) run the app locally against a non-production storage account with your
@@ -569,7 +622,7 @@ struct correctly use `../`.
 **If not fixed:** the first thing a new contributor does, exactly as documented,
 appears to be a completely broken app. Change the default to `../frontend`.
 
-### 6.2 DEPLOYMENT.md and CLAUDE.md disagree about what has run in Azure
+### 6.2 DEPLOYMENT.md and CLAUDE.md disagree about what has run in Azure — **[decide]** which is true
 DEPLOYMENT.md `:15-19`, `:385`, `:456` vs CLAUDE.md *State of the code*
 
 DEPLOYMENT.md says "nothing here is provisioned yet; the Terraform has never
@@ -635,7 +688,7 @@ nonce-mismatch and a not-on-roster test against a stub provider would be cheap.
 `backend/internal/api/api_test.go:59-66` — a regression dropping `Secure` or
 `HttpOnly` from the production session cookie would fail nothing.
 
-### 7.4 Google sign-in is written and untested
+### 7.4 Google sign-in is written and untested — **[needs credentials]**
 CLAUDE.md says so. It needs a client id, a secret and someone to try it — or the
 button should not be reachable at launch.
 
