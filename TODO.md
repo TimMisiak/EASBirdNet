@@ -168,18 +168,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.5 A known advisory is reachable from the sign-in path
-`backend/go.mod` — **[verified]**
-
-`govulncheck` reports GO-2026-4945 in `go-jose/v4@v4.1.3`, reachable via
-`oidc.IDTokenVerifier.Verify` (`internal/api/auth.go:421`). Fixed in v4.1.4.
-`golang.org/x/crypto@v0.55.0` has three more (ssh, openpgp) that the code
-doesn't call. There is no dependency scanning in the repo and no CI at all.
-
-**If not fixed:** a known-vulnerable JOSE parser sits on the only
-unauthenticated code path that processes attacker-influenced input. One
-`go get`; then decide who runs `govulncheck` and when.
-
 ### 4.6 tus upload ids from the URL aren't validated before reaching the store
 `backend/internal/api/tus.go:80`
 
@@ -596,9 +584,10 @@ being rediscovered.
 
 ## Infrastructure and repo
 
-- **No CI.** There is no `.github/`; `gofmt`, `go vet`, `go test` and
-  `govulncheck` are manual. A single workflow running the command CLAUDE.md
-  already documents would have caught 4.5.
+- **CI covers the Go module only** (`.github/workflows/checks.yml` runs
+  `gofmt`, `go vet`, `go test` and `govulncheck`). Nothing runs
+  `terraform fmt -check` or `terraform validate` on `infra/`, so formatting
+  drift and a syntax error both wait until someone deploys.
 - **No frontend tests at all** — 7,120 lines of JavaScript, zero. Mostly fine
   (UI regressions show themselves), but there is no harness at all should a
   piece of frontend logic ever warrant one — `upload-flow.js`'s state machine

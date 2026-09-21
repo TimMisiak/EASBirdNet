@@ -10,6 +10,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ```
 /
+├── .github/workflows/  CI: gofmt, vet, tests and govulncheck
 ├── backend/            Go module: API + static file server
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server)
@@ -363,6 +364,22 @@ method-and-path patterns (`"GET /api/v1/health"`) handles routes, and
 `log/slog` handles logs. So we don't add a router, web framework, or logging
 library just out of habit.
 
+**Dependencies are scanned, and the toolchain is pinned.** `govulncheck` is
+part of the checks above, and `.github/workflows/checks.yml` runs all of them
+on every push and pull request *and* once a week, because an advisory lands
+against code nobody has touched -- a scan that only runs on push would never
+hear about it. It reports what the code can reach, not what is merely in the
+dependency graph, so the answer to an advisory in a module nothing calls is
+usually to leave it. The Go toolchain is a dependency like any other: the
+`toolchain` line in `backend/go.mod` names the exact patch release, which is
+what CI installs (`go-version-file`) and the minimum the Dockerfile's
+`golang:` image must carry, so a standard-library advisory is fixed by a
+one-line bump that shows up in review rather than by whichever Go a build
+agent happened to have. Bump it with `go get toolchain@goX.Y.Z`, and keep the
+Dockerfile's image tag in step.
+*Revisit when:* deploys move to CI -- then the same workflow can build and push
+the image, and the weekly run is the natural place to also rebuild it.
+
 **One Store, two backends.** `internal/db` defines a `Store` interface with an
 entity-specific method per read or write the API needs (`ListUploads`,
 `UpdateDetection`, ...) and two implementations: Cosmos DB for NoSQL in Azure,
@@ -560,8 +577,13 @@ HOST_PORT=8080 docker compose up --build
 Checks before committing:
 
 ```sh
-cd backend && gofmt -l . && go vet ./... && go test ./...
+cd backend && gofmt -l . && go vet ./... && go test ./... && govulncheck ./...
 ```
+
+`govulncheck` needs installing once
+(`go install golang.org/x/vuln/cmd/govulncheck@latest`). It exits non-zero only
+for an advisory this code can actually reach, so one against a module nothing
+calls is reported without failing.
 
 `TestAzure` in `internal/storage` runs the blob backend against Azurite, and is
 skipped unless `BIRDSENSE_TEST_AZURITE` names its endpoint (the command is in

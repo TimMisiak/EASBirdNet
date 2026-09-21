@@ -21,6 +21,17 @@ Or in Docker:
 HOST_PORT=8080 docker compose up --build
 ```
 
+## Checks
+
+```sh
+cd backend && gofmt -l . && go vet ./... && go test ./... && govulncheck ./...
+```
+
+`govulncheck` installs with
+`go install golang.org/x/vuln/cmd/govulncheck@latest`. GitHub Actions runs all
+four on every push and pull request, and again weekly so a new advisory against
+unchanged code still surfaces.
+
 ## Deploying
 
 Azure runs it as one container app, with documents in Cosmos DB and card audio

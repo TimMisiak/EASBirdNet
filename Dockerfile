@@ -2,7 +2,9 @@
 # runtime and models, then ship both next to the frontend files so a single
 # container serves the API and the UI and can analyze audio.
 
-FROM golang:1.25-alpine AS build
+# At least the `toolchain` line in backend/go.mod, or the build downloads its
+# own copy; bump the two together (CLAUDE.md, *Dependencies are scanned*).
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src/backend
 
