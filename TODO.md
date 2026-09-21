@@ -257,19 +257,6 @@ documents that the `skipEmpty` tusd workaround is only safe *because* blob
 versioning is off — turning on `versioning_enabled` would break every card
 upload. `storage.tf` carries no warning about that coupling; it should.
 
-### 5.10 A normal deploy looks like a crash
-`backend/cmd/server/main.go:153-168` — **[verified]**
-
-`srv.Shutdown` gets 10 seconds, inside Container Apps' 30 s default grace
-period. A 50 MB tus PATCH on a home connection routinely exceeds that, so
-Shutdown returns a deadline error and main exits 1.
-
-**If not fixed:** every Terraform-driven revision deploy during an upload looks
-like a crash to Container Apps and to whoever reads the logs. The upload itself
-is fine — tus resumes — but the signal is wrong. Widen the window (it should be
-the larger of the two, not the smaller) or treat a Shutdown deadline as a normal
-outcome logged at Warn.
-
 ### 5.11 Every deploy rebuilds the BirdNET stage from scratch
 `scripts/deploy.ps1:110`, `Dockerfile:21-37`
 

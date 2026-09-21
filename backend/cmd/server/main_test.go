@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/mail"
@@ -413,5 +414,49 @@ func TestConfigFromEnvSignIn(t *testing.T) {
 		t.Errorf("dev mode made a %d-byte session key, want at least %d like everywhere else", len(cfg.SessionKey), api.MinSessionKeyLen)
 	case cfg.Auth.PublicURL != "http://localhost:8080":
 		t.Errorf("dev public URL = %q, want localhost", cfg.Auth.PublicURL)
+	}
+}
+
+// A deploy that lands mid-upload is a normal shutdown, not a crash: the tus
+// PATCH carrying a card's file won't finish inside the grace period, so it is
+// cut and the process still exits 0. Getting this wrong makes every revision
+// swap during an upload look like a failed container to Container Apps.
+func TestShutdownCutsRequestsStillRunning(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	started, release := make(chan struct{}), make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	})}
+	defer close(release)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	go http.Get("http://" + ln.Addr().String() + "/api/v1/tus/OWL-20260907-SR02/abc")
+	<-started
+
+	done := make(chan error, 1)
+	go func() { done <- shutdownHTTP(srv, 50*time.Millisecond, log) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("shutdown with a request still running = %v, want it treated as normal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown did not return: it waited for the request instead of cutting it")
+	}
+
+	// An idle server still shuts down cleanly.
+	idle := &http.Server{Handler: http.NewServeMux()}
+	idleLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go idle.Serve(idleLn)
+	if err := shutdownHTTP(idle, shutdownGrace, log); err != nil {
+		t.Errorf("shutdown of an idle server = %v, want nil", err)
 	}
 }

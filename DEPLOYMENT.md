@@ -391,6 +391,16 @@ Two rules the script enforces, both about the tag being the commit sha:
   so re-pushing a tag the app already runs creates no new revision at all: the
   deploy would look like it worked and change nothing.
 
+**A deploy during an upload cuts that upload, on purpose.** The old revision
+gets its signal, gives live requests ten seconds, and then closes whatever is
+still running. A card's 50 MB tus PATCH on a home connection rarely fits in
+that window, and waiting for it would only push the process past Container
+Apps' 30 s termination grace period and be killed anyway -- so the request is
+cut, the browser's tus client resumes that file against the new revision from
+the last chunk the old one stored, and the container exits 0. In the logs it
+is one Warn line, not a failure: a revision swap mid-upload is normal, if
+still worth avoiding when you know a card is coming in.
+
 **Rolling back** is the same script with an earlier tag
 (`./scripts/deploy.ps1 -ListTags`, then `-ImageTag <sha>`), which skips the
 build entirely. [ROLLBACK.md](ROLLBACK.md) is the whole procedure, including

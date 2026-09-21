@@ -149,9 +149,7 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	shutdownErr := srv.Shutdown(shutdownCtx)
+	shutdownErr := shutdownHTTP(srv, shutdownGrace, log)
 	// A BirdNET run in flight is killed; its file is queued again next start.
 	stopAnalysis()
 	<-analysisDone
@@ -165,6 +163,35 @@ func main() {
 		log.Error("shutdown failed", "err", shutdownErr)
 		os.Exit(1)
 	}
+}
+
+// shutdownGrace is how long live requests get to finish once a signal
+// arrives. It is well inside Container Apps' 30 s termination grace period,
+// and many times what any ordinary request needs -- including the overview
+// scan, the slowest read in the app.
+const shutdownGrace = 10 * time.Second
+
+// shutdownHTTP stops the server, then cuts whatever is still running.
+//
+// A card's 50 MB tus PATCH on a home connection routinely takes longer than
+// shutdownGrace, so on a deploy mid-upload the deadline passing is the normal
+// outcome, not a failure: waiting for the file would only push the process
+// past the grace period and be killed anyway, and the browser's tus client
+// resumes that file from the last chunk the server stored. So the requests
+// still in flight are cut, it is logged at Warn, and the process exits 0.
+// Only a real Shutdown failure is an error.
+func shutdownHTTP(srv *http.Server, grace time.Duration, log *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	err := srv.Shutdown(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	log.Warn("requests were still running at shutdown and have been cut; an upload in flight resumes from its last chunk", "grace", grace)
+	if err := srv.Close(); err != nil {
+		log.Warn("closing the listener", "err", err)
+	}
+	return nil
 }
 
 // newMux wires the two route owners together: the API claims /api/, the
