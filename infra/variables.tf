@@ -136,3 +136,24 @@ variable "session_key" {
     error_message = "session_key must be at least 32 characters; generate one with `openssl rand -base64 32`."
   }
 }
+
+variable "alert_emails" {
+  description = "Who hears from the alert rules in monitor.tf, as email addresses. Required and with no default on purpose: a stack nobody is watching is the state this exists to fix, and a fresh apply -- a staging copy, or a rebuild -- would otherwise quietly come up unwatched. A list of one is fine."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.alert_emails) > 0 && alltrue([for e in var.alert_emails : can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", e))])
+    error_message = "alert_emails must name at least one email address."
+  }
+}
+
+variable "budget_monthly_usd" {
+  description = "Monthly cost budget for the resource group, in the billing account's currency. Not a cap -- nothing is stopped when it is passed -- it only mails alert_emails at 80% of actual spend and at a forecast of 100%. It is here because clips never expire (DEPLOYMENT.md, Cost), so the bill grows on its own without anybody changing anything."
+  type        = number
+  default     = 150
+
+  validation {
+    condition     = var.budget_monthly_usd > 0
+    error_message = "budget_monthly_usd must be more than zero."
+  }
+}

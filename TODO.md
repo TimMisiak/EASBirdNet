@@ -227,19 +227,6 @@ The stack is applied and running. What is left is what nobody is watching once
 it runs, and what a fresh apply -- a staging copy, or a rebuild from scratch --
 still walks into.
 
-### 5.3 No monitoring, no alerts, no diagnostic settings
-`infra/*.tf`
-
-Zero `azurerm_monitor_*` resources, no action group. Log Analytics collects
-logs; nothing reads them.
-
-**If not fixed:** none of these is visible to anyone — BirdNET failing to import
-at startup (so cards sit in `processing`), the Entra client secret expiring (so
-all sign-in stops), Cosmos 429s during bulk upserts, replica restarts (5.1). For
-a volunteer-run program the minimum is an action group plus alerts on replica
-restarts, 5xx rate, and a scheduled query on the "BirdNET isn't available" log
-line.
-
 ### 5.4 Rotating a secret never reaches the running container
 `infra/app.tf:36-43`
 
@@ -309,6 +296,43 @@ cache, so every deploy pip-installs the pinned requirements and re-downloads
 or Zenodo is having a bad day. A rollback is no longer exposed to this —
 `deploy.ps1 -ImageTag` applies an image that is already built (ROLLBACK.md) —
 so this is now about forward deploys only.
+
+### 5.12 The client secret expires, and nothing in Azure can warn about it — **[decide]**
+`infra/app.tf:36-43`, `infra/variables.tf`, `backend/internal/api/auth.go`
+
+An Entra ID app registration's client secret has a maximum lifetime of two
+years, and when it expires every sign-in stops for everyone at once — there is
+no degraded mode, because OpenID Connect is the only way in outside dev mode.
+Azure Monitor cannot help: an app registration's credential is not a resource,
+emits no metrics and raises no activity log event, so the alert rules in
+`infra/monitor.tf` deliberately leave it uncovered and DEPLOYMENT.md's *What is
+watched* says so.
+
+Three options, cheapest first:
+
+1. **Write the date down.** Issue a 24-month secret, record its expiry in
+   DEPLOYMENT.md's *Sign-in* section, and put a calendar reminder on it.
+   Free and proportionate, but it is a date in a document — which is the class
+   of thing this repo otherwise refuses (`internal/web` hashes the import map
+   out of the file rather than keeping a constant in step with it).
+2. **Check it on a schedule.** A weekly Microsoft Graph query against
+   `/applications`, from a Logic App, an Automation runbook, or the existing
+   weekly `checks.yml` run. The last of those needs CI to have an Azure
+   identity, which is the same prerequisite as moving deploys to CI
+   (CLAUDE.md, *Terraform owns what is deployed*).
+3. **Remove the secret.** Register the app's existing user-assigned managed
+   identity as a federated identity credential on the app registration, and
+   send a client assertion at token exchange instead of a secret:
+   `p.oauth.Exchange` (`auth.go:413`) already takes `oauth2.AuthCodeOption`s,
+   so the assertion goes in beside the PKCE verifier and nothing else in the
+   flow moves. This is the only option where the problem stops existing rather
+   than being watched, and it also takes the client secret out of the
+   Terraform state file, which is half of DEPLOYMENT.md's *Secrets* open
+   question. It costs a piece of work in the auth path — the security
+   boundary, and the one place 7.2 already says has no HTTP test.
+
+Whichever is chosen, `session_key` has the same shape of problem in reverse:
+it is deliberately never rotated, so it needs no expiry story, only 5.4.
 
 ---
 

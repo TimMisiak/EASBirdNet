@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/mail"
@@ -26,8 +27,20 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
 )
 
+// newLogger is how the server logs, and the format is load-bearing rather than
+// a taste: Container Apps forwards stdout to Log Analytics as one string per
+// line, and the alert rule in infra/monitor.tf picks the "BirdNET isn't
+// available" line out of it by field (`parse_json(Log_s).msg`), not by
+// substring. Going back to slog's text format would leave that alert matching
+// nothing, silently, which is the one failure it exists to report. A line tusd
+// writes for itself (internal/api/tus.go) stays text, doesn't parse, and falls
+// out of that query on its own.
+func newLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, nil))
+}
+
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	log := newLogger(os.Stdout)
 
 	cfg, err := configFromEnv()
 	if err != nil {

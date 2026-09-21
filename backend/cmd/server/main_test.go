@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -478,5 +480,29 @@ func TestShutdownCutsRequestsStillRunning(t *testing.T) {
 	go idle.Serve(idleLn)
 	if err := shutdownHTTP(idle, shutdownGrace, log); err != nil {
 		t.Errorf("shutdown of an idle server = %v, want nil", err)
+	}
+}
+
+// The alert rule in infra/monitor.tf reads the queue's "BirdNET isn't
+// available" line out of Log Analytics as a JSON field, so a logger that
+// stopped emitting JSON would leave that alert matching nothing and nobody
+// would hear that cards had stopped being analyzed. See newLogger.
+func TestLoggerEmitsJSON(t *testing.T) {
+	var buf bytes.Buffer
+	newLogger(&buf).Warn("BirdNET isn't available", "err", "no such file")
+
+	var line struct {
+		Level string `json:"level"`
+		Msg   string `json:"msg"`
+		Err   string `json:"err"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
+		t.Fatalf("the server's log line is not JSON (%v), so infra/monitor.tf's query matches nothing: %s", err, buf.String())
+	}
+	if line.Msg != "BirdNET isn't available" {
+		t.Errorf("msg = %q, want the message as its own field: that is what the alert query reads", line.Msg)
+	}
+	if line.Level != "WARN" || line.Err != "no such file" {
+		t.Errorf("level = %q, err = %q, want the level and each attribute as their own fields", line.Level, line.Err)
 	}
 }

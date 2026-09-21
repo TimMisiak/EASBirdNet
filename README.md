@@ -93,9 +93,9 @@ az storage container create -n tfstate `
 az storage account blob-service-properties update -n stbirdsensetfstate `
   -g rg-birdsense-tfstate --enable-versioning true
 
-# 2. Point Terraform at it, and name the first admin.
+# 2. Point Terraform at it, name the first admin, and say who alerts go to.
 Copy-Item infra/backend.hcl.example infra/backend.hcl    # the names used above
-Copy-Item infra/prod.tfvars.example infra/prod.tfvars    # set bootstrap_admin
+Copy-Item infra/prod.tfvars.example infra/prod.tfvars    # bootstrap_admin, alert_emails
 terraform "-chdir=infra" init "-backend-config=backend.hcl"
 
 # 3. The registry has to exist before the container app can run an image from

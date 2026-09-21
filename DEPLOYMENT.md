@@ -7,8 +7,9 @@ described in [SCHEMA.md](SCHEMA.md).
 
 `infra/` is this file as Terraform (`azurerm` provider), one file per group of
 resources: `main.tf` (resource group, identity), `cosmos.tf`, `storage.tf`,
-`registry.tf`, `app.tf` (logs, environment, container app), plus `variables.tf`
-and `outputs.tf`. The short version of running it is in
+`registry.tf`, `app.tf` (logs, environment, container app),
+`monitor.tf` (the action group, the alert rules and the cost budget), plus
+`variables.tf` and `outputs.tf`. The short version of running it is in
 [README.md](README.md#deploying); this file is the why. When the two disagree,
 the Terraform is what runs -- fix this file.
 
@@ -26,6 +27,7 @@ storage side needs.
                     │   ├──Entra ID──▶ Cosmos DB  cosmos-birdsense-prod │
                     │   └──Entra ID──▶ Storage    stbirdsenseprod/audio │
                     │ Container Apps env ──logs──▶ Log Analytics        │
+                    │ Alerts + budget ──▶ ag-birdsense-prod ──▶ email   │
                     └───────────────────────────────────────────────────┘
 ```
 
@@ -256,6 +258,64 @@ or issue the certificate, so a hosts-file entry can't stand in for them. When
 it lands, register the matching redirect URI with the provider *first*, then
 set `public_url` -- see [Sign-in](#sign-in).
 
+### 13. Action group — `azurerm_monitor_action_group`
+
+| Setting | Value |
+|---------|-------|
+| name | `ag-birdsense-prod` |
+| short_name | `birdsense` (at most 12 characters; it prefixes the mail subject) |
+| email_receiver | one per address in `var.alert_emails`, common alert schema |
+
+Every rule below mails this one group, and it is the only place addresses are
+listed. `alert_emails` is required and has no default: see
+[What is watched](#what-is-watched).
+
+### 14. Alert rules — `azurerm_monitor_metric_alert` ×2, `azurerm_monitor_scheduled_query_rules_alert_v2`, `azurerm_monitor_activity_log_alert` ×2
+
+| Rule | Type | Fires on |
+|------|------|----------|
+| `alert-birdsense-prod-replica-restarts` | metric, `RestartCount` max > 0 over 5 min, severity 2 | The one replica restarting: a BirdNET run cut mid-file, every upload in flight back to its last chunk. |
+| `alert-birdsense-prod-5xx` | metric, `Requests` total > 5 over 15 min, dimension `statusCodeCategory` = `5xx`, severity 1 | The app returning server errors. Not zero: one 500 is a log line, several in a quarter of an hour is a pattern. |
+| `alert-birdsense-prod-birdnet-unavailable` | scheduled query over Log Analytics, every 15 min, severity 2 | The console log carrying `BirdNET isn't available`, which means received cards are piling up in `processing`. |
+| `alert-birdsense-prod-service-health` | activity log, `ServiceHealth`, subscription scope | An Azure incident or planned maintenance in `westus2`. All services, not a named list: a service name that doesn't match Azure's exactly matches nothing, silently. |
+| `alert-birdsense-prod-resource-health` | activity log, `ResourceHealth`, resource group scope | Azure reporting any resource in the group as degraded or unavailable. |
+
+The two metric rules need no diagnostic setting and no ingestion: Container
+Apps emits platform metrics whether or not anything reads them. The activity
+log rules are free.
+
+**Gotcha:** `RestartCount` is a replica's own count, reported for as long as
+that replica lives, so that alert stays fired rather than clearing once the
+window is quiet. With exactly one replica that is the honest reading -- the
+replica that restarted is still the one serving -- but it has to be
+acknowledged rather than waited out. A deploy replaces the replica and clears
+it.
+
+**Gotcha:** the query rule matches a *field*, `parse_json(Log_s).msg`, which is
+why `cmd/server` logs JSON rather than `slog`'s text format. tusd writes its own
+warnings to stdout as text (CLAUDE.md, *Card audio goes over tus*); those lines
+don't parse and fall out of the query on their own. It follows that the rule
+only matches once an image that logs JSON is the one running: `scripts/deploy.ps1`
+builds and applies together so an ordinary deploy does both at once, but a
+settings-only apply against an older `image_tag` creates a rule that finds
+nothing until the next deploy.
+
+### 15. Cost budget — `azurerm_consumption_budget_resource_group`
+
+| Setting | Value |
+|---------|-------|
+| name | `budget-birdsense-prod` |
+| amount | `var.budget_monthly_usd`, default `150` |
+| time_grain | `Monthly`, starting the first of the month it was created |
+| notification | 80% of actual, and a forecast over 100%, both to the action group |
+
+A notification, not a cap: Azure budgets stop nothing. It is here because the
+bill is the one thing that changes without anybody touching anything -- clips
+are kept for good and add roughly a terabyte a year at five recorders
+(*Cost*). `time_period` is derived from the current month so a first apply
+needs no date in a tfvars file, and is then under `ignore_changes` so that
+derivation doesn't re-plan every month.
+
 ## Sign-in
 
 Volunteers sign in with OpenID Connect, and the roster is the allow-list: the
@@ -410,6 +470,46 @@ what a rollback does *not* undo.
 Terraform's own state lives in a storage account created by hand, outside this
 configuration (see [README.md](README.md#one-time-setup)). Terraform owning the
 state it depends on is a knot nobody wants to untie at 11pm.
+
+## What is watched
+
+Log Analytics has always collected the app's logs. Resources 13-15 are what
+reads them, and the answer to "would anybody find out?" for each of the ways
+this deployment goes wrong quietly. Everything mails `var.alert_emails`; there
+is no paging and no ticketing, because this is a volunteer-run program and the
+useful question is whether anyone finds out, not how fast.
+
+`alert_emails` is required and has no default. An unwatched stack is exactly
+what these resources exist to fix, so a fresh apply -- a staging copy, or a
+rebuild from scratch -- should not be able to come up unwatched by saying
+nothing. Give it a chapter distribution list rather than one person's address.
+
+| Goes wrong | Found out by |
+|------------|--------------|
+| The replica restarts, cutting a BirdNET run and every upload in flight | `alert-...-replica-restarts` |
+| The app serves 500s | `alert-...-5xx` |
+| BirdNET can't be imported, so received cards pile up in `processing` | `alert-...-birdnet-unavailable`, and *When cards sit in processing* below |
+| Cosmos, storage or the app is degraded as far as the platform can see | `alert-...-resource-health` |
+| Azure is having an incident in the region | `alert-...-service-health` |
+| The bill climbs, which it does on its own because clips never expire | `budget-birdsense-prod` |
+
+And what still isn't watched, which matters as much:
+
+- **Whether the site is reachable at all.** With one replica and little
+  traffic, a dead app serves no requests, so the 5xx rule stays quiet; only
+  resource health would notice, and only if the platform notices. What
+  actually covers this is an external ping -- an Application Insights standard
+  web test against `/api/v1/ready`, which 503s when Cosmos or the blob
+  container is unreachable -- and that costs a resource this stack otherwise
+  doesn't need.
+- **The Entra ID client secret expiring**, which stops every sign-in for
+  everyone. Azure Monitor has nothing to alert on here: an app registration's
+  credential is not a resource and emits no metrics. Its expiry date is a date
+  somebody has to have written down, or the credential has to stop being one
+  that expires. See TODO.md 5.12.
+- **Cosmos 429s.** The SDK retries them, and serverless throttling during a
+  bulk upsert is expected rather than broken, so a rule would be tuned against
+  noise before anyone knows what normal looks like here.
 
 ## When cards sit in processing
 
@@ -619,6 +719,7 @@ before relying on any of this.
 | Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |
 | Container Registry Basic | one small image | A few dollars a month. |
 | Log Analytics | low volume | Within the free ingestion allowance at this scale. |
+| Azure Monitor alerts | 2 metric rules, 1 log query rule, 2 activity log rules | Pennies. Activity log rules and emailed notifications are free; metric rules are billed per monitored time series and the query rule per evaluation, at a 15-minute cadence. |
 
 *Alternative for Cosmos.* One Cosmos account per subscription can use the free
 tier (1000 RU/s and 25 GB free) with provisioned, database-level shared
@@ -669,16 +770,20 @@ from this file to that one.
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` | `app.tf` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
 | 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, three probes with every value set, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
+| 13 | Action group, mailing `alert_emails` | `azurerm_monitor_action_group` | `monitor.tf` |
+| 14 | Five alert rules: replica restarts, 5xx, BirdNET unavailable, service health, resource health | `azurerm_monitor_metric_alert` ×2, `azurerm_monitor_scheduled_query_rules_alert_v2`, `azurerm_monitor_activity_log_alert` ×2 | `monitor.tf` |
+| 15 | Monthly cost budget on the resource group | `azurerm_consumption_budget_resource_group` | `monitor.tf` |
 
-**Variables** (`variables.tf`): five are required and have no default --
-`image_tag`, `bootstrap_admin`, `session_key`, `oidc_microsoft_client_id` and
-`oidc_microsoft_client_secret`. Everything else has the default this file
-describes: `subscription_id` (null, so `ARM_SUBSCRIPTION_ID` from the
+**Variables** (`variables.tf`): six are required and have no default --
+`image_tag`, `bootstrap_admin`, `session_key`, `oidc_microsoft_client_id`,
+`oidc_microsoft_client_secret` and `alert_emails` (see
+[What is watched](#what-is-watched) for why that last one has no default).
+Everything else has the default this file describes: `subscription_id` (null, so `ARM_SUBSCRIPTION_ID` from the
 environment), `public_url` (empty, so the container app's own hostname),
 `oidc_microsoft_tenant` (`common`), `env`, `location`, `name_suffix`, `cpu`,
-`memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`
-and `grant_operator_blob_access`. A `staging` copy is a second tfvars file with
-`env = "staging"`.
+`memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
+`budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
+second tfvars file with `env = "staging"`.
 
 **Outputs** (`outputs.tf`): `app_url` and `app_fqdn`, `acr_name` (which
 `scripts/deploy.ps1` reads) and `acr_login_server`, `cosmos_endpoint`,

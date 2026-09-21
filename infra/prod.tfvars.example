@@ -10,6 +10,19 @@ bootstrap_admin = "Your Name <you@eastsideaudubon.org>"
 # from the environment instead.
 # subscription_id = "00000000-0000-0000-0000-000000000000"
 
+# Who hears from the alert rules (DEPLOYMENT.md, "What is watched"): a replica
+# restarting, 5xx from the app, BirdNET not being runnable, an Azure incident
+# in the region, and the monthly bill. Required -- a stack nobody is watching
+# is what these exist to fix. A list of one is fine; a chapter distribution
+# list is better than one person's address.
+alert_emails = ["birdsense@eastsideaudubon.org"]
+
+# Monthly cost alert for the resource group, in the billing account's
+# currency. It stops nothing: it mails alert_emails at 80% of actual spend and
+# at a forecast of going over. It is here because clips are kept for good, so
+# the bill climbs on its own (DEPLOYMENT.md, Cost).
+# budget_monthly_usd = 150
+
 # Defaults, listed so they are easy to find. Uncomment to change.
 # env         = "prod"
 # location    = "westus2"
