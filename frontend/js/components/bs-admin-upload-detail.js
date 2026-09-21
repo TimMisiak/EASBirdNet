@@ -1,5 +1,5 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
-import { controls, panels, tables, typography } from "../shared-styles.js";
+import { controls, filters, panels, tables, typography } from "../shared-styles.js";
 import { byteSize, clock, count, dateAtTime, longDate, percent, shortDate } from "../format.js";
 import { analyzedSoFar, audioNote, fileChip, isMoving, reviewChip, statusChip } from "../upload-status.js";
 import * as api from "../api.js";
@@ -34,7 +34,7 @@ const FILTERS = [
 ];
 
 class AdminUploadDetail extends BaseElement {
-  static styles = [typography, controls, panels, tables];
+  static styles = [typography, controls, panels, tables, filters];
   static observedAttributes = ["reference"];
 
   #state = { status: "loading", upload: null, files: [], queue: null, error: null };
@@ -153,20 +153,11 @@ class AdminUploadDetail extends BaseElement {
         .stat { border-top: 2px solid var(--bs-text); padding-top: var(--bs-space-2); margin: 0; }
         .stat dt { font-family: var(--bs-font-mono); font-size: 0.65625rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--bs-text-muted); }
         .stat dd { margin: var(--bs-space-1) 0 0; font-family: var(--bs-font-display); font-size: 1.625rem; }
-        .stat dd small { font-family: var(--bs-font-body, inherit); font-size: 0.8125rem; color: var(--bs-text-muted); }
+        .stat dd small { font-family: var(--bs-font); font-size: 0.8125rem; color: var(--bs-text-muted); }
         .settings { font-size: 0.8125rem; color: var(--bs-text-muted); margin: var(--bs-space-3) 0 var(--bs-space-2); }
         .retention { font-size: 0.8125rem; color: var(--bs-text-muted); margin: 0 0 var(--bs-space-6); }
 
-        .filters { display: flex; align-items: center; gap: var(--bs-space-2); margin-bottom: var(--bs-space-4); flex-wrap: wrap; }
-        .filter {
-          font-size: 0.8125rem;
-          padding: 0.375rem 0.875rem;
-          border-radius: var(--bs-radius-pill);
-          border: 1px solid var(--bs-border-strong);
-          background: transparent;
-          color: var(--bs-text-body);
-        }
-        .filter[aria-pressed="true"] { background: var(--bs-text); border-color: var(--bs-text); color: var(--bs-on-forest); }
+        .filters { gap: var(--bs-space-2); }
 
         th { padding-top: 0; }
         td { padding-top: 0.75rem; padding-bottom: 0.75rem; font-size: 0.875rem; vertical-align: middle; }

@@ -198,17 +198,8 @@ class AdminPeople extends BaseElement {
         .panel p { margin-bottom: 1.125rem; }
         .error { margin-bottom: var(--bs-space-4); }
 
-        .visually-hidden {
-          position: absolute;
-          width: 1px;
-          height: 1px;
-          overflow: hidden;
-          clip-path: inset(50%);
-          white-space: nowrap;
-        }
         td.actions { text-align: right; white-space: nowrap; }
         td.actions .btn + .btn { margin-left: var(--bs-space-2); }
-        .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
 
         tr.editing td { padding-top: 0.625rem; padding-bottom: 0.625rem; }
         .field--row { min-height: 2.25rem; font-size: 0.875rem; }

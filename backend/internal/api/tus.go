@@ -231,14 +231,10 @@ func received(f db.AudioFile) bool {
 
 // storagePrefix is a card reference as an upload id can spell it. References
 // are built from a recorder id a coordinator typed, and an upload id has to be
-// URL-safe, so anything else becomes "_". It only groups a card's files; the
-// card itself is found through the upload's metadata.
+// URL-safe, so anything else becomes "_" -- storage.Segment, the same mapping
+// a clip's name goes through, so a card's audio and its clips are always found
+// under the same element. It only groups a card's files; the card itself is
+// found through the upload's metadata.
 func storagePrefix(ref string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			return r
-		}
-		return '_'
-	}, ref)
+	return storage.Segment(ref)
 }

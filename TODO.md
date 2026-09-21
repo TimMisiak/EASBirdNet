@@ -321,27 +321,6 @@ None of this is needed for the first release. It is here because it makes the
 code smaller or easier to keep correct, and because writing it down stops it
 being rediscovered.
 
-## Duplication worth collapsing
-
-- **`storage.segment` vs `api.storagePrefix`** (`storage.go:94-106`,
-  `tus.go:196-204`). Identical character maps, except `segment` has an all-dots
-  guard the copy dropped. `ClipName` uses one; `DeleteAll`, `under` and tus ids
-  use the other. They agree on every real reference today, but if they diverge,
-  deleting a card silently leaves either its audio or its clips behind —
-  `DeleteAll` returns no error for a prefix matching nothing. Export
-  `storage.Segment` and call it from both.
-- **`bs-my-uploads` and `bs-admin-uploads` are ~90% the same component** — same
-  filter row, same nine-column table, same chip/notes/counts cells, same
-  sub-row error pattern, same `COLUMNS = 9`. They differ by one column and the
-  trailing action: 476 lines that could be one table plus two column tables.
-- **The status-filter pill is copy-pasted character for character into four
-  components** (`bs-detections.js:162`, `bs-admin-uploads.js:118`,
-  `bs-my-uploads.js:97`, `bs-admin-upload-detail.js:151`), plus a `.tally` rule
-  in three. This is what `shared-styles.js` exists for.
-- **`.visually-hidden` is defined twice**, identically
-  (`bs-admin-people.js:201-208`, `bs-admin-uploads.js:143-150`).
-- **`randomKey` and `randomToken` are byte-identical** (`cookies.go:33-45`).
-
 ## Shape and size
 
 - **`api.go` is 1292 lines and `createUpload` is 117 of them**
@@ -443,9 +422,6 @@ being rediscovered.
   shadow boundary, so every button and link falls back to the UA ring. The
   comment above it claims the opposite. Move it into an adopted sheet, as
   `.field:focus-visible` already is.
-- **`var(--bs-font-body, inherit)` names a token that doesn't exist**
-  (`bs-admin-upload-detail.js:146`); the token is `--bs-font`. The fallback
-  hides it, so the text silently inherits Newsreader.
 - **Dead code**: `#route` assigned and never read (`bs-app.js:46,75`);
   `const user = await session.signIn(body)` unused (`bs-signin-page.js:81`);
   `--bs-amber-track`, `--bs-bg-deep`, `--bs-surface-band` defined and never

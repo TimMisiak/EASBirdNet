@@ -44,16 +44,8 @@ func newKeyset(secret string) *keyset {
 	return &keyset{key: sum[:]}
 }
 
-// randomKey is a key for a server that has none: dev, where signing everyone
-// out on restart costs nothing.
-func randomKey() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-// randomToken is an unguessable value for the OAuth state, the OIDC nonce and
-// anything else that has to be unpredictable.
+// randomToken is an unguessable value: the OAuth state, the OIDC nonce, dev's
+// session key, and anything else that has to be unpredictable.
 func randomToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
@@ -115,4 +107,4 @@ func (k *keyset) mac(body string) string {
 // RandomSessionKey is a session key for a server that was given none: dev,
 // where signing everyone out on restart costs nothing. A deployment sets
 // BIRDSENSE_SESSION_KEY instead, so a new revision doesn't sign everyone out.
-func RandomSessionKey() string { return randomKey() }
+func RandomSessionKey() string { return randomToken() }

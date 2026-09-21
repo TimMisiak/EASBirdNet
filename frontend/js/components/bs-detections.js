@@ -1,5 +1,5 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
-import { controls, forms, tables, typography } from "../shared-styles.js";
+import { controls, filters, forms, tables, typography } from "../shared-styles.js";
 import { count, dateAtTime } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import { path, query, replaceQuery } from "../router.js";
@@ -45,7 +45,7 @@ import "./bs-chip.js";
  */
 
 class Detections extends BaseElement {
-  static styles = [typography, controls, forms, tables];
+  static styles = [typography, controls, forms, tables, filters];
 
   /** The range the list opens on, fixed when it opens so a long session doesn't drift over midnight. */
   #dates = defaultDates();
@@ -123,19 +123,6 @@ class Detections extends BaseElement {
     const v = this.#view;
     this.shadowRoot.innerHTML = `
       <style>
-        [hidden] { display: none !important; }
-        .filters { display: flex; align-items: center; gap: var(--bs-space-3); margin-bottom: var(--bs-space-4); flex-wrap: wrap; }
-        .filter {
-          font-size: 0.8125rem;
-          padding: 0.375rem 0.875rem;
-          border-radius: var(--bs-radius-pill);
-          border: 1px solid var(--bs-border-strong);
-          background: transparent;
-          color: var(--bs-text-body);
-        }
-        .filter[aria-pressed="true"] { background: var(--bs-text); border-color: var(--bs-text); color: var(--bs-on-forest); }
-        .tally { margin-left: auto; font-size: 0.8125rem; color: var(--bs-text-muted); }
-
         .fields {
           display: grid;
           grid-template-columns: minmax(14rem, 2fr) repeat(3, minmax(9.5rem, 1fr)) auto;

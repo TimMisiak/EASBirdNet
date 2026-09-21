@@ -96,12 +96,14 @@ const clipPrefix = "clips"
 // detections still carry, so nothing may assume this extension of a stored
 // clip -- only of one being written now.
 func ClipName(uploadID, detectionID string) string {
-	return clipPrefix + "/" + segment(uploadID) + "/" + segment(detectionID) + ".flac"
+	return clipPrefix + "/" + Segment(uploadID) + "/" + Segment(detectionID) + ".flac"
 }
 
-// segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a
-// level to a name or climb out of one.
-func segment(id string) string {
+// Segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a
+// level to a name or climb out of one. It is what every element of a stored
+// name goes through: the card prefix and the random token an upload id is
+// built from (internal/api), and the two ids in a clip's name.
+func Segment(id string) string {
 	id = strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':

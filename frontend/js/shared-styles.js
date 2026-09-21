@@ -19,12 +19,27 @@ const sheet = (css) => {
 };
 
 /**
- * The one sheet every component gets, adopted by BaseElement itself.
+ * The one sheet every component gets, adopted by BaseElement itself: what has
+ * to hold inside every shadow root, because a document stylesheet doesn't
+ * reach in.
+ *
  * `* { box-sizing: border-box }` in app.css stops at the shadow boundary, and a
- * component whose fields are content-box overflows its own column.
+ * component whose fields are content-box overflows its own column. The UA's
+ * `[hidden]` rule loses to any `display` a component sets, so `el.hidden` needs
+ * the `!important` form to mean anything. `.visually-hidden` is text for a
+ * screen reader and nobody else -- the label on an actions column, say.
  */
 export const reset = sheet(`
   *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 `);
 
 /** Typography and links. Adopted by essentially everything. */
@@ -85,6 +100,8 @@ export const controls = sheet(`
   .btn--quiet { background: transparent; border-color: var(--bs-border-strong); }
   .btn--quiet:hover:not([disabled]) { border-color: var(--bs-forest); }
   .btn--small { padding: 0.6875rem 1.125rem; font-size: 0.875rem; }
+  /* Small enough to sit in a table row without setting its height. */
+  .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
   .btn--block { width: 100%; }
 
   /* Destructive actions. Quiet until asked, solid inside the confirmation. */
@@ -175,6 +192,32 @@ export const tables = sheet(`
   .num { text-align: right; font-family: var(--bs-font-mono); font-size: 0.875rem; }
   /* Tables scroll inside their own box rather than the page. */
   .table-scroll { overflow-x: auto; }
+`);
+
+/**
+ * The row of pills above a list that narrows it, and the count of what is in
+ * it. The pills are `aria-pressed` buttons, not links: they filter what is on
+ * screen rather than changing the route.
+ */
+export const filters = sheet(`
+  .filters {
+    display: flex;
+    align-items: center;
+    gap: var(--bs-space-3);
+    margin-bottom: var(--bs-space-4);
+    flex-wrap: wrap;
+  }
+  .filter {
+    font-size: 0.8125rem;
+    padding: 0.375rem 0.875rem;
+    border-radius: var(--bs-radius-pill);
+    border: 1px solid var(--bs-border-strong);
+    background: transparent;
+    color: var(--bs-text-body);
+  }
+  .filter[aria-pressed="true"] { background: var(--bs-text); border-color: var(--bs-text); color: var(--bs-on-forest); }
+  /* What the list holds, pushed to the end of the row. */
+  .tally { margin-left: auto; font-size: 0.8125rem; color: var(--bs-text-muted); }
 `);
 
 /** Bordered boxes: the white panel, the parchment aside, the amber notice. */

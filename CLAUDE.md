@@ -42,6 +42,7 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
+│                            and uploads-table.js (the two card lists' base class)
 ├── infra/              Terraform (azurerm) for the Azure resources
 ├── scripts/deploy.ps1  Build the image in ACR, apply the new tag (pwsh:
 │                    deploying runs from Windows and Linux; dev is Linux)
@@ -349,8 +350,10 @@ shared screen has to differ by more than what it lists.
 
 **Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
 `CSSStyleSheet` objects for the primitives that appear on nearly every screen
-(buttons, tables, form fields, panels); a component adopts what it needs via
-`static styles`. Gotcha: `adoptedStyleSheets` are ordered *after* a shadow
+(buttons, tables, form fields, panels, the row of filter pills above a list); a
+component adopts what it needs via `static styles`, and `reset` -- box-sizing,
+`[hidden]`, `.visually-hidden` -- is adopted by `BaseElement` itself, because a
+document stylesheet doesn't reach into a shadow root. Gotcha: `adoptedStyleSheets` are ordered *after* a shadow
 root's own `<style>`, so an unlayered shared rule silently beats the component
 that adopted it. Every shared sheet is therefore wrapped in
 `@layer bs-base { ... }`, because unlayered rules outrank every layer -- what a
@@ -538,7 +541,11 @@ never reaches into a component.
 - Components extend `BaseElement` (`js/components/base-element.js`): open shadow
   root, `render()` builds the whole subtree, observed attribute changes
   re-render. Extend `HTMLElement` directly if a component needs finer-grained
-  updates — the base class is a convenience, not a framework.
+  updates — the base class is a convenience, not a framework. Two components
+  that are the same screen twice extend a base class of their own instead of
+  copying it: `uploads-table.js` is `<bs-my-uploads>` and `<bs-admin-uploads>`,
+  which differ only in their columns, their last one's action and their
+  wording.
 - Rich data is passed as a **property** (`card.detection = {...}`); attributes
   are for simple strings/flags.
 - Anything interpolated into an `innerHTML` template — API data, attribute

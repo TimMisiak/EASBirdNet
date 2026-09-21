@@ -59,7 +59,6 @@ class Spectrogram extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; --plot-height: 15rem; --band: 0.5rem; --band-gap: 2px; }
-        [hidden] { display: none !important; }
         .bar { display: flex; align-items: center; gap: var(--bs-space-3); margin-bottom: var(--bs-space-3); flex-wrap: wrap; }
         .play { min-width: 6.5rem; }
         .time { font-family: var(--bs-font-mono); font-size: 0.8125rem; color: var(--bs-text-soft); }
