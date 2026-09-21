@@ -135,7 +135,8 @@ code*). Public data is separated from everything else at the route level, so the
 landing page never needs a session:
 
 ```
-GET    /api/v1/health
+GET    /api/v1/health                     liveness: always ok, and where analysis stands
+GET    /api/v1/ready                      readiness: 503 when this replica can't reach the database or storage
 GET    /api/v1/public/overview?days=      program stats + confirmed species
 GET    DELETE /api/v1/session             who you are; sign out
 GET    /api/v1/auth/{provider}/start      leave for Google or Microsoft
@@ -455,6 +456,22 @@ puts it above the cards it explains. The volunteer's own list doesn't carry it:
 the detail names server-side paths, and nothing on it is theirs to act on.
 *Revisit when:* something other than this process analyzes cards -- then the
 state is no longer one server's to report, and belongs in a document.
+
+**Liveness and readiness are different questions.** `/api/v1/health` answers
+200 whatever is happening; `/api/v1/ready` pings the database and the file
+store (`Store.Ping` on both, the cheapest call that would still fail if the
+credential or the network had gone) and 503s when either is unreachable.
+Container Apps restarts a replica that fails liveness and takes one that fails
+readiness out of ingress, and only the second is ever right here: there is one
+replica, it is the one analyzing a card, and restarting it neither fixes Cosmos
+nor brings the run back. Readiness says nothing about the analysis queue for
+the same reason -- that is `health`'s to report (above), and a queue that can't
+start leaves the site perfectly able to serve. The probe numbers in
+`infra/app.tf` are set explicitly for the same reason the split exists: the
+provider's defaults assume a container that isn't CPU-saturated by BirdNET for
+hours.
+*Revisit when:* analysis moves to its own job -- then no health response is
+ever queued behind a BirdNET run, and tighter probes are reasonable again.
 
 **Originals expire; clips don't.** A card is ~128 GB of audio against a few
 megabytes of clips, and nothing reads an original once BirdNET has:

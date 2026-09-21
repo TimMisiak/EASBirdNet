@@ -186,30 +186,6 @@ number before anyone budgets from it.
 Terraform has never been applied against a real subscription, so all of this is
 untested in the direction that matters.
 
-### 5.1 Probe timeouts default to 1 second on a container that is CPU-saturated for hours
-`infra/app.tf:174-189` — **[verified]**
-
-Only `transport`, `port`, `path` (and liveness `initial_delay`) are set. The
-azurerm 4.81 defaults are `timeout = 1`, `interval_seconds = 10`,
-`failure_count_threshold = 3`. The same container runs BirdNET CPU-bound for
-hours on `cpu = 1.0`, which `app.tf:86-88` says explicitly.
-
-**If not fixed:** a health response that misses a 1-second deadline three times
-in 30 s restarts the *only* replica, mid-card, plausibly in a loop — and the
-readiness probe with the same defaults 503s the site during analysis. This is
-the most likely way the first real card fails.
-
-### 5.2 `/api/v1/health` can't fail
-`backend/internal/api/api.go:163-165`, `infra/app.tf:174-189` — **[verified]**
-
-It answers 200 unconditionally — the `queue` field it carries reports the
-analysis queue but never changes the status — and is wired as the liveness,
-readiness *and* startup probe.
-
-**If not fixed:** a replica that has lost Cosmos or Blob access stays "healthy"
-and serves 500s forever. Liveness should stay unconditional — a dependency blip
-shouldn't restart the container — but readiness wants a cheap store ping.
-
 ### 5.3 No monitoring, no alerts, no diagnostic settings
 `infra/*.tf`
 

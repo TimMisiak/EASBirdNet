@@ -100,6 +100,16 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 	return s, nil
 }
 
+// Ping reads one container's metadata, which is the cheapest call that still
+// proves this replica holds a token and can reach the account. OpenCosmos
+// makes the same call against all five at startup.
+func (s *cosmosStore) Ping(ctx context.Context) error {
+	if _, err := s.uploads.Read(ctx, nil); err != nil {
+		return fmt.Errorf("db: cosmos: %w", err)
+	}
+	return nil
+}
+
 // Close is a no-op: the SDK client holds no resources that need releasing.
 func (s *cosmosStore) Close() error { return nil }
 

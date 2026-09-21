@@ -215,7 +215,15 @@ environment forwards here.
 | cpu / memory | `1` / `2Gi` | The server runs BirdNET over received cards (`internal/analysis`): one Python process at a time, peaking near 300 MB, which is CPU-bound for hours per card. On this much CPU expect very roughly 2 minutes per hour of audio, so a ~336-file card takes most of a day; more CPU is faster. Moving analysis to a job would let the web app go back to `0.25` / `0.5Gi`; see *Open questions*. |
 | min_replicas / max_replicas | `1` / `1` | **Analysis needs a replica that stays up**: it runs in the background with no HTTP traffic, and a scale-to-zero replica is stopped mid-card. Nothing is lost when that happens (the queue is in Cosmos and resumes at the next start), but it stops until someone visits. `0` is fine again once analysis is a job. **Uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)), and two replicas would also analyze the same file twice. |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
-| liveness / readiness / startup probes | HTTP GET `/api/v1/health` on port `8080` | The same endpoint the Dockerfile `HEALTHCHECK` uses. |
+| startup probe | HTTP GET `/api/v1/health` on `8080`; `initial_delay` 5, `timeout` 5, every 10 s, 10 failures | ~100 s to come up, which is room for a cold start and not for a broken configuration -- that one exits at startup instead, and restarts the container. |
+| liveness probe | HTTP GET `/api/v1/health` on `8080`; `initial_delay` 10, `timeout` 5, every 30 s, 10 failures | `/api/v1/health` answers 200 whatever the dependencies are doing, so only a process that has stopped answering at all restarts this container -- and only after five unbroken minutes of it. Restarting never fixes Cosmos, and this replica is the one analyzing a card. The same endpoint the Dockerfile `HEALTHCHECK` uses. |
+| readiness probe | HTTP GET `/api/v1/ready` on `8080`; `timeout` 5, every 30 s, 3 failures, 1 success | The one probe that can fail. `/api/v1/ready` pings Cosmos and the blob container, so a replica that has lost either leaves ingress after ~90 s instead of serving 500s, and is back the first time a ping succeeds. |
+
+Every probe value is set on purpose. The provider's defaults -- `timeout` 1,
+every 10 s, 3 failures -- describe a container that isn't also running BirdNET
+CPU-bound for hours on one vCPU, where a health response waiting behind it is
+normal rather than a sick replica.
+
 
 **Environment variables:**
 
@@ -405,6 +413,10 @@ without a session:
 | `unavailable` | BirdNET can't run in this container at all. |
 | `failing` | BirdNET runs, but a pass stopped on something else -- Cosmos, blob storage -- and is being retried. |
 | `off` | This build runs no queue. Not a thing the deployed image does. |
+
+`/api/v1/ready` is a different question and answers about this replica's
+dependencies, not about analysis: a queue that can't start leaves the site
+working, so it never takes a replica out of ingress. See *Container app*.
 
 Signed in as a coordinator, *All uploads* and any card's page say the same
 thing in words, with the error the server got and since when. That is the
@@ -624,7 +636,7 @@ from this file to that one.
 | 9 | Container registry (Basic, admin off) + AcrPull → identity | `azurerm_container_registry`, `azurerm_role_assignment` | `registry.tf` |
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` | `app.tf` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
-| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, probes, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
+| 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, three probes with every value set, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
 
 **Variables** (`variables.tf`): `image_tag` and `bootstrap_admin` are required
 and have no default; `env`, `location`, `name_suffix`, `cpu`, `memory`,

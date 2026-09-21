@@ -88,6 +88,17 @@ func (d *fileData) fill() {
 	}
 }
 
+// Ping stats the data file. The whole dataset is in memory, so a read here
+// cannot fail; what this catches is the file having been moved or unmounted
+// out from under a running dev server, which otherwise only shows up on the
+// next write.
+func (s *jsonFile) Ping(_ context.Context) error {
+	if _, err := os.Stat(s.path); err != nil {
+		return fmt.Errorf("db: %w", err)
+	}
+	return nil
+}
+
 func (s *jsonFile) Close() error { return nil }
 
 // --- users ---

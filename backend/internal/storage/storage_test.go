@@ -25,6 +25,13 @@ func testStore(t *testing.T, s Store) {
 		t.Error("the store brings no locker")
 	}
 
+	// The readiness probe asks this on a timer, and a backend that answers it
+	// wrongly either takes the replica out of ingress or hides that it has
+	// lost the account (internal/api, ready).
+	if err := s.Ping(ctx); err != nil {
+		t.Errorf("ping a working store: %v", err)
+	}
+
 	id := "OWL-20260907-SR02/" + t.Name()
 	data := []byte("RIFF....WAVEfmt this is not really audio")
 	up, err := composer.Core.NewUpload(ctx, tushandler.FileInfo{ID: id, Size: int64(len(data))})

@@ -170,22 +170,57 @@ resource "azurerm_container_app" "this" {
       # BirdNET paths are already set in the image. BIRDSENSE_COSMOS_KEY is for
       # the emulator and must never be set here.
 
-      # The same endpoint the Dockerfile HEALTHCHECK uses.
+      # Probes. Every field is set on purpose: the provider's defaults are a
+      # 1-second timeout and three failures 10 seconds apart, which is the
+      # right shape for a web app and the wrong one for this container. The
+      # same process runs BirdNET CPU-bound for hours on one vCPU (cpu above),
+      # so a health response that waits behind it is normal rather than a sick
+      # replica -- and there is exactly one replica, so a restart kills the
+      # BirdNET run in flight and takes the site down with it.
+
+      # Startup: /api/v1/health answers as soon as the server is listening,
+      # which is after Cosmos and the blob container have answered or the
+      # process has exited. ~100 s is room for a cold start, not for a broken
+      # configuration -- that fails by exiting, and restarts the container.
       startup_probe {
-        transport = "HTTP"
-        port      = 8080
-        path      = "/api/v1/health"
+        transport               = "HTTP"
+        port                    = 8080
+        path                    = "/api/v1/health"
+        initial_delay           = 5
+        timeout                 = 5
+        interval_seconds        = 10
+        failure_count_threshold = 10
       }
+
+      # Readiness: /api/v1/ready is the one route that can fail. It pings
+      # Cosmos and the blob container (internal/api, ready), so a replica that
+      # has lost either leaves ingress after ~90 s instead of serving 500s,
+      # and is back the first time a ping succeeds. It says nothing about the
+      # analysis queue: a stuck queue is health's to report, and taking the
+      # site down over it would help nobody.
       readiness_probe {
-        transport = "HTTP"
-        port      = 8080
-        path      = "/api/v1/health"
+        transport               = "HTTP"
+        port                    = 8080
+        path                    = "/api/v1/ready"
+        timeout                 = 5
+        interval_seconds        = 30
+        failure_count_threshold = 3
+        success_count_threshold = 1
       }
+
+      # Liveness: /api/v1/health, which answers 200 whatever the dependencies
+      # are doing -- restarting a replica does not fix Cosmos, and this is the
+      # replica analyzing a card. Only a process that has stopped answering at
+      # all should restart the container, and five unbroken minutes of that is
+      # the bar. This is the endpoint the Dockerfile HEALTHCHECK uses too.
       liveness_probe {
-        transport     = "HTTP"
-        port          = 8080
-        path          = "/api/v1/health"
-        initial_delay = 10
+        transport               = "HTTP"
+        port                    = 8080
+        path                    = "/api/v1/health"
+        initial_delay           = 10
+        timeout                 = 5
+        interval_seconds        = 30
+        failure_count_threshold = 10
       }
     }
   }

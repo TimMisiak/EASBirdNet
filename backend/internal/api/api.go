@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
@@ -74,6 +75,7 @@ func register(mux *http.ServeMux, h *handlers) {
 	h.overview = newOverviewCache()
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
+	mux.HandleFunc("GET /api/v1/ready", h.ready)
 
 	// Public: no session required, and no volunteer or card data in the
 	// response -- this is what the unauthenticated landing page reads.
@@ -160,13 +162,67 @@ type handlers struct {
 	overview *overviewCache
 }
 
-// health is unconditionally ok: it is the liveness probe, and a dependency
-// being down is not a reason to restart the container. queue is the one thing
-// it reports, as a bare state with no detail -- this route needs no session,
-// and a card sitting in processing forever is the failure nobody would
-// otherwise see from outside.
+// health is unconditionally ok: it is the liveness and startup probe, and a
+// dependency being down is not a reason to restart the container -- that would
+// take the BirdNET run in flight with it and fix nothing. Readiness is ready
+// below, which is the one that can fail. queue is the one thing health
+// reports, as a bare state with no detail -- this route needs no session, and
+// a card sitting in processing forever is the failure nobody would otherwise
+// see from outside.
 func (h *handlers) health(w http.ResponseWriter, r *http.Request) {
 	h.json(w, http.StatusOK, map[string]string{"status": "ok", "queue": h.queueStatus().State})
+}
+
+// readyTimeout bounds the dependency checks, so a probe gets an answer rather
+// than hanging on a store that has stopped answering. It has to stay well
+// under the probe's own timeout (infra/app.tf).
+const readyTimeout = 3 * time.Second
+
+// ready is the readiness probe, and the only health route that can fail: a
+// replica that can't reach Cosmos DB or Blob Storage has nothing useful to
+// serve, so it should leave ingress rather than answer 500s until someone
+// notices. It deliberately says nothing about the analysis queue -- a stuck
+// queue is reported by health, and taking the site down over it would help
+// nobody.
+//
+// The checks run together so one that is hanging can't spend the budget and
+// make the other look broken. Each is named but never described: this route
+// has no session, so what went wrong goes to the log and the response says
+// only which dependency it was.
+func (h *handlers) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
+	defer cancel()
+
+	checks := []struct {
+		name string
+		ping func(context.Context) error
+	}{
+		{"database", h.store.Ping},
+		{"storage", h.files.Ping},
+	}
+	errs := make([]error, len(checks))
+	var wg sync.WaitGroup
+	wg.Add(len(checks))
+	for i, c := range checks {
+		go func() {
+			defer wg.Done()
+			errs[i] = c.ping(ctx)
+		}()
+	}
+	wg.Wait()
+
+	body := map[string]string{"status": "ready"}
+	code := http.StatusOK
+	for i, c := range checks {
+		body[c.name] = "ok"
+		if errs[i] != nil {
+			h.log.Error("not ready", "dependency", c.name, "err", errs[i])
+			body[c.name] = "unreachable"
+			body["status"] = "unready"
+			code = http.StatusServiceUnavailable
+		}
+	}
+	h.json(w, code, body)
 }
 
 // queueStatus is where analysis stands in this process. A nil queue is a

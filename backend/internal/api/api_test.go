@@ -279,6 +279,54 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+// unreachableStore is a database this replica has lost its connection to.
+type unreachableStore struct{ db.Store }
+
+func (unreachableStore) Ping(context.Context) error { return errors.New("cosmos: connection refused") }
+
+// unreachableFiles is blob storage this replica has lost its connection to.
+type unreachableFiles struct{ storage.Store }
+
+func (unreachableFiles) Ping(context.Context) error { return errors.New("blob: connection refused") }
+
+// Liveness and readiness are deliberately different answers to different
+// questions, and wiring both probes at one unconditional route -- which is
+// what infra/app.tf used to do -- makes a replica that has lost Cosmos or blob
+// storage look healthy while it serves 500s. Readiness leaves ingress;
+// liveness must not, because restarting the only replica loses the BirdNET run
+// in flight and fixes nothing.
+func TestReadinessFailsOnALostDependencyAndLivenessDoesNot(t *testing.T) {
+	_, store := newTestMux(t)
+	files := testFiles(t)
+
+	for _, tc := range []struct {
+		name   string
+		mux    *http.ServeMux
+		status string
+		want   int
+	}{
+		{"everything answers", muxFor(store, files, false), "ready", http.StatusOK},
+		{"the database has gone", muxFor(unreachableStore{store}, files, false), "unready", http.StatusServiceUnavailable},
+		{"blob storage has gone", muxFor(store, unreachableFiles{files}, false), "unready", http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, tc.mux, http.MethodGet, "/api/v1/ready", "", nil)
+			if rec.Code != tc.want {
+				t.Errorf("GET /ready = %d, want %d", rec.Code, tc.want)
+			}
+			if body := decodeInto[map[string]string](t, rec); body["status"] != tc.status {
+				t.Errorf("status = %q, want %q", body["status"], tc.status)
+			}
+			if strings.Contains(rec.Body.String(), "refused") {
+				t.Errorf("body = %s; the dependency's error leaked to a route with no session", rec.Body)
+			}
+			if rec := do(t, tc.mux, http.MethodGet, "/api/v1/health", "", nil); rec.Code != http.StatusOK {
+				t.Errorf("GET /health = %d, want %d: liveness must not follow readiness", rec.Code, http.StatusOK)
+			}
+		})
+	}
+}
+
 // The sign-in picker lists every address on the roster, so outside dev mode the
 // route must not exist and the session must not advertise it.
 func TestDevPeopleOnlyInDevMode(t *testing.T) {

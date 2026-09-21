@@ -78,6 +78,12 @@ type Store interface {
 	UpsertDetections(ctx context.Context, uploadID string, detections []Detection) error
 	UpdateDetection(ctx context.Context, uploadID, id string, mutate func(*Detection) error) (Detection, error)
 
+	// Ping says whether this backend is reachable from here. It answers the
+	// readiness probe, so it runs on a timer for as long as the server does:
+	// it has to be the cheapest call that would still fail if credentials or
+	// the network had gone.
+	Ping(ctx context.Context) error
+
 	Close() error
 }
 

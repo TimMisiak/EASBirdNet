@@ -54,6 +54,11 @@ type Store interface {
 	// records of them, and the card's clips. A prefix with nothing stored under
 	// it is not an error.
 	DeleteAll(ctx context.Context, prefix string) error
+	// Ping says whether this backend is reachable from here. It answers the
+	// readiness probe, so it runs on a timer for as long as the server does:
+	// it has to be the cheapest call that would still fail if credentials or
+	// the network had gone.
+	Ping(ctx context.Context) error
 }
 
 // prefix is where every upload goes, so the card's audio and nothing else is
@@ -178,6 +183,15 @@ func (s *local) Open(_ context.Context, name string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 	return f, err
+}
+
+// Ping stats the directory uploads go under, which is the one thing OpenLocal
+// made and a removed or unmounted volume would take away.
+func (s *local) Ping(_ context.Context) error {
+	if _, err := os.Stat(filepath.Join(s.dir, prefix)); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
 }
 
 func (s *local) DeleteAll(_ context.Context, prefix string) error {
@@ -351,6 +365,15 @@ func remaining(body io.ReadSeeker) (int64, error) {
 func (s *azure) UseIn(composer *tushandler.StoreComposer) {
 	s.tus.UseIn(composer)
 	s.locker.UseIn(composer)
+}
+
+// Ping reads the container's properties: one cheap call that proves the
+// credential is still good and the container is still there.
+func (s *azure) Ping(ctx context.Context) error {
+	if _, err := s.container.GetProperties(ctx, nil); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
 }
 
 func (s *azure) Open(ctx context.Context, name string) (io.ReadCloser, error) {
