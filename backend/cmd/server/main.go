@@ -129,8 +129,12 @@ func main() {
 	// No ReadTimeout or WriteTimeout: a PATCH carrying audio takes as long as
 	// the volunteer's upstream link needs. tusd sets deadlines per read instead.
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           requestLogger(log, newMux(cfg, store, files, queue, auth, log)),
+		Addr: cfg.Addr,
+		Handler: requestLogger(log, web.SecurityHeaders(
+			newMux(cfg, store, files, queue, auth, log),
+			// Dev is http://localhost, where HSTS is ignored anyway.
+			web.SecurityOptions{StaticDir: cfg.StaticDir, HTTPS: !cfg.Dev, Log: log},
+		)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

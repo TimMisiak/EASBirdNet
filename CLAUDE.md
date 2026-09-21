@@ -21,7 +21,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
-│       └── web/        serves frontend/ (cache headers, SPA fallback)
+│       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
 ├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
@@ -86,6 +86,31 @@ breaks in a container with no outbound network:
   the attribution kept visible and light traffic; move to a paid provider or
   our own tiles before putting a map on the public landing page.
 Self-host any of these if that trade stops being worth it.
+
+**Response headers are set once, for everything.** `web.SecurityHeaders` wraps
+the whole mux -- API and frontend alike -- with a content security policy and
+the smaller headers (`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`,
+COOP, CORP, `Permissions-Policy`). HSTS follows the same "not in dev" rule the
+session cookie's `Secure` flag does. The policy is `default-src 'none'` plus
+one directive per thing the frontend actually loads, so the third-party origins
+listed under *No build step* are named in one place in Go and a new one is a
+one-line diff that says what capability it bought. Two allowances are
+deliberate:
+- `style-src` keeps `'unsafe-inline'`. Every component writes a `<style>` into
+  its own shadow root and several set a `style` attribute, and with no build
+  step there is nothing to hash them with. (Adopted stylesheets aren't subject
+  to CSP; a shadow root's own `<style>` is.)
+- `script-src` names exactly one inline script, `index.html`'s import map, by
+  hash. Gotcha: it is hashed out of the file at startup rather than written
+  down as a constant, because nothing keeps a constant in step with a file that
+  has no build step -- and a blocked import map fails *silently*, so the
+  mistake would surface only as the recorders map quietly not loading. An
+  external import map would avoid the whole problem, but no browser supports
+  one. `internal/web`'s test checks the shipped `index.html` has nothing else
+  inline.
+*Revisit when:* the frontend gains a build step -- then the component styles
+can be hashed or nonced too -- or something has to embed a Birdsense page or
+clip cross-origin, which `frame-ancestors` and CORP currently refuse.
 
 **Go backend, static content included.** `internal/web` mounts the frontend at
 `/` as the catch-all; `internal/api` claims `/api/v1/`. Unmatched paths under

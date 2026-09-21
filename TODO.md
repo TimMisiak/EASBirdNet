@@ -180,18 +180,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.2 There are no security response headers at all
-`backend/cmd/server/main.go:414-420`, `backend/internal/web/web.go` — **[verified]**
-
-No `Content-Security-Policy`, `X-Content-Type-Options`, `Referrer-Policy`,
-`Strict-Transport-Security` or `frame-ancestors` on any response. (tusd sets
-`nosniff` on its own replies only.)
-
-**If not fixed:** a cookie-authenticated SPA with one-click destructive admin
-actions is framable and sniffable, and there is no defence in depth behind the
-SRI pins on jsDelivr. A CSP has to allow jsDelivr (Leaflet, tus-js-client),
-Google Fonts and OSM tiles — worth writing once, in the existing handler chain.
-
 ### 4.3 The session key has no strength requirement
 `backend/internal/api/cookies.go:24-29`, `backend/cmd/server/main.go:360`
 
