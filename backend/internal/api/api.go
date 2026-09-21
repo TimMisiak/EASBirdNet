@@ -71,6 +71,8 @@ type Queue interface {
 }
 
 func register(mux *http.ServeMux, h *handlers) {
+	h.overview = newOverviewCache()
+
 	mux.HandleFunc("GET /api/v1/health", h.health)
 
 	// Public: no session required, and no volunteer or card data in the
@@ -153,6 +155,9 @@ type handlers struct {
 	retention retention.Policy
 	// now is the clock, so tests can pin "this year" and "the last 7 nights".
 	now func() time.Time
+	// overview holds the landing page's answer for a minute at a time. Set by
+	// register, so every mux has one.
+	overview *overviewCache
 }
 
 // health is unconditionally ok: it is the liveness probe, and a dependency
@@ -195,14 +200,21 @@ func (h *handlers) publicOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := h.now()
-	program, species, err := overview(r.Context(), h.store, now, days)
+	updatedAt := now.UTC().Truncate(time.Minute)
+	program, species, err := h.overview.get(r.Context(), h.store, now, days)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
+	// The same answer stands, for everyone, until the minute it is stamped
+	// with is over -- so a reload inside that minute needn't ask again. This is
+	// the public page: there is nobody's data in it to keep out of a shared
+	// cache.
+	stands := updatedAt.Add(time.Minute).Sub(now) / time.Second
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(int(stands)))
 	h.json(w, http.StatusOK, map[string]any{
 		"windowDays": days,
-		"updatedAt":  now.UTC().Truncate(time.Minute),
+		"updatedAt":  updatedAt,
 		"program":    program,
 		"species":    species,
 	})

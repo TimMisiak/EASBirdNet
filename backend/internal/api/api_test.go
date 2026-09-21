@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -346,6 +348,82 @@ func TestPublicOverview(t *testing.T) {
 	}
 	if body.WindowDays != 30 || !slices.Equal(names, []string{"Barred Owl", "Northern Saw-whet Owl"}) {
 		t.Errorf("30-day window = %d days, species %v; want Barred Owl then Northern Saw-whet Owl", body.WindowDays, names)
+	}
+}
+
+// countingStore counts how many times the public overview scans the database.
+// ListRecorders is the first read overview makes and nothing else calls it.
+type countingStore struct {
+	db.Store
+	scans atomic.Int64
+}
+
+func (s *countingStore) ListRecorders(ctx context.Context) ([]db.Recorder, error) {
+	s.scans.Add(1)
+	return s.Store.ListRecorders(ctx)
+}
+
+// The landing page needs no session, and answering it reads every recorder,
+// every card and every confirmed detection of the year. Losing the cache would
+// show up as a bill and a busy replica, not on any screen.
+func TestPublicOverviewIsScannedOncePerMinutePerWindow(t *testing.T) {
+	store := &countingStore{Store: newTestStore(t)}
+	now := testNow
+	mux := http.NewServeMux()
+	register(mux, &handlers{
+		store: store, files: testFiles(t), log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		keys: newKeyset(testSessionKey),
+		now:  func() time.Time { return now },
+	})
+	ask := func(query string) string {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/public/overview"+query, "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /public/overview%s = %d (%s)", query, rec.Code, rec.Body)
+		}
+		return rec.Body.String()
+	}
+
+	first := ask("")
+	if again := ask(""); again != first {
+		t.Errorf("a second request in the same minute answered differently:\n%s\n%s", first, again)
+	}
+	if store.scans.Load() != 1 {
+		t.Errorf("scans after two requests in one minute = %d, want 1", store.scans.Load())
+	}
+
+	// A different window is its own answer, not the cached one.
+	if thirty := ask("?days=30"); thirty == first {
+		t.Errorf("?days=30 answered with the 7-day answer: %s", thirty)
+	}
+	if store.scans.Load() != 2 {
+		t.Errorf("scans after a second window = %d, want 2", store.scans.Load())
+	}
+
+	// An answer doesn't outlive the minute it is stamped with.
+	now = testNow.Add(time.Minute)
+	ask("")
+	if store.scans.Load() != 3 {
+		t.Errorf("scans after the minute rolled over = %d, want 3", store.scans.Load())
+	}
+
+	// A burst arriving on a cold cache -- which is what an anonymous flood
+	// looks like -- is one scan the rest wait for, not one each.
+	now = testNow.Add(2 * time.Minute)
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET /public/overview = %d (%s)", rec.Code, rec.Body)
+			}
+		}()
+	}
+	wg.Wait()
+	if store.scans.Load() != 4 {
+		t.Errorf("scans after 20 at once on a cold cache = %d, want 4", store.scans.Load())
 	}
 }
 

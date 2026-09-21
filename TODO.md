@@ -137,18 +137,6 @@ state. (Retention still expires the audio, so nothing is stranded.)
 
 ## 3. Scale and cost — this bites during the first season, not later
 
-### 3.3 The public overview is an unauthenticated full scan with no cache
-`backend/internal/api/overview.go:20-41`
-
-Every landing-page hit reads every recorder, every upload and every confirmed
-detection since January 1 and aggregates in Go. No rate limiting, no cache, no
-Front Door or WAF in front (DEPLOYMENT.md's *Shape of it*).
-
-**If not fixed:** one `while true; do curl; done` against the public page burns
-Cosmos RUs and CPU on the single replica that is also running BirdNET. The
-response's `updatedAt` is already truncated to the minute — caching it for that
-minute is nearly free.
-
 ### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it — **[needs a real card]** for the measurement; the per-file cap is implementable now
 `backend/internal/analysis/analysis.go:276-312`, `backend/internal/analysis/merge.go:15-25` — **[verified]**
 

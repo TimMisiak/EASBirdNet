@@ -198,6 +198,25 @@ the cards on that page, for the same reason.
 tally above the list has to count what the window leaves out. Then the answer
 is a precomputed summary document, not a wider query.
 
+**The landing page is answered a minute at a time.** `GET /public/overview`
+needs no session, and answering it reads every recorder, every card and every
+confirmed detection of the year, aggregating in Go because Cosmos can't
+aggregate across partitions (SCHEMA.md). That is the most expensive read in the
+app, on the one replica that is also running BirdNET, on the one route anyone
+on the internet can ask for. So `overviewCache` holds each window's answer for
+the minute it is stamped with, and admits one scan at a time, so an anonymous
+flood costs one scan a minute per window size rather than one scan each; the
+response carries `Cache-Control: public` for what is left of that minute.
+Nothing about the answer changes -- `updatedAt` is already that minute, so a
+cached answer is the one a fresh scan would have given. The cost is that
+confirming a detection can take up to a minute to show on the landing page. It
+is in the process, not a cache service, because one replica is the whole
+deployment (DEPLOYMENT.md).
+*Revisit when:* the app runs more than one replica, or the scan is slow enough
+that a minute's worth of it still hurts. Then it is the same precomputed
+summary document the detections list would want, written when a review is
+confirmed.
+
 **Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
 has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
 `/app/detections`), the three a coordinator has as well (`/admin/uploads`,
