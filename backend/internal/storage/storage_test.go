@@ -196,9 +196,9 @@ func testStore(t *testing.T, s Store) {
 
 func TestClipName(t *testing.T) {
 	for _, c := range []struct{ upload, det, want string }{
-		{"OWL-20260907-SR02", "det_9c41", "clips/OWL-20260907-SR02/det_9c41.wav"},
-		{"OWL-20260907-SR/../x", "det_1", "clips/OWL-20260907-SR_.._x/det_1.wav"},
-		{"..", "det_1", "clips/__/det_1.wav"},
+		{"OWL-20260907-SR02", "det_9c41", "clips/OWL-20260907-SR02/det_9c41.flac"},
+		{"OWL-20260907-SR/../x", "det_1", "clips/OWL-20260907-SR_.._x/det_1.flac"},
+		{"..", "det_1", "clips/__/det_1.flac"},
 	} {
 		if got := ClipName(c.upload, c.det); got != c.want {
 			t.Errorf("ClipName(%q, %q) = %q, want %q", c.upload, c.det, got, c.want)

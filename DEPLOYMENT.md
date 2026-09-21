@@ -145,7 +145,7 @@ originals are kept for only a month (see *Audio retention* and *Cost*).
 **Blob container** — `azurerm_storage_container`: name `audio`, access type
 `private`. Card audio is at `uploads/{uploadId}/{random}`, each with a
 `.info` blob beside it, and the clips the server cuts for review are at
-`clips/{uploadId}/{detectionId}.wav`, a few MB each at most (SCHEMA.md). The app tries to create the container at
+`clips/{uploadId}/{detectionId}.flac`, well under a MB each (SCHEMA.md). The app tries to create the container at
 startup and carries on if it exists; Terraform should still own it.
 
 **Lifecycle** — `azurerm_storage_management_policy`, one rule on prefix

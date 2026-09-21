@@ -419,7 +419,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 			ReviewStatus: db.ReviewUnreviewed,
 		}
 		clipStart, clipEnd := clipSpan(d)
-		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.wav", i)), StartSec: clipStart, EndSec: clipEnd}
+		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.flac", i)), StartSec: clipStart, EndSec: clipEnd}
 	}
 	// Cut even a file with nothing heard in it, for its duration and sample rate.
 	recording, err := q.analyzer.Cut(ctx, local, clips)

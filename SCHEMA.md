@@ -346,7 +346,7 @@ they are what a threshold or model change gets measured against.
   "scientificName": "Strix varia",
   "commonName": "Barred Owl",
   "confidence": 0.91,
-  "clip": { "blobName": "clips/OWL-20260907-SR02/det_9c41d7e2a0b35f86c1e4a7d20b9f3e65.wav", "startSec": 731, "endSec": 736 },
+  "clip": { "blobName": "clips/OWL-20260907-SR02/det_9c41d7e2a0b35f86c1e4a7d20b9f3e65.flac", "startSec": 731, "endSec": 736 },
   "reviewStatus": "confirmed",
   "review": { "userId": "usr_8d02e6f1a4c97b35", "userName": "Ellen Park", "at": "2026-09-14T02:05:31Z" },
   "createdAt": "2026-09-13T09:41:17Z",
@@ -444,13 +444,19 @@ Detection clips are cut by the server rather than uploaded, and go under their
 own prefix:
 
 ```
-clips/{uploadId}/{detectionId}.wav
+clips/{uploadId}/{detectionId}.flac
 ```
 
 A clip is named by its detection, so analyzing a file again replaces its clips
 instead of adding more. They are outside `uploads/`, so a lifecycle rule that
 tiers or deletes the originals leaves what reviewers listen to alone. The same
 characters are replaced in both parts of the name.
+
+Clips cut before FLAC end `.wav` instead, and nothing backfills them, so the
+extension of a stored clip is whatever its detection's `clip.blobName` says and
+never something to assume. One consequence: re-analyzing a file analyzed before
+FLAC writes its clips under the `.flac` names and leaves the `.wav` ones, which
+go when the card does -- deleting a card deletes everything under its prefix.
 
 Beside each file, tusd keeps `{name}.info`: a small JSON record of the upload,
 with its size and the metadata the server set (`reference`, `path`,
@@ -545,7 +551,7 @@ What the write routes do to documents:
 | `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`) as `{detections, total, species, window?}`. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (a `GetUpload` of each card on the page, `recorder.name`) and `night`. `species[]` counts every match in the window before the species filter. |
 | `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's, in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
-| `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/wav`, answering range requests. 404 for a detection with no clip. |
+| `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/flac`, or `audio/wav` for a clip cut before FLAC -- the stored name decides, not a constant. Answers range requests. 404 for a detection with no clip. |
 | `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
 | `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
@@ -571,7 +577,7 @@ What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 | Before it starts | Checks BirdNET can run, and keeps checking until it can. Touches no document: cards stay in `processing`, and `queue` says what it is waiting for. |
 | First file on a card | Sets `analysis` (settings, `startedAt`). |
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
-| BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.wav`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
+| BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.flac`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
 | BirdNET or `clip.py` fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
 | Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever documents it stored for it after the delete swept past. It checks the file is still there before storing clips and detections, so only a delete landing in the moment between that check and the writes can leave that file's clips in storage. |
 | After each file | Recounts `filesAnalyzed`, `filesFailed` and `detectionCount`. When nothing on the card is waiting, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |

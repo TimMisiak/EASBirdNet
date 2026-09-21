@@ -236,11 +236,22 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 		ID: db.DetectionID(fileID, 72_000, "Bubo virginianus"), AudioFileID: fileID, DetectedAt: testNow.Add(time.Minute),
 		StartSec: 72, EndSec: 75, ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl", Confidence: 0.4,
 	}
-	if err := store.UpsertDetections(ctx, ref, []db.Detection{owl, older}); err != nil {
+	// Analyzed before clips were FLAC: still the WAV it was cut as, under the
+	// name its detection carries.
+	wren := db.Detection{
+		ID: db.DetectionID(fileID, 30_000, "Troglodytes pacificus"), AudioFileID: fileID, DetectedAt: testNow.Add(time.Second),
+		StartSec: 30, EndSec: 33, ScientificName: "Troglodytes pacificus", CommonName: "Pacific Wren", Confidence: 0.8,
+	}
+	wren.Clip = &db.Clip{BlobName: "clips/" + ref + "/" + wren.ID + ".wav", StartSec: 29, EndSec: 34}
+	if err := store.UpsertDetections(ctx, ref, []db.Detection{owl, older, wren}); err != nil {
 		t.Fatal(err)
 	}
+	const flac = "fLaC\x00\x00\x00\x22not much of a clip"
 	const wav = "RIFF$\x00\x00\x00WAVEfmt not much of a clip"
-	if err := files.Put(ctx, owl.Clip.BlobName, strings.NewReader(wav)); err != nil {
+	if err := files.Put(ctx, owl.Clip.BlobName, strings.NewReader(flac)); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Put(ctx, wren.Clip.BlobName, strings.NewReader(wav)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,16 +267,21 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 
 	// The clip, whole and by range: browsers fetch audio in ranges.
 	rec = do(t, mux, http.MethodGet, base+owl.ID+"/clip", "", admin)
-	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/wav" || rec.Body.String() != wav {
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/flac" || rec.Body.String() != flac {
 		t.Errorf("GET clip = %d %s %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+	}
+	// A clip cut before FLAC is served as the WAV it still is.
+	rec = do(t, mux, http.MethodGet, base+wren.ID+"/clip", "", admin)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "audio/wav" || rec.Body.String() != wav {
+		t.Errorf("GET older clip = %d %s %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
 	}
 	req := httptest.NewRequest(http.MethodGet, base+owl.ID+"/clip", nil)
 	req.AddCookie(admin)
 	req.Header.Set("Range", "bytes=0-3")
 	ranged := httptest.NewRecorder()
 	mux.ServeHTTP(ranged, req)
-	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "RIFF" {
-		t.Errorf("GET clip bytes=0-3 = %d %q; want 206 RIFF", ranged.Code, ranged.Body)
+	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "fLaC" {
+		t.Errorf("GET clip bytes=0-3 = %d %q; want 206 fLaC", ranged.Code, ranged.Body)
 	}
 
 	// Confirm, then discard, then undo.

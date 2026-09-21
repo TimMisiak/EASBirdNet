@@ -423,7 +423,7 @@ extension, which birdnet picks a decoder by), runs BirdNET with the recorder's
 position and week, merges each species' consecutive windows into one detection
 at the highest confidence (`merge.go`), cuts a clip of each with `clip.py` (the
 run and 1 s either side, at most 30 s around its best window) into storage at
-`clips/{card}/{detection}.wav`, upserts the detections, marks the file
+`clips/{card}/{detection}.flac`, upserts the detections, marks the file
 `analyzed`, and recounts the card. The API only calls `Enqueue` to wake it when a card's last
 file lands. At startup it resumes whatever was left, including a file cut off
 mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
@@ -474,6 +474,25 @@ provider's defaults assume a container that isn't CPU-saturated by BirdNET for
 hours.
 *Revisit when:* analysis moves to its own job -- then no health response is
 ever queued behind a BirdNET run, and tighter probes are reasonable again.
+
+**Clips are FLAC.** `clip.py` writes each clip as mono 16-bit FLAC at the
+source's sample rate. It is lossless, so a clip is still exactly what BirdNET
+heard, and on the test Osprey recording it is 38% of the same WAV -- a field
+recorder's noise floor rarely uses all 16 bits, which is what FLAC exploits.
+That is worth having because clips are the one thing here that only
+accumulates: originals expire a month on (below), clips are kept until someone
+deletes the card. Every browser the app supports has played FLAC since 2019 and
+`decodeAudioData` takes it too, which is the part `<bs-spectrogram>` needs.
+Gotcha: clips cut before this are still WAV, under the names their detections
+carry, and nothing backfills them. So `ClipName` says what a clip written *now*
+is called and nothing may read a format off a stored one: `getClip` takes the
+content type from `clip.blobName`, the component takes the blob type from the
+response, and `clipRate` reads the sample rate out of either header -- it
+decodes at the clip's own rate, so a 24 kHz recording isn't drawn over an empty
+top half. Re-analysis replaces a clip by name, so a re-run of a file analyzed
+before FLAC leaves its old `.wav` behind; deleting the card sweeps the prefix.
+*Revisit when:* clips have to be small rather than exact. Then it is Opus, and
+the spectrogram wants drawing from something other than the archive copy.
 
 **Originals expire; clips don't.** A card is ~128 GB of audio against a few
 megabytes of clips, and nothing reads an original once BirdNET has:
@@ -655,7 +674,8 @@ My uploads, their own cards, where an unfinished one is resumed; and
 Detections. A coordinator gets three more tabs after those -- All uploads,
 Recorders and People. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
-were cut have no clip and weren't merged; nothing backfills them.
+were cut have no clip and weren't merged, and ones stored before clips were
+FLAC still have a WAV; nothing backfills either.
 Nothing cleans up abandoned partial uploads, short of deleting their card or
 the storage lifecycle rule getting to them: they have no `audioFiles` document,
 so retention never sees them.

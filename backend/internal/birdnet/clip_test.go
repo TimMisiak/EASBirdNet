@@ -2,7 +2,6 @@ package birdnet
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,13 +16,13 @@ func TestCutSendsTheClipsAndReadsTheRecording(t *testing.T) {
 	a := fakePython(t, `
 echo "$@" > '`+argsFile+`'
 cat > '`+specFile+`'
-echo '{"durationSec":13.96,"sampleRate":44100,"clips":[{"path":"/tmp/a.wav","startSec":2,"endSec":5},{"path":"/tmp/b.wav","startSec":12,"endSec":13.96}]}'
+echo '{"durationSec":13.96,"sampleRate":44100,"clips":[{"path":"/tmp/a.flac","startSec":2,"endSec":5},{"path":"/tmp/b.flac","startSec":12,"endSec":13.96}]}'
 `)
 	a.Script = filepath.Join("analyzer", "analyze.py")
 
 	rec, err := a.Cut(context.Background(), "/cards/x.wav", []Clip{
-		{Path: "/tmp/a.wav", StartSec: 2, EndSec: 5},
-		{Path: "/tmp/b.wav", StartSec: 12, EndSec: 20},
+		{Path: "/tmp/a.flac", StartSec: 2, EndSec: 5},
+		{Path: "/tmp/b.flac", StartSec: 12, EndSec: 20},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +52,7 @@ func TestCutFailures(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := fakePython(t, c.body)
-			_, err := a.Cut(context.Background(), "x.wav", []Clip{{Path: "a.wav", EndSec: 3}})
+			_, err := a.Cut(context.Background(), "x.wav", []Clip{{Path: "a.flac", EndSec: 3}})
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Errorf("err = %v, want it to mention %q", err, c.wantErr)
 			}
@@ -75,8 +74,8 @@ func TestCutOsprey(t *testing.T) {
 	defer cancel()
 
 	rec, err := a.Cut(ctx, source, []Clip{
-		{Path: filepath.Join(dir, "a.wav"), StartSec: 2, EndSec: 5},
-		{Path: filepath.Join(dir, "b.wav"), StartSec: 12, EndSec: 20},
+		{Path: filepath.Join(dir, "a.flac"), StartSec: 2, EndSec: 5},
+		{Path: filepath.Join(dir, "b.flac"), StartSec: 12, EndSec: 20},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,19 +87,29 @@ func TestCutOsprey(t *testing.T) {
 		t.Errorf("second clip = %+v; want it clamped to the end of the recording", c)
 	}
 
-	// A mono 16-bit WAV at the source's rate: 3 s is 132300 frames of 2 bytes.
-	wav, err := os.ReadFile(rec.Clips[0].Path)
+	// A mono 16-bit FLAC at the source's rate, holding 3 s: 132300 frames. All
+	// four numbers are in STREAMINFO, the block after the "fLaC" magic and its
+	// 4-byte block header, where the rate is the 20 bits at byte 18 and the
+	// channel count, sample size and frame count run on from it unaligned.
+	clip, err := os.ReadFile(rec.Clips[0].Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(wav) < 44 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
-		t.Fatalf("clip is not a WAV: %q", wav[:min(len(wav), 16)])
+	if len(clip) < 26 || string(clip[:4]) != "fLaC" {
+		t.Fatalf("clip is not a FLAC: %q", clip[:min(len(clip), 16)])
 	}
-	channels, rate, bits := binary.LittleEndian.Uint16(wav[22:]), binary.LittleEndian.Uint32(wav[24:]), binary.LittleEndian.Uint16(wav[34:])
+	rate := (int(clip[18]) << 12) | (int(clip[19]) << 4) | (int(clip[20]) >> 4)
+	channels := ((int(clip[20]) >> 1) & 0x07) + 1
+	bits := ((int(clip[20]&0x01) << 4) | (int(clip[21]) >> 4)) + 1
 	if channels != 1 || rate != 44100 || bits != 16 {
 		t.Errorf("clip is %d channels at %d Hz, %d-bit; want mono, 44100 Hz, 16-bit", channels, rate, bits)
 	}
-	if data := len(wav) - 44; data < 132300*2 || data > 132300*2+256 {
-		t.Errorf("clip holds %d bytes past the header, want about %d", data, 132300*2)
+	frames := int64(clip[21]&0x0F)<<32 | int64(clip[22])<<24 | int64(clip[23])<<16 | int64(clip[24])<<8 | int64(clip[25])
+	if frames != 132300 {
+		t.Errorf("clip holds %d frames, want %d: 3 s at 44100 Hz", frames, 132300)
+	}
+	// Lossless, but the point of FLAC is that it is smaller than saying it flat.
+	if len(clip) >= 132300*2 {
+		t.Errorf("clip is %d bytes, no smaller than the %d bytes of PCM in it", len(clip), 132300*2)
 	}
 }

@@ -982,12 +982,24 @@ func (h *handlers) getDetection(w http.ResponseWriter, r *http.Request, _ db.Use
 }
 
 // maxClipBytes is the most of a clip getClip will read. The analysis queue
-// cuts at most 30 s of mono 16-bit audio, which is under 6 MB even at 96 kHz.
+// cuts at most 30 s of mono 16-bit audio, which is under 6 MB even at 96 kHz
+// uncompressed -- so the bound holds for a FLAC clip and for a WAV one.
 const maxClipBytes = 16 << 20
 
-// getClip serves a detection's clip as a WAV. The clip is read whole so that
-// http.ServeContent can answer range requests: browsers ask for audio in
-// ranges, and Safari won't play a file served without them.
+// clipContentType is what a stored clip is served as. Clips are cut as FLAC,
+// but the ones cut before that are still WAV under the names their detections
+// carry, so the stored name decides and not a constant.
+func clipContentType(blobName string) string {
+	if strings.HasSuffix(blobName, ".wav") {
+		return "audio/wav"
+	}
+	return "audio/flac"
+}
+
+// getClip serves a detection's clip, as the FLAC it was cut as or the WAV an
+// older one was. The clip is read whole so that http.ServeContent can answer
+// range requests: browsers ask for audio in ranges, and Safari won't play a
+// file served without them.
 func (h *handlers) getClip(w http.ResponseWriter, r *http.Request, _ db.User) {
 	ctx := r.Context()
 	d, err := h.store.GetDetection(ctx, r.PathValue("reference"), r.PathValue("id"))
@@ -1019,7 +1031,7 @@ func (h *handlers) getClip(w http.ResponseWriter, r *http.Request, _ db.User) {
 		h.fail(w, r, err)
 		return
 	}
-	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Content-Type", clipContentType(d.Clip.BlobName))
 	// Analyzing a file again cuts its clips again, under the same names.
 	w.Header().Set("Cache-Control", "private, no-cache")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))

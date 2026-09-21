@@ -92,9 +92,11 @@ const infoSuffix = ".info"
 const clipPrefix = "clips"
 
 // ClipName is where a detection's clip is stored. A card's clips share a
-// prefix, like its audio.
+// prefix, like its audio. Clips cut before FLAC are WAV under the names their
+// detections still carry, so nothing may assume this extension of a stored
+// clip -- only of one being written now.
 func ClipName(uploadID, detectionID string) string {
-	return clipPrefix + "/" + segment(uploadID) + "/" + segment(detectionID) + ".wav"
+	return clipPrefix + "/" + segment(uploadID) + "/" + segment(detectionID) + ".flac"
 }
 
 // segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a

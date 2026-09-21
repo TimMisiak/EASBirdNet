@@ -112,7 +112,7 @@ export const fetchFileDetections = (reference, fileId, limit) => {
 /** One detection, with the card and the file it was heard in. */
 export const fetchDetection = (reference, id) =>
   get(`/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}`);
-/** Where a detection's clip plays from: a WAV, a few seconds either side of what was heard. */
+/** Where a detection's clip plays from: a FLAC, a few seconds either side of what was heard. */
 export const clipURL = (reference, id) =>
   `${BASE}/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/clip`;
 /** Record a verdict on a detection: "confirmed", "rejected", or back to "unreviewed". */

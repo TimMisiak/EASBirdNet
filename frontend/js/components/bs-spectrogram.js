@@ -232,7 +232,8 @@ class Spectrogram extends HTMLElement {
 
   /**
    * Fetches the clip once: the bytes become the <audio> source, as a blob URL,
-   * and a copy of them is decoded for the picture.
+   * and a copy of them is decoded for the picture. A clip is FLAC, or WAV if it
+   * was cut before FLAC, so the server's own content type is what the blob gets.
    */
   async #load() {
     const src = this.getAttribute("src") ?? "";
@@ -247,22 +248,23 @@ class Spectrogram extends HTMLElement {
     this.#say("Loading the clip…");
 
     try {
-      const res = await fetch(src, { headers: { Accept: "audio/wav" } });
+      const res = await fetch(src, { headers: { Accept: "audio/flac, audio/wav" } });
       if (!res.ok) {
         const payload = await res.json().catch(() => null);
         throw new Error(payload?.error ?? `the server answered ${res.status}`);
       }
+      const type = res.headers.get("Content-Type") || "audio/flac";
       const bytes = await res.arrayBuffer();
       if (src !== this.#loading) return;
 
       URL.revokeObjectURL(this.#url);
-      this.#url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      this.#url = URL.createObjectURL(new Blob([bytes], { type }));
       this.#audio.src = this.#url;
       this.#button.disabled = false;
 
       // Decode at the clip's own rate, so a 24 kHz recording isn't stretched
       // over an empty top half. decodeAudioData takes the buffer it is given.
-      const context = new OfflineAudioContext({ numberOfChannels: 1, length: 1, sampleRate: wavRate(bytes) ?? 48_000 });
+      const context = new OfflineAudioContext({ numberOfChannels: 1, length: 1, sampleRate: clipRate(bytes) ?? 48_000 });
       const audio = await context.decodeAudioData(bytes.slice(0));
       if (src !== this.#loading) return;
 
@@ -408,6 +410,11 @@ class Spectrogram extends HTMLElement {
   }
 }
 
+/** The rate a clip was cut at, or null if the bytes are neither FLAC nor WAV. */
+function clipRate(bytes) {
+  return flacRate(bytes) ?? wavRate(bytes);
+}
+
 /** The sample rate in a WAV header, or null if the bytes aren't a WAV. */
 function wavRate(bytes) {
   if (bytes.byteLength < 28) return null;
@@ -415,6 +422,18 @@ function wavRate(bytes) {
   const tag = (at) => String.fromCharCode(...new Uint8Array(bytes, at, 4));
   if (tag(0) !== "RIFF" || tag(8) !== "WAVE" || tag(12) !== "fmt ") return null;
   return view.getUint32(24, true) || null;
+}
+
+/**
+ * The sample rate in a FLAC header, or null if the bytes aren't a FLAC. "fLaC"
+ * is followed by a 4-byte block header and then STREAMINFO, whose rate is the
+ * 20 bits at byte 18: block and frame sizes take the 10 bytes before it.
+ */
+function flacRate(bytes) {
+  if (bytes.byteLength < 21) return null;
+  const head = new Uint8Array(bytes, 0, 21);
+  if (head[0] !== 0x66 || head[1] !== 0x4c || head[2] !== 0x61 || head[3] !== 0x43) return null;
+  return ((head[18] << 12) | (head[19] << 4) | (head[20] >> 4)) || null;
 }
 
 /**
