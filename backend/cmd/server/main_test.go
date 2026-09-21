@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,7 +43,8 @@ func TestRoutesCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	mux := newMux(config{StaticDir: dir}, store, testFiles(t), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := config{StaticDir: dir, SessionKey: api.RandomSessionKey()}
+	mux := newMux(cfg, store, testFiles(t), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	cases := []struct {
 		path string
@@ -72,7 +74,7 @@ func TestRoutesCoexist(t *testing.T) {
 func signInEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("BIRDSENSE_PUBLIC_URL", "https://owls.eastsideaudubon.org")
-	t.Setenv("BIRDSENSE_SESSION_KEY", "a test session key")
+	t.Setenv("BIRDSENSE_SESSION_KEY", "a test session key long enough to be one")
 	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
 	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET", "a test secret")
 	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_TENANT", "")
@@ -242,6 +244,7 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		StaticDir:      t.TempDir(),
 		DB:             db.Config{Backend: db.BackendCosmos},
 		BootstrapAdmin: &mail.Address{Name: "Ada Admin", Address: "ada@eastsideaudubon.org"},
+		SessionKey:     api.RandomSessionKey(),
 	}
 	for range 2 { // a restart with the setting still in place
 		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
@@ -285,7 +288,7 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 		t.Cleanup(func() { store.Close() })
 		return store
 	}
-	cfg := config{StaticDir: t.TempDir(), DB: db.Config{Backend: db.BackendLocal}, Dev: true}
+	cfg := config{StaticDir: t.TempDir(), DB: db.Config{Backend: db.BackendLocal}, Dev: true, SessionKey: api.RandomSessionKey()}
 
 	store := open()
 	for range 2 {
@@ -359,7 +362,14 @@ func TestConfigFromEnvSignIn(t *testing.T) {
 		case "BIRDSENSE_PUBLIC_URL":
 			t.Setenv(want, "https://owls.eastsideaudubon.org/")
 		case "BIRDSENSE_SESSION_KEY":
-			t.Setenv(want, "a test session key")
+			// A key is not enough. The cookie it signs is the identity, so a
+			// passphrase short enough to guess is refused like a missing one.
+			t.Setenv(want, "owls")
+			_, err := configFromEnv()
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at least %d", api.MinSessionKeyLen)) {
+				t.Fatalf("err = %v, want a short session key refused", err)
+			}
+			t.Setenv(want, strings.Repeat("k", api.MinSessionKeyLen))
 		}
 	}
 
@@ -398,8 +408,8 @@ func TestConfigFromEnvSignIn(t *testing.T) {
 		t.Fatalf("dev config: %v", err)
 	case len(cfg.Auth.Providers) != 0:
 		t.Errorf("dev providers = %+v, want none", cfg.Auth.Providers)
-	case cfg.SessionKey == "":
-		t.Error("dev mode left the session key empty, so nothing would sign cookies")
+	case len(cfg.SessionKey) < api.MinSessionKeyLen:
+		t.Errorf("dev mode made a %d-byte session key, want at least %d like everywhere else", len(cfg.SessionKey), api.MinSessionKeyLen)
 	case cfg.Auth.PublicURL != "http://localhost:8080":
 		t.Errorf("dev public URL = %q, want localhost", cfg.Auth.PublicURL)
 	}

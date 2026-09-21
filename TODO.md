@@ -168,17 +168,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.3 The session key has no strength requirement
-`backend/internal/api/cookies.go:24-29`, `backend/cmd/server/main.go:360`
-
-`newKeyset` SHA-256s whatever passphrase it's given; startup only checks
-non-empty, and `api.Register` has no guard of its own.
-
-**If not fixed:** `BIRDSENSE_SESSION_KEY=owls` yields a brute-forceable HMAC
-key, and the cookie value *is* the identity — forging one mints
-`dana@eastsideaudubon.org` and gets admin. Require ≥32 bytes in `readAuth`, and
-make `newKeyset` reject empty.
-
 ### 4.4 No upper bound on a declared file or card size
 `backend/internal/api/api.go:520-545`, `backend/internal/api/tus.go:45-65` — **[verified]**
 

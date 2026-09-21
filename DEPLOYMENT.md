@@ -235,7 +235,7 @@ environment forwards here.
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET` | Container Apps secret `oidc-microsoft-client-secret` | Kept as a secret, so it isn't in the revision's environment listing. |
 | `BIRDSENSE_OIDC_MICROSOFT_TENANT` | `var.oidc_microsoft_tenant`, default `common` | `common` accepts any organization and any personal Microsoft account. A tenant GUID restricts sign-in to that directory. |
-| `BIRDSENSE_SESSION_KEY` | Container Apps secret `session-key` | Signs the session cookie. Keep it stable across deploys; changing it signs everyone out. |
+| `BIRDSENSE_SESSION_KEY` | Container Apps secret `session-key` | Signs the session cookie. At least 32 characters, or the server won't start. Keep it stable across deploys; changing it signs everyone out. |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
 | `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The analysis queue checks them before it starts, and again on a growing delay until they work, logging `BirdNET isn't available` (and analyzing nothing) meanwhile. `/api/v1/health` reports `"queue":"unavailable"`, and the coordinator's card screens say so; see *When cards sit in processing*. |
 
@@ -288,6 +288,10 @@ as `unverified-email`. The rule is `trustedEmail` in `internal/api/auth.go`.
 **The session key** (`session_key`, a Container Apps secret) signs the session
 cookie. Generate it with `openssl rand -base64 32` and keep it: a new value
 signs everyone out, which is also how to end every session at once on purpose.
+It must be at least 32 characters -- the cookie it signs is the identity, so a
+short one is a forgeable admin session. `terraform plan` refuses a shorter one,
+and so does the server at startup, which is what covers a deployment that sets
+`BIRDSENSE_SESSION_KEY` some other way.
 
 **Adding Google** is two more variables and no code:
 `oidc_google_client_id` and `_secret` would follow the same shape, and the

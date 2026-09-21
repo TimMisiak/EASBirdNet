@@ -547,6 +547,19 @@ func TestSessionCookieIsSigned(t *testing.T) {
 	}
 }
 
+// A server with no session key would sign every cookie with the hash of the
+// empty string, which is a key anyone can reproduce -- so Register, through
+// newKeyset, refuses to come up at all. The strength requirement above that
+// (MinSessionKeyLen) is cmd/server's, where the environment is read.
+func TestNoSessionKeyIsRefused(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("an empty session key was accepted, so cookies would be signed with a key anyone knows")
+		}
+	}()
+	newKeyset("")
+}
+
 // forge puts the body of one cookie under the signature of another, which is
 // what tampering with a signed cookie actually looks like.
 func forge(body, signature string) string {

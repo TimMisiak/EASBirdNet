@@ -21,9 +21,25 @@ import (
 // once. Rotating it deliberately is how you sign everyone out at once.
 type keyset struct{ key []byte }
 
+// MinSessionKeyLen is the shortest session key a deployment may set. Hashing
+// the passphrase fixes its length, not its strength: a guessable key is a
+// forgeable cookie, and the session cookie *is* the identity, so guessing one
+// is being signed in as anyone on the roster, coordinators included. 32 bytes
+// is what `openssl rand -base64 32` gives. cmd/server enforces it when it
+// reads the configuration, and infra/variables.tf checks the same length at
+// plan time; newKeyset itself only refuses an empty key, so a test can sign
+// with a short one.
+const MinSessionKeyLen = 32
+
 func newKeyset(secret string) *keyset {
-	// The key is a passphrase of any length, so hash it to a fixed size rather
-	// than asking whoever sets it for exactly 32 bytes.
+	if secret == "" {
+		// Register has nowhere to return an error, and a keyset over the hash
+		// of "" would sign cookies anyone could forge, so this fails the
+		// process at startup rather than serving forgeable sessions.
+		panic("api: the session cookie needs a key, and Options.SessionKey is empty")
+	}
+	// The key is a passphrase, so hash it to a fixed size rather than asking
+	// whoever sets it for exactly 32 bytes.
 	sum := sha256.Sum256([]byte(secret))
 	return &keyset{key: sum[:]}
 }

@@ -262,7 +262,12 @@ Two consequences worth knowing:
 The session cookie is the address, HMAC-signed with `BIRDSENSE_SESSION_KEY`
 (`cookies.go`); the key is configuration, not generated at startup, so a new
 revision doesn't sign everyone out -- and rotating it deliberately is how you
-end every session at once. Removing someone from the roster already ends
+end every session at once. Because that cookie *is* the identity, a guessable
+key mints an admin session, and hashing the passphrase to 32 bytes fixes its
+length but not its strength: a deployment's key must be at least
+`api.MinSessionKeyLen` bytes, checked where the environment is read
+(`cmd/server`) and again at plan time in `infra/variables.tf`. `newKeyset`
+itself only refuses an empty key, so tests can sign with a short one. Removing someone from the roster already ends
 theirs, so there is no session store to revoke from.
 The browser finds out the same way it finds out anything: `api.js` turns any
 401 into a sign-out in `session.js`, so one ended session bounces the app to
@@ -512,7 +517,8 @@ Sign-in needs `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` and `_CLIENT_SECRET` (and
 `_TENANT`, default `common`; `BIRDSENSE_OIDC_GOOGLE_*` the same way),
 `BIRDSENSE_PUBLIC_URL` -- where a browser reaches the app, which the redirect
 URI is built from and which has to match what is registered with the provider
--- and `BIRDSENSE_SESSION_KEY`. Outside dev mode the server refuses to start
+-- and `BIRDSENSE_SESSION_KEY`, at least 32 bytes of it
+(`openssl rand -base64 32`). Outside dev mode the server refuses to start
 without them, because the development sign-in isn't registered there and it
 would have no way in at all. Dev mode fills all four in (a random session key,
 `http://localhost:8080`) and offers the roster picker instead, so the real flow

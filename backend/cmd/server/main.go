@@ -358,6 +358,8 @@ func readAuth(cfg *config) error {
 		return errors.New("BIRDSENSE_PUBLIC_URL is required: it is where the identity provider sends people back to, e.g. https://owls.eastsideaudubon.org")
 	case cfg.SessionKey == "":
 		return errors.New("BIRDSENSE_SESSION_KEY is required: it signs the session cookie, and a fresh one each start would sign everyone out")
+	case len(cfg.SessionKey) < api.MinSessionKeyLen:
+		return fmt.Errorf("BIRDSENSE_SESSION_KEY is %d bytes long, and at least %d are required: the cookie it signs is the identity, so a guessable key is a forged session -- generate one with `openssl rand -base64 32`", len(cfg.SessionKey), api.MinSessionKeyLen)
 	}
 	return nil
 }
