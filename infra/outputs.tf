@@ -9,7 +9,7 @@ output "app_fqdn" {
 }
 
 output "acr_name" {
-  description = "Registry name, as `az acr build --registry` wants it. scripts/deploy.sh reads this."
+  description = "Registry name, as `az acr build --registry` wants it. scripts/deploy.ps1 reads this."
   value       = azurerm_container_registry.this.name
 }
 

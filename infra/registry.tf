@@ -1,4 +1,4 @@
-# The image is built by scripts/deploy.sh (az acr build) and run by the
+# The image is built by scripts/deploy.ps1 (az acr build) and run by the
 # container app, which pulls it as the managed identity.
 
 resource "azurerm_container_registry" "this" {

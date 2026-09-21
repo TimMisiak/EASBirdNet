@@ -33,7 +33,7 @@ variable "name_suffix" {
 }
 
 variable "image_tag" {
-  description = "Tag of the birdsense image in the registry to run. Terraform owns the running image, so a deploy is a new value here (scripts/deploy.sh passes the git sha)."
+  description = "Tag of the birdsense image in the registry to run. Terraform owns the running image, so a deploy is a new value here (scripts/deploy.ps1 passes the git sha)."
   type        = string
 }
 

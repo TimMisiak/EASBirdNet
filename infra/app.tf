@@ -73,13 +73,22 @@ resource "azurerm_container_app" "this" {
     #   to reach the same process; two replicas would also analyze the same
     #   file twice. Raising this needs a shared locker in internal/storage (or
     #   ingress session affinity) first. See CLAUDE.md and DEPLOYMENT.md.
+    #
+    # max 1 is not absolute, though: it bounds a *revision*, not the app, so
+    # during any swap -- every deploy, and every rollback -- the outgoing and
+    # incoming replicas briefly run together, both running the queue and
+    # holding their own in-memory tus locks. Analyzing a file twice is
+    # harmless, because detection ids are deterministic and the second run
+    # overwrites the first; the cost is that a card being uploaded across the
+    # swap can have a PATCH reach the replica that doesn't hold its lock. So
+    # don't deploy mid-upload when it can wait (ROLLBACK.md).
     min_replicas = 1
     max_replicas = 1
 
     container {
       name = "birdsense"
       # Terraform owns the running image: a deploy is a new image_tag, applied
-      # here (scripts/deploy.sh). Nothing should `az containerapp update` this
+      # here (scripts/deploy.ps1). Nothing should `az containerapp update` this
       # app -- that is drift the next apply reverts.
       image = "${azurerm_container_registry.this.login_server}/birdsense:${var.image_tag}"
 

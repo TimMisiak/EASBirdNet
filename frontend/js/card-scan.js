@@ -37,8 +37,12 @@ export async function scanCard({ onWorking } = {}) {
   return manifest(found);
 }
 
-// The modern path: a real directory handle, so the files stay on the card and
-// a resume can re-read them without asking again.
+// The modern path: a real directory handle, so the card is walked where it sits
+// and nothing is copied to the volunteer's disk. The handle itself is dropped
+// once the manifest is built, so a resume asks for the folder again exactly
+// like the input fallback does -- `id` at least reopens the picker where it
+// left off. Keeping it would mean storing the handle in IndexedDB and
+// re-requesting read permission on the way back.
 async function viaDirectoryPicker() {
   let handle;
   try {

@@ -69,8 +69,14 @@ const (
 	// After that the file is failed, so one bad file can't hold up every card
 	// behind it.
 	maxAttempts = 3
-	// retryDelay is the wait after such a failure, times the attempt number.
-	retryDelay = 30 * time.Second
+	// retryDelay is the first wait after such a failure. It doubles up to
+	// maxRetryDelay for as long as passes keep failing, and a pass that
+	// doesn't puts it back. So a file that keeps failing is tried again 30 s
+	// and then 60 s later, while an outage that fails every pass -- the store
+	// or storage being unreachable, rather than one file -- backs off instead
+	// of being retried every 30 s for as long as it lasts.
+	retryDelay    = 30 * time.Second
+	maxRetryDelay = 10 * time.Minute
 	// checkDelay is the first wait between BirdNET checks while it can't run,
 	// doubling up to maxCheckDelay. checkTimeout bounds one check.
 	checkDelay    = 30 * time.Second
@@ -131,6 +137,8 @@ type Queue struct {
 	now        func() time.Time
 	retryDelay time.Duration
 	checkDelay time.Duration
+	// pause is sleep, so a test can see how long Run waited without waiting.
+	pause func(context.Context, time.Duration) bool
 }
 
 // New returns a queue that reads audio from files and writes to store.
@@ -140,6 +148,7 @@ func New(store db.Store, files storage.Store, analyzer Analyzer, log *slog.Logge
 		wake:     make(chan struct{}, 1),
 		attempts: map[string]int{},
 		now:      time.Now, retryDelay: retryDelay, checkDelay: checkDelay,
+		pause: sleep,
 	}
 	q.status = Status{State: StateStarting, Since: q.stamp(), CheckedAt: q.stamp()}
 	return q
@@ -181,10 +190,15 @@ func (q *Queue) Enqueue(reference string) {
 // available, works through whatever was left queued, then waits for Enqueue.
 // Cancelling ctx kills a BirdNET run in flight; its file is run again next
 // time.
+//
+// A pass that fails pauses the queue and is tried again on a growing delay
+// (see retryDelay), because the two things that fail a whole pass are a file
+// worth another attempt and an outage worth waiting out.
 func (q *Queue) Run(ctx context.Context) {
 	if !q.waitReady(ctx) {
 		return
 	}
+	delay := q.retryDelay
 	for {
 		err := q.drain(ctx)
 		if ctx.Err() != nil {
@@ -192,12 +206,14 @@ func (q *Queue) Run(ctx context.Context) {
 		}
 		if err != nil {
 			q.setStatus(StateFailing, err.Error())
-			q.log.Error("analysis: pausing after a failure", "err", err, "retry_in", q.retryDelay)
-			if !sleep(ctx, q.retryDelay) {
+			q.log.Error("analysis: pausing after a failure", "err", err, "retry_in", delay)
+			if !q.pause(ctx, delay) {
 				return
 			}
+			delay = min(2*delay, maxRetryDelay)
 			continue
 		}
+		delay = q.retryDelay
 		q.setStatus(StateReady, "")
 		select {
 		case <-ctx.Done():

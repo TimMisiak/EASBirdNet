@@ -567,6 +567,70 @@ func TestBirdNETFailingIsRetriedThenTheFileFails(t *testing.T) {
 	}
 }
 
+// The pause between passes grows while they keep failing -- 30 s and then
+// 60 s for the same file -- and a pass that gets through puts it back, so an
+// outage that fails every pass waits longer rather than being retried every
+// 30 s for as long as it lasts.
+func TestThePauseAfterAFailedPassGrowsAndResets(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = func(string) (birdnet.File, error) {
+		return birdnet.File{}, errors.New("birdnet: analyze.py: signal: killed")
+	}
+	f.queue.retryDelay = retryDelay
+
+	// Record what Run waited instead of waiting it.
+	var mu sync.Mutex
+	var waited []time.Duration
+	f.queue.pause = func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		waited = append(waited, d)
+		mu.Unlock()
+		return ctx.Err() == nil
+	}
+	paused := func() []time.Duration {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(waited)
+	}
+
+	f.card(db.StatusProcessing, quietFile)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go f.queue.Run(ctx)
+
+	// Three attempts on the one file: two pauses, and then it is failed, which
+	// is a pass that gets through.
+	want := []time.Duration{retryDelay, 2 * retryDelay}
+	waitFor(t, func() bool { return f.file(quietFile).Status == db.AudioFailed })
+	if got := paused(); !slices.Equal(got, want) {
+		t.Fatalf("paused %v, want %v", got, want)
+	}
+
+	// A card that arrives after that pass starts from the first delay again.
+	later := "OWL-20260914-SR05"
+	received := testNow
+	if _, err := f.store.CreateUpload(t.Context(), db.Upload{ID: later, Status: db.StatusProcessing, ReceivedAt: &received}); err != nil {
+		t.Fatal(err)
+	}
+	blob := storage.Name(later + "/q")
+	if err := os.MkdirAll(filepath.Join(f.dir, "uploads", later), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, filepath.FromSlash(blob)), []byte(quietFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "q.wav", Night: "2026-09-13", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
+		t.Fatal(err)
+	}
+	f.queue.Enqueue(later)
+
+	want = append(want, retryDelay, 2*retryDelay)
+	waitFor(t, func() bool { return len(paused()) >= len(want) })
+	if got := paused(); !slices.Equal(got, want) {
+		t.Errorf("paused %v, want %v", got, want)
+	}
+}
+
 func TestAudioMissingFromStorageFails(t *testing.T) {
 	f := newFixture(t)
 	f.bird.answer = owls

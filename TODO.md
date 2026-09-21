@@ -278,28 +278,6 @@ so this is now about forward deploys only.
 These matter because the docs are how the next person — or the same person in
 six months — decides what is true.
 
-### 6.3 Smaller drift, each a one-line fix
-
-- DEPLOYMENT.md's variable summary says only `image_tag` and `bootstrap_admin`
-  are required with no default. Also required: `oidc_microsoft_client_id`,
-  `oidc_microsoft_client_secret`, `session_key`. `subscription_id`,
-  `public_url` and `oidc_microsoft_tenant` are missing from the list entirely.
-  This is the paragraph a first-time deployer reads.
-- `scripts/deploy.sh` doesn't exist; it's `deploy.ps1`. Four references:
-  `infra/registry.tf:1`, `infra/variables.tf:36`, `infra/outputs.tf:12`,
-  `infra/app.tf:82`.
-- The analysis backoff never grows — `analysis.go:114-115` always sleeps the
-  constant `retryDelay` — while `analysis.go:62`, SCHEMA.md and CLAUDE.md all
-  say "30 s, then 60 s" / "30 s apart and growing".
-- `card-scan.js:29-30` says the directory handle is kept "so a resume can
-  re-read them without asking again", but the handle is dropped. A Chromium
-  resume asks for the folder again exactly like the input fallback.
-- `infra/app.tf:71-75` presents `max_replicas = 1` as absolute. During a
-  revision swap — i.e. every deploy — old and new revisions briefly overlap, so
-  two processes can run the queue and hold independent in-memory tus locks.
-  Deterministic detection ids make double analysis harmless; the comment should
-  say so, and it's an argument for not deploying mid-upload.
-
 ---
 
 ## 7. Verification gaps that gate the release

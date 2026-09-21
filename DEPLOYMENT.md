@@ -658,10 +658,15 @@ from this file to that one.
 | 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
 | 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, three probes with every value set, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
 
-**Variables** (`variables.tf`): `image_tag` and `bootstrap_admin` are required
-and have no default; `env`, `location`, `name_suffix`, `cpu`, `memory`,
-`log_retention_days`, `audio_retention_days`, `audio_backstop_days` and
-`grant_operator_blob_access` have the defaults this file describes. A `staging` copy is a second tfvars file with `env = "staging"`.
+**Variables** (`variables.tf`): five are required and have no default --
+`image_tag`, `bootstrap_admin`, `session_key`, `oidc_microsoft_client_id` and
+`oidc_microsoft_client_secret`. Everything else has the default this file
+describes: `subscription_id` (null, so `ARM_SUBSCRIPTION_ID` from the
+environment), `public_url` (empty, so the container app's own hostname),
+`oidc_microsoft_tenant` (`common`), `env`, `location`, `name_suffix`, `cpu`,
+`memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`
+and `grant_operator_blob_access`. A `staging` copy is a second tfvars file with
+`env = "staging"`.
 
 **Outputs** (`outputs.tf`): `app_url` and `app_fqdn`, `acr_name` (which
 `scripts/deploy.ps1` reads) and `acr_login_server`, `cosmos_endpoint`,
