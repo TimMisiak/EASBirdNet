@@ -122,6 +122,26 @@ func TestConfigFromEnvDatabase(t *testing.T) {
 	}
 }
 
+// The documented way to run the server is `go run ./cmd/server` from backend/,
+// so the default static directory is relative to backend/, not to the module
+// root or to cmd/server. Getting it wrong serves the API perfectly and 404s
+// every page, which looks like a broken app rather than a wrong path.
+func TestConfigFromEnvStaticDirDefaultServesTheFrontend(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_STATIC_DIR", "")
+	t.Setenv("BIRDSENSE_DB", "local")
+
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("default config: %v", err)
+	}
+	// This test runs in backend/cmd/server; the default is read from backend/.
+	index := filepath.Join("..", "..", cfg.StaticDir, "index.html")
+	if _, err := os.Stat(index); err != nil {
+		t.Errorf("BIRDSENSE_STATIC_DIR defaults to %q, which has no index.html when the server is run from backend/: %v", cfg.StaticDir, err)
+	}
+}
+
 func TestConfigFromEnvBootstrapAdmin(t *testing.T) {
 	signInEnv(t)
 	t.Setenv("BIRDSENSE_DB", "")

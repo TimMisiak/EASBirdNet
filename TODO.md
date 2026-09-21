@@ -288,18 +288,6 @@ what says whether the Detections tab's 30-day default window is the right size.
 These matter because the docs are how the next person — or the same person in
 six months — decides what is true.
 
-### 6.1 The documented dev quick-start serves no frontend
-`backend/cmd/server/main.go:218`, README.md *Quick start*, CLAUDE.md *Running it* — **[verified]**
-
-`BIRDSENSE_STATIC_DIR` defaults to `frontend`, but both docs say to run
-`cd backend && BIRDSENSE_DB=local go run ./cmd/server`. From `backend/` that
-resolves to `backend/frontend`, which doesn't exist. `curl localhost:8080/`
-returns `404 page not found`; the API works. The analyzer defaults in the same
-struct correctly use `../`.
-
-**If not fixed:** the first thing a new contributor does, exactly as documented,
-appears to be a completely broken app. Change the default to `../frontend`.
-
 ### 6.2 DEPLOYMENT.md and CLAUDE.md disagree about what has run in Azure — **[decide]** which is true
 DEPLOYMENT.md `:15-19`, `:385`, `:456` vs CLAUDE.md *State of the code*
 

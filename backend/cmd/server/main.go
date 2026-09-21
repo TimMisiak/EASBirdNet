@@ -240,8 +240,10 @@ type config struct {
 // a directory in dev mode, Azure Blob Storage everywhere else.
 func configFromEnv() (config, error) {
 	cfg := config{
-		Addr:      envOr("BIRDSENSE_ADDR", ":8080"),
-		StaticDir: envOr("BIRDSENSE_STATIC_DIR", "frontend"),
+		Addr: envOr("BIRDSENSE_ADDR", ":8080"),
+		// Relative to backend/, which is where `go run ./cmd/server` is run
+		// from (README.md); the image sets it to /app/frontend.
+		StaticDir: envOr("BIRDSENSE_STATIC_DIR", "../frontend"),
 		DB: db.Config{
 			Backend:        envOr("BIRDSENSE_DB", db.BackendCosmos),
 			LocalPath:      envOr("BIRDSENSE_LOCAL_DB_PATH", "data/birdsense.json"),
