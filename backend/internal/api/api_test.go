@@ -694,6 +694,50 @@ func TestCreateUploadRejectsBadInput(t *testing.T) {
 	}
 }
 
+// TestACardCannotDeclareAnImplausibleSize covers both halves of the bound: a
+// size no recorder could have written is refused, and a list crafted so the
+// int64 sums wrap can't register a card whose totals look small. A real card
+// still registers.
+func TestACardCannotDeclareAnImplausibleSize(t *testing.T) {
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
+
+	const huge = "9223372036854775807" // math.MaxInt64: two of these sum to -2
+	refused := map[string]string{
+		"a 10 TB file": oneNightBody("SW-03", "2026-09-14", "2026-09-12",
+			[]CardFile{{Path: "DATA/a.WAV", Bytes: 10 << 40, Night: "2026-09-12"}}),
+		"a card over the card bound": oneNightBody("SW-03", "2026-09-14", "2026-09-12",
+			[]CardFile{
+				{Path: "DATA/a.WAV", Bytes: maxFileBytes, Night: "2026-09-12"},
+				{Path: "DATA/b.WAV", Bytes: maxCardBytes, Night: "2026-09-12"},
+			}),
+		"sums that overflow int64": `{"stationId":"SW-03","pulledOn":"2026-09-14",
+			"nights":[{"date":"2026-09-12","files":1,"bytes":` + huge + `},
+			          {"date":"2026-09-12","files":1,"bytes":` + huge + `}],
+			"files":[{"path":"DATA/a.WAV","bytes":` + huge + `,"night":"2026-09-12"},
+			         {"path":"DATA/b.WAV","bytes":` + huge + `,"night":"2026-09-12"}]}`,
+	}
+	for what, body := range refused {
+		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want %d (%s)", what, rec.Code, http.StatusBadRequest, rec.Body)
+		}
+	}
+
+	// A card the size of a real one, in files the size of real ones.
+	files := make([]CardFile, 400)
+	for i := range files {
+		files[i] = CardFile{Path: fmt.Sprintf("DATA/20260912/%03d.WAV", i), Bytes: 300 << 20, Night: "2026-09-12"}
+	}
+	body := oneNightBody("SW-03", "2026-09-14", "2026-09-12", files)
+	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("a 120 GB card = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
+	}
+	if u := decodeInto[registeredBody](t, rec).Upload; u.TotalBytes != 400*(300<<20) {
+		t.Errorf("card totals %d bytes, want %d", u.TotalBytes, int64(400*(300<<20)))
+	}
+}
+
 func TestReRegisteringACardResumesIt(t *testing.T) {
 	mux, _ := newTestMux(t)
 	jane := signedIn(t, mux, db.RoleVolunteer)

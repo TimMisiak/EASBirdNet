@@ -45,6 +45,11 @@ func (h *handlers) tusEndpoint() http.Handler {
 	tus, err := tushandler.NewHandler(tushandler.Config{
 		StoreComposer: composer,
 		BasePath:      tusPath,
+		// No file on a card's list is anywhere near this -- cardList holds the
+		// list to the same bound -- so it is the backstop for a length that was
+		// never on one: a POST claiming more is refused before a byte is taken,
+		// and a PATCH stops reading a body at it.
+		MaxSize: maxFileBytes,
 		// Browsers only send files here: nothing downloads them, deletes them,
 		// or stitches partial uploads together.
 		DisableDownload:      true,

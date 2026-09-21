@@ -464,6 +464,13 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 			h.problem(w, http.StatusBadRequest, "each night needs a YYYY-MM-DD date and non-negative counts")
 			return
 		}
+		// A night is measured against the room the card has left rather than
+		// added and then checked, so a crafted list can't overflow the sums
+		// into a total small enough -- or negative enough -- to pass.
+		if n.Files > maxCardFiles-files || n.Bytes > maxCardBytes-bytes {
+			h.problem(w, http.StatusBadRequest, cardTooBig)
+			return
+		}
 		nights[i] = db.Night(n)
 		files += n.Files
 		bytes += n.Bytes
@@ -564,6 +571,22 @@ func (h *handlers) listedAsBefore(ctx context.Context, ref string, listed []db.A
 	return true, nil
 }
 
+// What a card may say it holds. A recorder fills a ~128 GB card with files of
+// a few hundred MB, so these leave room for a larger card and for a whole
+// night at a high sample rate in one file: they bound the absurd, not the
+// unusual. They are worth having because a declared length is what the server
+// then streams through the container into blob storage on a volunteer's word,
+// and because keeping every value and every running total inside them is what
+// stops the int64 sums from overflowing into a total that looks plausible.
+const (
+	maxFileBytes = 32 << 30 // 32 GiB, one file
+	maxCardBytes = 1 << 40  // 1 TiB, the whole card
+	maxCardFiles = 50_000   // one audioFiles document each
+)
+
+// cardTooBig is what a card claiming more than that is told.
+const cardTooBig = "that is more audio than a card can hold; check the folder you chose"
+
 // cardList checks a card's file list against the nights it was summed into,
 // and returns it as audio files, or else what is wrong with it.
 func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile, string) {
@@ -577,6 +600,10 @@ func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile,
 		}
 		if seen[p] {
 			return nil, fmt.Sprintf("the file list has %s twice", p)
+		}
+		// Measured against what the card has left, for the reason the nights are.
+		if f.Bytes > maxFileBytes || f.Bytes > maxCardBytes-bytes || len(listed) == maxCardFiles {
+			return nil, cardTooBig
 		}
 		seen[p] = true
 		bytes += f.Bytes

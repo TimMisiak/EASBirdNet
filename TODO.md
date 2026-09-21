@@ -168,18 +168,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.4 No upper bound on a declared file or card size
-`backend/internal/api/api.go:520-545`, `backend/internal/api/tus.go:45-65` — **[verified]**
-
-`cardList` rejects only `f.Bytes < 0`, and tusd's `Config.MaxSize` is left at 0
-(unlimited).
-
-**If not fixed:** a signed-in volunteer can register a card claiming a 10 TB
-file and stream it through the container into blob storage. The `int64` sums
-also overflow identically on both sides of the `bytes != wantBytes` check, so a
-crafted list can store a negative `totalBytes`. Set `MaxSize` and reject
-implausible per-file and per-card sizes.
-
 ### 4.5 A known advisory is reachable from the sign-in path
 `backend/go.mod` — **[verified]**
 

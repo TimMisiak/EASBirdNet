@@ -114,7 +114,7 @@ func (s *tusServer) do(method, url string, body []byte, header map[string]string
 }
 
 // create starts an upload of one file on a card, as tus-js-client does.
-func (s *tusServer) create(cookie *http.Cookie, reference, path string, size int) tusReply {
+func (s *tusServer) create(cookie *http.Cookie, reference, path string, size int64) tusReply {
 	s.t.Helper()
 	meta := []string{}
 	if reference != "" {
@@ -124,7 +124,7 @@ func (s *tusServer) create(cookie *http.Cookie, reference, path string, size int
 		meta = append(meta, "path "+base64.StdEncoding.EncodeToString([]byte(path)))
 	}
 	return s.do(http.MethodPost, tusPath, nil, map[string]string{
-		"Upload-Length":   strconv.Itoa(size),
+		"Upload-Length":   strconv.FormatInt(size, 10),
 		"Upload-Metadata": strings.Join(meta, ","),
 	}, cookie)
 }
@@ -140,7 +140,7 @@ func (s *tusServer) patch(cookie *http.Cookie, location string, offset int, chun
 // send uploads data in chunks of at most chunk bytes and returns the upload URL.
 func (s *tusServer) send(cookie *http.Cookie, reference, path string, data []byte, chunk int) string {
 	s.t.Helper()
-	created := s.create(cookie, reference, path, len(data))
+	created := s.create(cookie, reference, path, int64(len(data)))
 	if created.status != http.StatusCreated {
 		s.t.Fatalf("create %s = %d (%s)", path, created.status, created.body)
 	}
@@ -256,7 +256,7 @@ func TestTusRefusesFilesThatArentOnTheCard(t *testing.T) {
 		cookie *http.Cookie
 		ref    string
 		path   string
-		size   int
+		size   int64
 		want   int
 	}{
 		{"not signed in", nil, ref, reg.Files[1].Path, 100, http.StatusUnauthorized},
@@ -266,6 +266,8 @@ func TestTusRefusesFilesThatArentOnTheCard(t *testing.T) {
 		{"a file already in", jane, ref, listed, 100, http.StatusUnprocessableEntity},
 		{"someone else's card", marcus, ref, reg.Files[1].Path, 100, http.StatusNotFound},
 		{"a card that's been received", marcus, "OWL-20260821-SR03", "DATA/a.WAV", 100, http.StatusUnprocessableEntity},
+		// A length no card list could carry: tusd refuses it before a byte lands.
+		{"longer than a file can be", jane, ref, reg.Files[1].Path, maxFileBytes + 1, http.StatusRequestEntityTooLarge},
 	}
 	for _, tc := range cases {
 		if r := s.create(tc.cookie, tc.ref, tc.path, tc.size); r.status != tc.want {

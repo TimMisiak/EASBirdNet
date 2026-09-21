@@ -310,6 +310,13 @@ would have to read all ~128 GB a second time, and the server would have to carry
 a running hash across a file's PATCHes and read the blob back to resume one.
 What length doesn't catch is a byte flipped in place by a failing reader or bad
 memory, which BirdNET then reports as a file it can't read.
+A length is the volunteer's word, so it is bounded: `cardList` refuses a file
+over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is that
+same per-file bound for a length that was never on a card's list. The numbers
+leave room for a larger card than anyone runs; what they are there for is that
+a card is registered before a byte is sent, and every declared size is summed
+into an `int64` -- unbounded, a crafted list overflows those sums and registers
+a card whose `totalBytes` is negative.
 *Revisit when:* a real card yields files BirdNET can't read and we can't tell a
 corrupt transfer from a corrupt card. Then hash in the browser and verify in
 tusd's finish hook, before the file counts as received -- not at analysis time,
