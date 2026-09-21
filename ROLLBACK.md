@@ -109,12 +109,27 @@ being the same symptom.
 
 **The two revisions overlap.** `max_replicas = 1` bounds a *revision*, not the
 app, so during any swap -- a rollback included -- the outgoing and incoming
-replicas briefly run together, and both run the analysis queue. Detection ids
-are deterministic, so a file analyzed twice overwrites rather than duplicates.
-The real cost is tus: its locks are in the memory of one process, so a card
-being uploaded during the swap can have a file fail mid-`PATCH`. The browser
-resumes it, but it is a reason not to deploy or roll back mid-upload when it
-can wait -- *All uploads* shows what is in flight.
+replicas briefly run together, and both run the analysis queue. That costs
+duplicated work and not consistency, which is worth spelling out because the
+in-memory tus lock looks like it should make it cost more:
+
+- **An upload converges because the offset is the blob's, not a process's.**
+  tusd re-reads it from the uncommitted block list on every request and
+  answers 409 to a `PATCH` that doesn't match. So two `PATCH`es accepted at
+  once are necessarily at the same offset, carry the same bytes and stage the
+  same block id: each overwrites the other with itself.
+- **Analysis converges because every write is idempotent.** Both replicas
+  really do analyze the same file -- `queued` counts `analyzing`, so that a
+  restart resumes a file cut off mid-run, which means claiming a file can't
+  exclude a second process. Detection ids are deterministic, clips are the
+  same bytes under the same names, and a card's counts are tallied from its
+  documents rather than incremented.
+
+What a card being uploaded through a swap can still meet is a file that fails
+mid-`PATCH`, because the replica serving it went away. The browser resumes it.
+That makes a swap during an upload a nuisance rather than a hazard: prefer one
+when nothing is in flight -- *All uploads* shows what is -- but a rollback
+worth doing doesn't have to wait for a card.
 
 **Don't reach for `az containerapp update`.** It would set the image outside
 Terraform, and the next `terraform apply` -- anyone's, for any reason -- would

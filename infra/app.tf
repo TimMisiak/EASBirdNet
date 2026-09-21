@@ -74,14 +74,13 @@ resource "azurerm_container_app" "this" {
     #   file twice. Raising this needs a shared locker in internal/storage (or
     #   ingress session affinity) first. See CLAUDE.md and DEPLOYMENT.md.
     #
-    # max 1 is not absolute, though: it bounds a *revision*, not the app, so
-    # during any swap -- every deploy, and every rollback -- the outgoing and
-    # incoming replicas briefly run together, both running the queue and
-    # holding their own in-memory tus locks. Analyzing a file twice is
-    # harmless, because detection ids are deterministic and the second run
-    # overwrites the first; the cost is that a card being uploaded across the
-    # swap can have a PATCH reach the replica that doesn't hold its lock. So
-    # don't deploy mid-upload when it can wait (ROLLBACK.md).
+    # max 1 bounds a *revision*, not the app, so during any swap -- every
+    # deploy, and every rollback -- the outgoing and incoming replicas briefly
+    # run together, both running the queue and holding their own in-memory tus
+    # locks. That overlap costs duplicated work, not consistency: the tus
+    # offset is read from the blob on every request rather than held in a
+    # process, and every analysis write is idempotent. Nothing here needs
+    # serializing (ROLLBACK.md, *The two revisions overlap*).
     min_replicas = 1
     max_replicas = 1
 
