@@ -375,6 +375,11 @@ component writes for itself always wins.
 nothing inside a shadow root and every button in the app would fall back to the
 UA ring, which is what the tokens are there to replace. The two copies are kept
 in step by hand.
+Gotcha: `reset`'s `.visually-hidden` pins `top: 0; left: 0`, which the usual
+sr-only recipe doesn't. Without it the box sits at its static position but
+against the *page*, since it rarely has a positioned ancestor -- so a column
+label inside a scrolled table escapes the scroller and drags the whole document
+sideways, on a phone, with nothing to see there.
 
 **Go dependencies are fine; the stdlib already covers HTTP.** The "no
 dependencies" rule is about the *frontend* (npm packages, see *No build step*).

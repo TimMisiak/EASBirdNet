@@ -33,6 +33,18 @@ const sheet = (css) => {
  * inherited, so the document's rule reaches nothing inside a shadow root, and
  * every button and link in the app would fall back to the UA ring -- which is
  * what the tokens exist to replace, and what disappears against forest green.
+ *
+ * Gotcha: `.visually-hidden` is pinned to `top: 0; left: 0` rather than left at
+ * its static position, which is what the usual sr-only recipe does. An absolute
+ * box with `top`/`left` auto sits where it would have sat in flow, but against
+ * the nearest *positioned* ancestor -- and there usually isn't one, so it is
+ * laid out against the page itself and a clipping ancestor doesn't clip it. The
+ * column labels in a wide table live inside `.table-scroll`, off to the right
+ * of the scroller: unpinned, each one drags the whole document sideways by as
+ * much as the table is scrollable, and the page scrolls with nothing in view.
+ * Pinned, it can never fall outside its containing block. Nothing is lost --
+ * the box is 1px and clipped to nothing, and the accessibility tree reads DOM
+ * order, not layout.
  */
 export const reset = sheet(`
   *, *::before, *::after { box-sizing: border-box; }
@@ -40,6 +52,8 @@ export const reset = sheet(`
   :focus-visible { outline: 2px solid var(--bs-focus); outline-offset: 2px; }
   .visually-hidden {
     position: absolute;
+    top: 0;
+    left: 0;
     width: 1px;
     height: 1px;
     overflow: hidden;

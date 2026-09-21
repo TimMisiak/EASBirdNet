@@ -384,15 +384,6 @@ being rediscovered.
 
 ## Frontend details
 
-- **Two coordinator screens scroll the whole page sideways on a phone** —
-  `/admin/uploads` and `/admin/people` at 420px wide. **[verified]** The page
-  scrolls horizontally by 422px and 68px respectively; `/app/detections`, which
-  has the same kind of table, doesn't. It is not the table: `.table-scroll` and
-  `.tabs` both already set `overflow-x: auto`, `body.scrollWidth` and the
-  shell's `<main>` both measure exactly the viewport, and suppressing
-  `bs-admin-uploads`'s `.ref a::after` row-cover changes nothing — so something
-  else is overflowing the document without widening `<body>`. Reproduce with a
-  420px viewport and `window.scrollTo(9999, 0)`.
 - **Hard-coded spacing is pervasive despite the token rule** — `1.125rem`,
   `1.375rem`, `2.125rem` and friends in nearly every component, plus
   `rgba(35, 64, 47, 0.16)` at `bs-station-map.js:101`. Either widen the spacing
