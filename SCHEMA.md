@@ -318,9 +318,11 @@ overwrites rather than duplicates.
 | `correctedCommonName?`     | string  | |
 | `note?`                    | string  | |
 
-**`clip`**, a few seconds of the recording stored as its own WAV (mono, 16-bit,
-at the recording's sample rate), so a reviewer can hear the detection without
-the whole file:
+**`clip`**, a few seconds of the recording stored as its own FLAC (mono,
+16-bit, at the recording's sample rate, ~170 KB for a 3 s detection), so a
+reviewer can hear the detection without the whole file. Clips cut before FLAC
+are still WAV under the same names, so nothing may read a format off a stored
+one -- see CLAUDE.md, *Clips are FLAC*:
 
 | Field      | Type   | Notes |
 |------------|--------|-------|
@@ -385,7 +387,7 @@ Every read the API needs, and what it costs in Cosmos:
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
 | What was heard in one file (card page, a detection's neighbours) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
-| Every detection (Detections tab) | `ListDetections{Since, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a 30-day window — so the date range is what bounds the read |
+| Every detection (Detections tab) | `ListDetections{Since, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
 | Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
@@ -473,8 +475,8 @@ in Azure the storage lifecycle rule eventually deletes it (DEPLOYMENT.md).
 ## Audio retention
 
 A card's **original recordings are kept for a month** after the card is
-received, and its **detections and their clips are kept for good**. A card is
-~128 GB of audio against a few megabytes of clips, and nothing reads an
+received, and its **detections and their clips are kept for good**. A recorder
+yields ~5.5 GB of audio a day against ~0.7 GB of clips, and nothing reads an
 original once BirdNET has: `internal/analysis` is the only reader of
 `uploads/`, and the only audio a browser ever plays is a clip.
 

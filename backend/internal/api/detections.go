@@ -29,11 +29,22 @@ const (
 
 // defaultDetectionsDays bounds the list of every detection when the request
 // names no date range of its own. Without it the query is a cross-partition
-// read of every detection ever stored -- a season is millions of documents,
-// decoded whole into the memory of the one replica that is also running
-// BirdNET. The window is what the list is for anyway (what has been heard
-// lately, waiting to be reviewed); looking further back is a filter you set.
-const defaultDetectionsDays = 30
+// read of every detection ever stored, decoded whole into the memory of the
+// one replica that is also running BirdNET. The window is what the list is for
+// anyway (what has been heard lately, waiting to be reviewed); looking further
+// back is a filter you set.
+//
+// A week, because a recorder yields on the order of 4,000 detections a day
+// (TODO.md 3.4), so five of them fill db.MaxDetectionScan in under a fortnight
+// and a month of them is past it. This is the window a request that names no
+// dates falls back to; what the tab opens on is detection-list.js's
+// DEFAULT_DAYS, which matches it.
+const defaultDetectionsDays = 7
+
+// msgTooManyDetections answers a filter that matches more detections than the
+// replica will read at once (db.ErrTooMany). It names the ways out that the
+// tab actually offers, because a reviewer meeting this has widened the dates.
+const msgTooManyDetections = "that is more detections than can be listed at once; narrow the dates, or filter by review, species or confidence"
 
 // detectionQuery is what GET /detections was asked for.
 type detectionQuery struct {
@@ -68,7 +79,11 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 	}
 	ctx := r.Context()
 	found, err := h.store.ListDetections(ctx, q.filter)
-	if err != nil {
+	switch {
+	case errors.Is(err, db.ErrTooMany):
+		h.problem(w, http.StatusBadRequest, msgTooManyDetections)
+		return
+	case err != nil:
 		h.fail(w, r, err)
 		return
 	}

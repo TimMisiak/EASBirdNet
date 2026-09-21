@@ -337,9 +337,24 @@ func (s *jsonFile) GetDetection(_ context.Context, uploadID, id string) (Detecti
 }
 
 func (s *jsonFile) ListDetections(_ context.Context, f DetectionFilter) ([]Detection, error) {
+	return s.listDetections(f, MaxDetectionScan)
+}
+
+// listDetections is ListDetections with the ceiling passed in, so a test can
+// exercise ErrTooMany without storing MaxDetectionScan documents to do it.
+func (s *jsonFile) listDetections(f DetectionFilter, max int) ([]Detection, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := list(s.data.Detections, f.match)
+	out := []Detection{}
+	for _, d := range s.data.Detections {
+		if !f.match(d) {
+			continue
+		}
+		if max > 0 && len(out) == max {
+			return nil, fmt.Errorf("%w: more than %d documents match", ErrTooMany, max)
+		}
+		out = append(out, clone(d))
+	}
 	sortDetections(out)
 	return out, nil
 }

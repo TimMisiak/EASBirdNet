@@ -23,6 +23,10 @@ var (
 	// ErrConflict means a create collided with an existing id or unique field,
 	// or an update lost a race it couldn't retry its way out of.
 	ErrConflict = errors.New("db: conflict")
+	// ErrTooMany means a query matched more documents than the store will read
+	// into memory at once. The caller's answer is a narrower filter, not a
+	// retry. See MaxDetectionScan.
+	ErrTooMany = errors.New("db: too many documents for one read")
 )
 
 // Store is everything the API can ask of the database.
@@ -72,6 +76,7 @@ type Store interface {
 
 	GetDetection(ctx context.Context, uploadID, id string) (Detection, error)
 	// ListDetections returns matching detections in the order they were heard.
+	// A filter matching more than MaxDetectionScan of them is ErrTooMany.
 	ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error)
 	// UpsertDetections writes whole documents, creating or replacing each. A
 	// detection with no id gets DetectionID from its file, start and species.
@@ -92,6 +97,24 @@ type UploadFilter struct {
 	UserID string
 	Status string
 }
+
+// MaxDetectionScan is the most detections ListDetections will read for one
+// call; past it a query fails with ErrTooMany instead of being served.
+//
+// Neither backend can page or sort a cross-partition query (SCHEMA.md), so
+// every row a filter matches is decoded into the memory of the one replica
+// that is also running BirdNET. That replica has 2 GiB for everything
+// (infra/variables.tf), BirdNET's process tree peaks around 285 MB of it, and
+// tusd buffers a 50 MB chunk per upload in flight. Measured, a decoded
+// detection costs about 900 bytes of live heap and a little over twice that in
+// allocation churn while the page is read, so this ceiling is ~215 MB live and
+// ~530 MB churn: an order of magnitude clear of the limit, where an unbounded
+// read is not. Three months of a five-recorder program is about 1.9 million
+// detections, which measured 1.67 GiB and takes the replica down.
+//
+// It is a ceiling, not a page size. What keeps ordinary requests well under it
+// is the date range every list carries (api.defaultDetectionsDays).
+const MaxDetectionScan = 250_000
 
 // DetectionFilter narrows ListDetections. Zero fields match everything; leaving
 // UploadID empty searches every card.

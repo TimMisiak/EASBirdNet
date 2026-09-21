@@ -427,3 +427,55 @@ func ids(us []Upload) []string {
 	}
 	return out
 }
+
+// TestListDetectionsIsBounded holds the ceiling that keeps one request from
+// taking the replica down. Neither backend can page or sort a cross-partition
+// query, so every row a filter matches is decoded into the memory of the one
+// process that is also running BirdNET: a filter matching more than
+// MaxDetectionScan has to fail rather than be served. The Cosmos backend
+// enforces the same ceiling in the same place (scanDocs), which nothing here
+// can reach; this is the behaviour it has to match.
+func TestListDetectionsIsBounded(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	_, _, card := seedCard(t, s)
+	det := make([]Detection, 3)
+	for i := range det {
+		// StartSec differs so the ids do: they are derived from it (DetectionID).
+		det[i] = Detection{
+			AudioFileID: "af_1", DetectedAt: time.Date(2026, 9, 10, i, 0, 0, 0, time.UTC),
+			StartSec: float64(i), ScientificName: "Strix varia", Confidence: 0.9,
+		}
+	}
+	if err := s.UpsertDetections(ctx, card.ID, det); err != nil {
+		t.Fatal(err)
+	}
+
+	// The ceiling is passed in here only so this doesn't have to store
+	// MaxDetectionScan documents to reach it; ListDetections passes the real one.
+	file := s.(*jsonFile)
+	if _, err := file.listDetections(DetectionFilter{}, 2); !errors.Is(err, ErrTooMany) {
+		t.Errorf("3 detections under a ceiling of 2 = %v, want ErrTooMany", err)
+	}
+	under, err := file.listDetections(DetectionFilter{}, 3)
+	if err != nil || len(under) != 3 {
+		t.Errorf("3 detections under a ceiling of 3 = %d, %v; want all 3", len(under), err)
+	}
+	// A filter that narrows below the ceiling is the way out, and the answer a
+	// caller is told to reach for.
+	narrowed, err := file.listDetections(DetectionFilter{Since: time.Date(2026, 9, 10, 1, 0, 0, 0, time.UTC)}, 2)
+	if err != nil || len(narrowed) != 2 {
+		t.Errorf("narrowed to 2 under a ceiling of 2 = %d, %v; want both", len(narrowed), err)
+	}
+	if all, err := s.ListDetections(ctx, DetectionFilter{}); err != nil || len(all) != 3 {
+		t.Errorf("ListDetections = %d, %v; want all 3 well under MaxDetectionScan", len(all), err)
+	}
+
+	// MaxDetectionScan is sized for the replica, not for the dataset: measured,
+	// a decoded detection costs ~900 bytes of live heap and a little over twice
+	// that in churn, against the 2 GiB the container has for BirdNET and
+	// everything else. Raising it is a memory decision, so make it deliberately.
+	if MaxDetectionScan > 400_000 {
+		t.Errorf("MaxDetectionScan = %d: past ~400k a single list outgrows the replica's memory", MaxDetectionScan)
+	}
+}

@@ -136,25 +136,64 @@ state. (Retention still expires the audio, so nothing is stranded.)
 
 ## 3. Scale and cost — this bites during the first season, not later
 
-### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it — the measurement can now be read off the card that has run; the per-file cap is implementable now
-`backend/internal/analysis/analysis.go:276-312`, `backend/internal/analysis/merge.go:15-25` — **[verified]**
+### 3.4 Clips are the one cost that only grows, and nothing has decided what to do about it — **[decide]**
+`backend/internal/birdnet/birdnet.go:26`, `analyzer/clip.py`,
+`backend/internal/analysis/analysis.go:276-312` — **[verified]**
 
-Measured on the test clip: a 13.96 s detection produced a **1.23 MB** clip
-(44.1 kHz 16-bit mono; the 30 s cap makes ~2.6 MB the maximum). CLAUDE.md and
-SCHEMA.md both reason from "a card is ~128 GB of audio against a few megabytes
-of clips", and clips are kept **for good**. At `minConfidence = 0.25` with
-`topK = 5`, a noisy hour-long dawn file can merge to hundreds of detections, and
-nothing bounds clips per file.
+Measured, not extrapolated. A recorder yields about **4,000 detections a day**
+from about **5.5 GB of audio** (a real card, 38 files × 58 MB → 1,674
+detections), and a clip is about **170 KB** (a 3 s detection plus a second
+either side, FLAC at 44.1 kHz mono; measured 161–178 KB). So per recorder-day:
+**~0.7 GB of clips**, kept for good. At five recorders that is **~1.3 TB a
+year** that never expires — it passes the entire 830 GB originals footprint in
+about eight months and adds ~$25/month for every further year the program runs.
+CLAUDE.md, SCHEMA.md and DEPLOYMENT.md now carry these figures per
+recorder-day; nothing is reasoned per card any more, because a card is however
+many days happen to fit on it.
 
-**If not fixed:** clip storage — the one thing that never expires — grows
-without bound and may become the dominant long-term cost, while the retention
-policy that exists to control the bill only touches originals. Temp space is the
-short-term version of the same problem: every clip for a file is written to
-`os.MkdirTemp` before upload. Measure detections-per-file on the card that has
-already gone through Azure, then decide on a per-file cap, a higher clip
-threshold, or a smaller clip format. The same card says how many detections a
-card yields, which is what says whether the Detections tab's 30-day default
-window is the right size.
+Two things that were part of this item are settled and are not what is left:
+
+- **The list is no longer a way to take the replica down.** `db.MaxDetectionScan`
+  caps what one `ListDetections` will read (a wide filter is `ErrTooMany`, which
+  the API answers as a 400 naming the filters that would narrow it), and both
+  the server's default window and the tab's opening view are a week rather than
+  30 days and three months. Three months of five recorders measured 1.67 GiB of
+  live heap against the replica's 2 GiB, which is what this was.
+- **Temp space is fine and was never the problem.** A file's clips are ~7.5 MB
+  at the measured rate, ~50 MB for a card file of a few hundred MB.
+
+What is left is two decisions and one piece of work:
+
+1. **The detection threshold.** `birdnet.DefaultMinConfidence` is still `0.25`.
+   Raising it to `0.50` halves the clips, the documents, the request units and
+   the size of every list, measured on the same card. It costs the quiet and
+   distant calls in 0.25–0.50, and it is irreversible per card: originals are
+   gone a month on, so what isn't stored can never be gone back for. Note the
+   tab's own filter already starts at 50% (`CONFIDENCES`), so nothing below it
+   is reachable except the "Any" pill.
+2. **The clip format.** Opus measured **38 KB against FLAC's 153 KB** for the
+   same 5 s at 48 kHz — ~4×, and unlike the threshold it costs no detections.
+   CLAUDE.md's *Clips are FLAC* → *Revisit when* already names it. Two costs:
+   Opus is 48 kHz-only (libsndfile refuses 44.1 kHz outright), so `clip.py`
+   needs a resampler as a new pinned dependency; and `clipRate` reads the rate
+   off the clip's own header, so an Opus clip would report 48 kHz for a
+   44.1 kHz source and `<bs-spectrogram>` would draw the top band wrong.
+3. **A list that can still show a season.** The ceiling makes a wide ask a
+   message instead of a restart; it does not make a season browsable. Five
+   recorders fill `MaxDetectionScan` in about twelve days, so widening the
+   dates is something a reviewer will meet in ordinary work. The answer is the
+   precomputed summary document CLAUDE.md already names plus a query the
+   database pages itself — not a higher ceiling.
+
+**Also watch:** `publicOverview` reads every *confirmed* detection of the year
+(`overview.go:39`) and is under the ceiling only because confirming is bounded
+by how fast people can review. A season of diligent reviewing walks the landing
+page into the same wall, and there it is a 500 on the one page the public sees.
+The precomputed summary in (3) is the same fix.
+
+**Rejected:** a per-file cap on clips, which this item used to propose. It
+bounds the worst case but discards real detections in exactly the files with
+the most birds in them, and does nothing for the document count or the list.
 
 ### 3.5 The cost table contradicts `min_replicas = 1`
 DEPLOYMENT.md *Cost* vs `infra/app.tf:76` — **[verified]**

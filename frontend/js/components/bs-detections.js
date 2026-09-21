@@ -5,7 +5,7 @@ import { reviewChip } from "../upload-status.js";
 import { path, query, replaceQuery } from "../router.js";
 import {
   CONFIDENCES,
-  DEFAULT_MONTHS,
+  DEFAULT_DAYS,
   PAGE_SIZE,
   SORTS,
   STATUSES,
@@ -33,7 +33,7 @@ import "./bs-chip.js";
  * back, live in detection-list.js, so the detection page can step through this
  * same list without asking for it again.
  *
- * It opens on the past DEFAULT_MONTHS months, with those dates filled into the
+ * It opens on the past DEFAULT_DAYS days, with those dates filled into the
  * date fields rather than left blank: a list of detections is always bounded
  * (a date range is what keeps the query cheap), so the screen may as well say
  * what it is bounded to and let a reviewer widen it. Clearing “Heard from” hands
@@ -252,7 +252,7 @@ class Detections extends BaseElement {
     } else if (total === 0) {
       results.innerHTML = filtered
         ? `<p class="empty">No detections match those filters.</p>`
-        : `<p class="empty">BirdNET hasn't heard anything in the last ${DEFAULT_MONTHS} months. Detections show up here as each card is analyzed; set “Heard from” to look further back.</p>`;
+        : `<p class="empty">BirdNET hasn't heard anything in the last ${DEFAULT_DAYS} days. Detections show up here as each card is analyzed; set “Heard from” to look further back.</p>`;
     } else {
       results.innerHTML = `
         ${error ? `<p class="error" role="alert">Couldn't refresh the list: ${escapeHTML(error.message)}</p>` : ""}

@@ -325,7 +325,7 @@ func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]
 	if f.MinConfidence > 0 {
 		w.add("c.confidence >= @minConfidence", "@minConfidence", f.MinConfidence)
 	}
-	found, err := queryDocs[Detection](ctx, s.detections, f.UploadID, "SELECT * FROM c"+w.sql(), w.params...)
+	found, err := scanDocs[Detection](ctx, s.detections, f.UploadID, MaxDetectionScan, "SELECT * FROM c"+w.sql(), w.params...)
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +527,15 @@ feed:
 // gateway can serve: keep them to SELECT * ... WHERE, and sort, count and
 // de-duplicate in Go.
 func queryDocs[T any](ctx context.Context, c *azcosmos.ContainerClient, partition, query string, params ...azcosmos.QueryParameter) ([]T, error) {
+	return scanDocs[T](ctx, c, partition, 0, query, params...)
+}
+
+// scanDocs is queryDocs with a ceiling on how many documents it will decode:
+// past max it stops and returns ErrTooMany rather than reading the rest into
+// memory. A max of 0 reads everything, which is right for the containers whose
+// size the program bounds (people, recorders, a card's files). Only detections
+// grow without a bound of their own; see MaxDetectionScan.
+func scanDocs[T any](ctx context.Context, c *azcosmos.ContainerClient, partition string, max int, query string, params ...azcosmos.QueryParameter) ([]T, error) {
 	pk := azcosmos.NewPartitionKey()
 	if partition != "" {
 		pk = azcosmos.NewPartitionKeyString(partition)
@@ -537,6 +546,9 @@ func queryDocs[T any](ctx context.Context, c *azcosmos.ContainerClient, partitio
 		page, err := pager.NextPage(ctx)
 		if err != nil {
 			return nil, cosmosErr(err)
+		}
+		if max > 0 && len(out)+len(page.Items) > max {
+			return nil, fmt.Errorf("%w: more than %d documents match", ErrTooMany, max)
 		}
 		for _, item := range page.Items {
 			var v T

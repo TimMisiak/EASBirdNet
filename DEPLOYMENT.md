@@ -127,8 +127,9 @@ reading or writing documents. The app needs no control-plane role at all.
 
 ### 7. Storage account — `azurerm_storage_account`
 
-Holds the audio. At ~128 GB per card this is where the money goes, which is why
-originals are kept for only a month (see *Audio retention* and *Cost*).
+Holds the audio. At ~5.5 GB per recorder-day this is where the money goes,
+which is why originals are kept for only a month (see *Audio retention* and
+*Cost*).
 
 | Setting | Value | Why |
 |---------|-------|-----|
@@ -515,8 +516,10 @@ What it needs, beyond resources 7 and 8:
 ## Audio retention
 
 **A card's original recordings are kept for a month; its detections and their
-clips are kept for good.** At ~128 GB a card, keeping originals is most of the
-storage bill, and nothing reads one once BirdNET has: `internal/analysis` is
+clips are kept for good.** At ~5.5 GB a recorder-day against ~0.7 GB of clips,
+keeping originals is most of the storage bill in any one month -- though the
+clips, which never expire, pass them within the year (*Cost*) -- and nothing
+reads an original once BirdNET has: `internal/analysis` is
 the only reader of `audio/uploads/`, and the only audio a browser ever plays is
 a clip.
 
@@ -596,14 +599,23 @@ refuse the TLS handshake.
 
 ## Cost
 
-Rough order of magnitude at five recorders, one card each every two weeks
-(~130 cards a year). Check the Azure pricing calculator before relying on these.
+Rough order of magnitude at five recorders. **The unit is a recorder-day, not a
+card.** A card is however many days of recording happen to fit on it, so
+anything reasoned per card stops being true the moment the rotation, the card
+or the recorder's settings change -- and multiplying a card's capacity by a
+card count over-counts, because a card is swapped when it comes out of the
+field, not when it is full.
 
-| Item | Volume per year | Cost driver |
-|------|-----------------|-------------|
-| Audio in blob storage | ~2 cards held at a time ≈ **250 GB**, not 17 TB | Originals are deleted a month after a card is received (*Audio retention*), so this is flat rather than growing: about two cards' worth of hot LRS storage, tens of dollars a month. Without the policy it would be 130 cards × ~128 GB ≈ 17 TB by the end of a year, several hundred dollars a month. |
-| Clips in blob storage | 130 cards × a few MB per detection | Kept for good, and small enough to stay hot. Grows with the detection threshold, not with hours of audio. |
-| Cosmos DB, serverless | ~44k audio-file docs; detections depend on threshold (at 50 per file, ~2M docs, ~2 GB) | Low: a few dollars a year in request units, plus storage per GB-month. |
+Measured on real cards, one recorder yields about **4,000 detections a day**
+from about **5.5 GB of audio**, and a clip runs about **170 KB** (a 3 s
+detection plus a second either side, FLAC). Check the Azure pricing calculator
+before relying on any of this.
+
+| Item | Volume | Cost driver |
+|------|--------|-------------|
+| Audio in blob storage | 5 recorders × ~5.5 GB a day, held a month ≈ **830 GB**, flat | Originals are deleted a month after a card is received (*Audio retention*), so this doesn't grow: tens of dollars a month of hot LRS. Without the policy it would be ~10 TB by the end of a year, several hundred dollars a month. |
+| Clips in blob storage | ~0.7 GB per recorder-day ≈ **1.3 TB a year**, and kept for good | The only line that only ever grows. It passes the entire originals footprint after about eight months, and adds roughly $25 a month to the bill for every further year the program runs. What halves it is a higher detection threshold or a lossy clip format; see TODO.md 3.4. |
+| Cosmos DB, serverless | ~175k audio-file docs; **~7.7M detection docs a year, ~4.6 GB**, kept as long as their clips | Cheap per unit -- a few dollars a year in request units, plus storage per GB-month. The document count matters more for the detections list than for the bill: see `db.MaxDetectionScan`. |
 | Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |
 | Container Registry Basic | one small image | A few dollars a month. |
 | Log Analytics | low volume | Within the free ingestion allowance at this scale. |

@@ -22,8 +22,17 @@ import * as api from "./api.js";
 /** Rows per page, both in the list and in what stepping moves through. */
 export const PAGE_SIZE = 50;
 
-/** How far back the list looks until the date fields say otherwise. */
-export const DEFAULT_MONTHS = 3;
+/**
+ * How far back the list looks until the date fields say otherwise, matching
+ * the server's own window (api.defaultDetectionsDays).
+ *
+ * A week, not a season: a recorder yields on the order of 4,000 detections a
+ * day, and the server has to read every row a filter matches before it can
+ * sort or page it (SCHEMA.md), so a wider opening view than this is one the
+ * replica can't answer. Widening it is a date field away, and a range too wide
+ * to read says so rather than failing.
+ */
+export const DEFAULT_DAYS = 7;
 
 export const STATUSES = [
   { id: "", label: "All" },
@@ -45,17 +54,17 @@ function dayOf(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-/** The dates the list starts on: the DEFAULT_MONTHS months up to today. */
+/** The dates the list starts on: the DEFAULT_DAYS days up to today. */
 export function defaultDates(now = new Date()) {
   const from = new Date(now);
-  from.setMonth(from.getMonth() - DEFAULT_MONTHS);
+  from.setDate(from.getDate() - DEFAULT_DAYS);
   return { from: dayOf(from), to: dayOf(now) };
 }
 
 /**
  * The list's view as a query string gives it, anything unreadable left at its
  * default. dates are the range a query string that names no readable ones of
- * its own gets, so a bare /app/detections is the past DEFAULT_MONTHS months.
+ * its own gets, so a bare /app/detections is the past DEFAULT_DAYS days.
  */
 export function viewFrom(params, dates = defaultDates()) {
   const sort = Object.hasOwn(SORTS, params.get("sort")) ? params.get("sort") : "heard";

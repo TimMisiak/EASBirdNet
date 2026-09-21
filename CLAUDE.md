@@ -179,12 +179,25 @@ reported by the client, so a retried chunk can't count twice, and a card moves
 to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
-**A list of detections is always bounded.** `GET /detections` answers for the
-last 30 days when the request names no `since`, and says which window in
-`window`, which the Detections tab prints above the list. The tab itself opens
-on the past three months, with those dates filled into its date fields, so what
-bounds the list is on the screen and a reviewer can widen it; the server's
-window is what a request that names no dates at all still gets.
+**A list of detections is bounded twice: by a window, and by a ceiling.** A
+recorder yields on the order of 4,000 detections a day, the Cosmos SDK can't
+page or sort a cross-partition query (SCHEMA.md), and every row that matches is
+therefore decoded into the memory of the one replica that is also running
+BirdNET -- which has 2 GiB for that, BirdNET and tusd's buffers together. So:
+- `GET /detections` answers for the last **week** when the request names no
+  `since`, and says which window in `window`, which the Detections tab prints
+  above the list. The tab opens on the same week, with those dates filled into
+  its date fields, so what bounds the list is on the screen and a reviewer can
+  widen it; the server's window is what a request that names no dates at all
+  still gets.
+- `db.MaxDetectionScan` is the ceiling under the window: a filter matching more
+  detections than that is `db.ErrTooMany`, which the API answers as a 400
+  naming the filters that would narrow it. Measured, a decoded detection costs
+  ~900 bytes of live heap, so the ceiling is a few hundred MB and an unbounded
+  read is not -- three months of a five-recorder program measured 1.67 GiB,
+  which is the replica. A window keeps the ordinary request cheap; the ceiling
+  is what makes a careless one a message instead of a restart.
+
 `GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
 beside the page. `js/detection-list.js` is the browser's side of this: it reads
 the tab's filters and sort off the query string, asks for a page, and *holds*
@@ -192,16 +205,15 @@ the few pages it has fetched. That is what lets a detection opened from the
 list have Previous and Next step through the list -- in its order, across
 cards, and on into the next page when a reviewer reaches the end of one --
 without re-running the search on every step. A detection opened from anywhere
-else (a card, a link that carries no list) steps through its file instead. Neither is a nicety. A season is millions of detection
-documents, and the Cosmos SDK can't page or sort a cross-partition query
-(SCHEMA.md), so every row that matches is decoded into the memory of the one
-replica that is also running BirdNET. The default window is what makes the
-common case -- what has been heard lately, waiting to be reviewed -- cost a
-date range instead of a full scan; a page's station names are point reads of
-the cards on that page, for the same reason.
-*Revisit when:* someone needs a whole season on one screen, or the species
-tally above the list has to count what the window leaves out. Then the answer
-is a precomputed summary document, not a wider query.
+else (a card, a link that carries no list) steps through its file instead.
+Neither is a nicety: it is the same read, and holding the page is what keeps a
+reviewer from re-running it on every step. A page's station names are point
+reads of the cards on that page, for the same reason.
+*Revisit when:* a reviewer meets the ceiling in ordinary work rather than by
+widening the dates -- more recorders will do it, and so will a whole season on
+one screen or a species tally that has to count what the window leaves out.
+Then the answer is a precomputed summary document and a query the database
+pages itself, not a wider window and a higher ceiling.
 
 **The landing page is answered a minute at a time.** `GET /public/overview`
 needs no session, and answering it reads every recorder, every card and every
@@ -519,8 +531,8 @@ before FLAC leaves its old `.wav` behind; deleting the card sweeps the prefix.
 *Revisit when:* clips have to be small rather than exact. Then it is Opus, and
 the spectrogram wants drawing from something other than the archive copy.
 
-**Originals expire; clips don't.** A card is ~128 GB of audio against a few
-megabytes of clips, and nothing reads an original once BirdNET has:
+**Originals expire; clips don't.** A recorder yields ~5.5 GB of audio a day
+against ~0.7 GB of clips, and nothing reads an original once BirdNET has:
 `internal/analysis` is the only reader of `uploads/`, and the only audio a
 browser ever plays is a clip. So `internal/retention` sweeps every few hours in
 the server process and deletes a card's recordings a month after it was
@@ -696,7 +708,8 @@ Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
 minimum confidence and the days heard, and opens the same detection page, where Previous, Next and the arrow keys step
 through the list as filtered and sorted rather than through the file. It
-opens on the past three months, with those dates in its own date fields.
+opens on the past week, with those dates in its own date fields, and widening
+them past what one replica will read says so rather than failing.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
 My uploads, their own cards, where an unfinished one is resumed; and

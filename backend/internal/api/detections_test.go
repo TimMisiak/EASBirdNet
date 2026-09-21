@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -38,11 +40,20 @@ func TestListEveryDetection(t *testing.T) {
 	}
 
 	admin := signedIn(t, mux, db.RoleAdmin)
+	// This test is about what the list does with its rows, not about the window
+	// a request with no dates falls back to (defaultDetectionsDays, which
+	// TestEveryDetectionIsBoundedWithoutDates holds). So every ask here carries
+	// a range wide enough for all of seedProgram's, unless it names its own.
+	const everything = "since=2026-01-01T00:00:00Z"
 	list := func(query string) listedBody {
 		t.Helper()
-		rec := do(t, mux, http.MethodGet, "/api/v1/detections"+query, "", admin)
+		q := strings.TrimPrefix(query, "?")
+		if !strings.Contains(q, "since=") {
+			q = everything + "&" + q
+		}
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections?"+q, "", admin)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("GET detections%s = %d %s", query, rec.Code, rec.Body)
+			t.Fatalf("GET detections?%s = %d %s", q, rec.Code, rec.Body)
 		}
 		return decodeInto[listedBody](t, rec)
 	}
@@ -112,7 +123,7 @@ func TestListEveryDetection(t *testing.T) {
 		page.Detections[1].Confidence != 0.97 {
 		t.Errorf("page 2 by species = %d: %s", page.Total, commonNames(page.Detections))
 	}
-	if rec := do(t, mux, http.MethodGet, "/api/v1/detections?offset=100", "", admin); !strings.Contains(rec.Body.String(), `"detections":[]`) {
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections?"+everything+"&offset=100", "", admin); !strings.Contains(rec.Body.String(), `"detections":[]`) {
 		t.Errorf("past the end = %s, want an empty list", rec.Body)
 	}
 
@@ -126,7 +137,7 @@ func TestListEveryDetection(t *testing.T) {
 	}
 	// Every card's, for anyone signed in.
 	vol := signedIn(t, mux, db.RoleVolunteer)
-	if rec := do(t, mux, http.MethodGet, "/api/v1/detections", "", vol); rec.Code != http.StatusOK ||
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections?"+everything, "", vol); rec.Code != http.StatusOK ||
 		decodeInto[listedBody](t, rec).Total != 8 {
 		t.Errorf("volunteer GET detections = %d %s, want all 8", rec.Code, rec.Body)
 	}
@@ -163,12 +174,13 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 		return decodeInto[listedBody](t, rec)
 	}
 
-	// The default window leaves June out, of the rows and of the species.
+	// The default window leaves June out, of the rows and of the species, and
+	// August with it: seedProgram's six span a month, and five are this week.
 	recent := list("")
 	wantSince := testNow.AddDate(0, 0, -defaultDetectionsDays)
-	if recent.Total != 6 || recent.Window == nil || !recent.Window.Since.Equal(wantSince) ||
+	if recent.Total != 5 || recent.Window == nil || !recent.Window.Since.Equal(wantSince) ||
 		recent.Window.Days != defaultDetectionsDays {
-		t.Errorf("default list = %d detections, window %+v; want 6 since %v", recent.Total, recent.Window, wantSince)
+		t.Errorf("default list = %d detections, window %+v; want 5 since %v", recent.Total, recent.Window, wantSince)
 	}
 	for _, s := range recent.Species {
 		if s.CommonName == "Barn Owl" {
@@ -182,10 +194,11 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 		t.Errorf("since January = %d detections, window %+v; want 7 and no window", all.Total, all.Window)
 	}
 	// until with no since is the window before until, not everything before it.
-	before := list("?until=2026-06-02T00:00:00Z")
+	until := time.Date(2026, time.June, 2, 0, 0, 0, 0, time.UTC)
+	before := list("?until=" + until.Format(time.RFC3339))
 	if before.Total != 1 || before.Window == nil ||
-		!before.Window.Since.Equal(time.Date(2026, time.May, 3, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("until June 2nd = %d detections, window %+v; want the one barn owl since May 3rd", before.Total, before.Window)
+		!before.Window.Since.Equal(until.AddDate(0, 0, -defaultDetectionsDays)) {
+		t.Errorf("until June 2nd = %d detections, window %+v; want the one barn owl in the week before it", before.Total, before.Window)
 	}
 }
 
@@ -220,5 +233,31 @@ func TestCardDetectionsArePaged(t *testing.T) {
 		if rec := do(t, mux, http.MethodGet, "/api/v1/detections/OWL-20260913-SR05"+query, "", admin); rec.Code != http.StatusBadRequest {
 			t.Errorf("GET card detections%s = %d, want 400 (%s)", query, rec.Code, rec.Body)
 		}
+	}
+}
+
+// tooManyStore is the test program with a detections list too wide to read.
+type tooManyStore struct{ db.Store }
+
+func (tooManyStore) ListDetections(context.Context, db.DetectionFilter) ([]db.Detection, error) {
+	return nil, fmt.Errorf("%w: more than %d documents match", db.ErrTooMany, db.MaxDetectionScan)
+}
+
+// TestTooManyDetectionsIsAskedAgain holds what a reviewer meets when they
+// widen the dates past what the replica will read (db.MaxDetectionScan): a 400
+// that names the way out, not a 500 that reads as the site being broken -- and
+// not the unbounded read that ceiling exists to prevent.
+func TestTooManyDetectionsIsAskedAgain(t *testing.T) {
+	mux := muxFor(tooManyStore{newTestStore(t)}, testFiles(t), false)
+	admin := signedIn(t, mux, db.RoleAdmin)
+
+	rec := do(t, mux, http.MethodGet, "/api/v1/detections?since=2020-01-01T00:00:00Z", "", admin)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "narrow the dates") {
+		t.Errorf("a list too wide to read = %d %s, want 400 saying how to narrow it", rec.Code, rec.Body)
+	}
+	// A card's own list has no dates to narrow, so it is pointed at one file.
+	rec = do(t, mux, http.MethodGet, "/api/v1/detections/OWL-20260913-SR05", "", admin)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "?file=") {
+		t.Errorf("a card too big to list = %d %s, want 400 pointing at one file", rec.Code, rec.Body)
 	}
 }

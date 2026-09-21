@@ -947,6 +947,8 @@ func (h *handlers) listCardDetections(w http.ResponseWriter, r *http.Request, _ 
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		h.problem(w, http.StatusNotFound, missing)
+	case errors.Is(err, db.ErrTooMany):
+		h.problem(w, http.StatusBadRequest, "that card holds more detections than can be listed at once; ask for one file of it with ?file=")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
