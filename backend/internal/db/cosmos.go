@@ -16,9 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 )
 
-// UNTESTED: this backend compiles against the real SDK but has not yet been run
-// against an Azure account or the emulator. The local backend and its tests
-// define the behaviour this one has to match.
+// The local backend and its tests define the behaviour this one has to match.
 
 // Containers and their partition keys. DEPLOYMENT.md lists the same five; the
 // app never creates them (its data-plane role can't, and Terraform owns them).

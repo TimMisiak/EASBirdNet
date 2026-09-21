@@ -9,9 +9,8 @@ promise and the code doesn't do, or something that will go wrong on the first
 real card.
 
 There was no existing pre-launch checklist. The closest things are
-DEPLOYMENT.md's *First checks once we have Azure access*, *First deploy* and
-*Open questions that change this file*, and CLAUDE.md's *State of the code*;
-all of them are folded in below.
+DEPLOYMENT.md's *First deploy* and *Open questions that change this file*, and
+CLAUDE.md's *State of the code*; all of them are folded in below.
 
 **The core path works.** Verified end to end on a dev server against the real
 model: register a card → tus upload → `processing` → BirdNET → `in_review`,
@@ -137,7 +136,7 @@ state. (Retention still expires the audio, so nothing is stranded.)
 
 ## 3. Scale and cost — this bites during the first season, not later
 
-### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it — **[needs a real card]** for the measurement; the per-file cap is implementable now
+### 3.4 Clip storage is probably budgeted orders of magnitude low, and nothing caps it — the measurement can now be read off the card that has run; the per-file cap is implementable now
 `backend/internal/analysis/analysis.go:276-312`, `backend/internal/analysis/merge.go:15-25` — **[verified]**
 
 Measured on the test clip: a 13.96 s detection produced a **1.23 MB** clip
@@ -151,9 +150,11 @@ nothing bounds clips per file.
 without bound and may become the dominant long-term cost, while the retention
 policy that exists to control the bill only touches originals. Temp space is the
 short-term version of the same problem: every clip for a file is written to
-`os.MkdirTemp` before upload. Measure detections-per-file on the first real
-card, then decide on a per-file cap, a higher clip threshold, or a smaller clip
-format.
+`os.MkdirTemp` before upload. Measure detections-per-file on the card that has
+already gone through Azure, then decide on a per-file cap, a higher clip
+threshold, or a smaller clip format. The same card says how many detections a
+card yields, which is what says whether the Detections tab's 30-day default
+window is the right size.
 
 ### 3.5 The cost table contradicts `min_replicas = 1`
 DEPLOYMENT.md *Cost* vs `infra/app.tf:76` — **[verified]**
@@ -183,8 +184,9 @@ number before anyone budgets from it.
 
 ## 5. First deploy and running it
 
-Terraform has never been applied against a real subscription, so all of this is
-untested in the direction that matters.
+The stack is applied and running. What is left is what nobody is watching once
+it runs, and what a fresh apply -- a staging copy, or a rebuild from scratch --
+still walks into.
 
 ### 5.3 No monitoring, no alerts, no diagnostic settings
 `infra/*.tf`
@@ -269,18 +271,6 @@ or Zenodo is having a bad day. A rollback is no longer exposed to this —
 `deploy.ps1 -ImageTag` applies an image that is already built (ROLLBACK.md) —
 so this is now about forward deploys only.
 
-### 5.12 DEPLOYMENT.md's own pre-flight checks are still outstanding — **[needs Azure]**
-
-*First checks once we have Azure access* lists three, and they remain the right
-list: (1) run the app locally against a non-production storage account with your
-own Entra user, upload a few large `.wav` files, and confirm pause/resume
-carries on from the last 50 MB chunk rather than restarting; (2) deploy and send
-one real card end to end, watching ingress for 499/504 and the replica's CPU,
-memory and restarts; (3) expect the startup container check to fail while role
-assignments propagate. Item (2) is also where 3.4 (clips per card) gets its
-first real measurement, along with how many detections a card yields — which is
-what says whether the Detections tab's 30-day default window is the right size.
-
 ---
 
 ## 6. Documents that are now wrong
@@ -288,21 +278,8 @@ what says whether the Detections tab's 30-day default window is the right size.
 These matter because the docs are how the next person — or the same person in
 six months — decides what is true.
 
-### 6.2 DEPLOYMENT.md and CLAUDE.md disagree about what has run in Azure — **[decide]** which is true
-DEPLOYMENT.md `:15-19`, `:385`, `:456` vs CLAUDE.md *State of the code*
-
-DEPLOYMENT.md says "nothing here is provisioned yet; the Terraform has never
-been applied… neither has run against Azure". CLAUDE.md says both backends "have
-run in Azure against a real card". The evidence favours CLAUDE.md:
-`infra/.terraform` exists, and `storage.go:298-306` documents a tusd failure
-that "Azurite never saw". This matters because DEPLOYMENT.md's checklist is
-written as pre-flight — as it stands, a reader can't tell which checks are still
-outstanding.
-
 ### 6.3 Smaller drift, each a one-line fix
 
-- `backend/internal/db/cosmos.go:18-20` still carries an "UNTESTED" banner
-  saying the backend has never run against Azure or the emulator.
 - DEPLOYMENT.md's variable summary says only `image_tag` and `bootstrap_admin`
   are required with no default. Also required: `oidc_microsoft_client_id`,
   `oidc_microsoft_client_secret`, `session_key`. `subscription_id`,

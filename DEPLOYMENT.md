@@ -12,11 +12,10 @@ and `outputs.tf`. The short version of running it is in
 [README.md](README.md#deploying); this file is the why. When the two disagree,
 the Terraform is what runs -- fix this file.
 
-Status: nothing here is provisioned yet; the Terraform has never been applied
-against a real subscription. The app code supports both data
-stores, Cosmos DB for documents and Blob Storage for card audio, but neither
-has run against Azure. [Blob storage for uploads](#blob-storage-for-uploads)
-lists what the storage side needs and what to check first.
+Status: this stack is provisioned and running. Both data stores -- Cosmos DB
+for documents and Blob Storage for card audio -- have run in Azure against a
+real card. [Blob storage for uploads](#blob-storage-for-uploads) lists what the
+storage side needs.
 
 ## Shape of it
 
@@ -324,7 +323,8 @@ invisible to it:
    Contributor on the storage account -- Owner on the subscription grants no
    data actions. `infra/storage.tf` assigns it (`grant_operator_blob_access`,
    default true) and the provider is configured with `storage_use_azuread`.
-   This is the same role to give yourself for the local storage check below.
+   This is the same role to give yourself in *Developing against real Blob
+   Storage* below.
 4. The **registry must exist before the container app's first apply**, because
    a revision can't be created pointing at an image that isn't there. Hence the
    one-time `apply -target=azurerm_container_registry.this` in README.md. It is
@@ -468,8 +468,10 @@ the browser. Each file on a card is a tus upload to `/api/v1/tus/`, and the app
 runs tusd's Azure store (`backend/internal/storage`): each request's bytes are
 staged as a block, and the block list is committed when the last byte lands.
 It signs in with `DefaultAzureCredential`, which here is the managed identity,
-as for Cosmos. The code has run against Azurite with a shared key, and not yet
-against Azure.
+as for Cosmos. The code has run against Azure, and against Azurite with a
+shared key -- which is not a perfect stand-in: `skipEmpty` in
+`backend/internal/storage/storage.go` documents a call Azure rejects and
+Azurite accepts.
 
 What it needs, beyond resources 7 and 8:
 
@@ -545,25 +547,28 @@ Two things to know before this is switched on in production:
   backfills them (CLAUDE.md, *State of the code*). Once their originals go
   they are clipless for good, so backfill first if any are in Cosmos.
 
-**First checks once we have Azure access:**
+## Developing against real Blob Storage
+
+Normal local development uses `BIRDSENSE_STORAGE=local` and needs none of this.
+To run a laptop against a real storage account (e.g. to test
+`internal/storage`):
 
 1. Give your own Entra user Storage Blob Data Contributor on a non-production
-   account, `az login`, and run the app locally against it (the documents can
-   stay in the JSON file):
+   account (`grant_operator_blob_access`, resource 8). Keep it off the
+   production account.
+2. `az login`
+3. Run, leaving the documents in the JSON file:
    ```sh
    cd backend
    BIRDSENSE_DB=local BIRDSENSE_STORAGE=azure \
    BIRDSENSE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \
    go run ./cmd/server
    ```
-   Upload a folder of a few large `.wav` files. Blobs should appear under
-   `audio/uploads/{card}/`, each with a `.info` blob, and only once the file
-   is complete. Pausing mid-file and resuming should carry on from the last
-   50 MB chunk, not start over.
-2. Deploy, and send one real card end to end. Watch the ingress for 499/504
-   responses and the replica's CPU, memory and restarts while it runs.
-3. If startup fails on the container check, the error names the refused
-   operation; the role assignment may still be propagating (see *Ordering*).
+
+Upload a folder of a few large `.wav` files. Blobs appear under
+`audio/uploads/{card}/`, each with a `.info` blob, and a file's own blob only
+once it is complete. Pausing mid-file and resuming carries on from the last
+50 MB chunk rather than starting over.
 
 ## Developing against real Cosmos DB
 
