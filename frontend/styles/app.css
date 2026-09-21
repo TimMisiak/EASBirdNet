@@ -14,10 +14,8 @@
 
   /* Paper and ink */
   --bs-bg: #f7f5ef;
-  --bs-bg-deep: #e8e5dc;
   --bs-surface: #ffffff;
   --bs-surface-sunk: #f1efe8;
-  --bs-surface-band: #efede4;
   --bs-field: #fdfcf8;
 
   --bs-border: #dfdcd1;
@@ -45,7 +43,6 @@
   --bs-amber-hover: #e0a03a;
   --bs-amber-ink: #8a5a18;
   --bs-amber-edge: #7a5514;
-  --bs-amber-track: #e3d6b8;
 
   /* Parchment: advisory panels that aren't warnings */
   --bs-parchment: #efe9da;
@@ -123,8 +120,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Keyboard focus has to be visible through every shadow root, and the default
- * ring disappears against forest green. */
+/* The document's own focus ring. `outline` isn't inherited and a document
+ * stylesheet stops at the shadow boundary, so this one reaches nothing inside a
+ * component: the copy every shadow root gets is in shared-styles.js's `reset`,
+ * which BaseElement adopts. Keep the two in step. */
 :focus-visible {
   outline: 2px solid var(--bs-focus);
   outline-offset: 2px;

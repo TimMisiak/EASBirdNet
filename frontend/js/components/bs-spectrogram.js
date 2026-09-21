@@ -11,6 +11,11 @@ import { escapeHTML } from "./base-element.js";
  * Attribute: clip-start, the seconds into the recording where the clip begins,
  * for the time axis.
  *
+ * The plot is the transport: it is a slider, so the playhead moves by click or
+ * by key (arrows a second, Page a five, Home and End the ends). It swallows the
+ * arrows it uses, because the page around it binds the same two to stepping
+ * through the list -- a focused player has to mean the player.
+ *
  * Property: marks, what was heard, as [{label, spans: [{startSec, endSec}]}] in
  * seconds into the recording. Each mark gets its own strip above the plot, in
  * the next --bs-species-* colour, and a line in the legend.
@@ -90,6 +95,8 @@ class Spectrogram extends HTMLElement {
           cursor: pointer;
           overflow: hidden;
         }
+        /* The ring is on the stage itself, which has no padding to lose it in. */
+        .stage:focus-visible { outline-offset: -2px; }
         canvas { display: block; width: 100%; height: 100%; }
         .playhead {
           position: absolute;
@@ -142,8 +149,9 @@ class Spectrogram extends HTMLElement {
       <div class="plot">
         <div class="freq" aria-hidden="true"></div>
         <div class="area">
-          <div class="stage">
-            <canvas role="img"></canvas>
+          <div class="stage" tabindex="0" role="slider" aria-label="Playback position"
+               aria-describedby="picture" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+            <canvas id="picture" role="img"></canvas>
             <div class="playhead" hidden></div>
           </div>
           <div class="bands" aria-hidden="true"></div>
@@ -184,9 +192,47 @@ class Spectrogram extends HTMLElement {
     this.#stage.addEventListener("click", (event) => {
       if (!this.#duration) return;
       const box = this.#stage.getBoundingClientRect();
-      this.#audio.currentTime = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)) * this.#duration;
-      this.#tick();
+      this.#seek(Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)) * this.#duration);
     });
+    this.#stage.addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const to = this.#keySeek(event.key);
+      if (to === null) return;
+      // Arrow keys step the detections list on the page around this one, and
+      // they scroll it. Neither is what a focused player means by an arrow.
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.#duration) this.#seek(to);
+    });
+  }
+
+  /** Where a key moves the playhead, or null if it isn't one of ours. */
+  #keySeek(key) {
+    const now = this.#audio.currentTime || 0;
+    switch (key) {
+      case "ArrowLeft":
+      case "ArrowDown":
+        return now - 1;
+      case "ArrowRight":
+      case "ArrowUp":
+        return now + 1;
+      case "PageDown":
+        return now - 5;
+      case "PageUp":
+        return now + 5;
+      case "Home":
+        return 0;
+      case "End":
+        return this.#duration;
+      default:
+        return null;
+    }
+  }
+
+  /** Move the playhead, and everything that follows it, to a second in the clip. */
+  #seek(seconds) {
+    this.#audio.currentTime = Math.min(this.#duration, Math.max(0, seconds));
+    this.#tick();
   }
 
   connectedCallback() {
@@ -334,7 +380,7 @@ class Spectrogram extends HTMLElement {
     this.#legend.hidden = this.#marks.length === 0;
     this.#legend.innerHTML = `${this.#marks
       .map((mark, i) => `<span class="key"><span class="swatch" style="${colour(i)}"></span>${escapeHTML(mark.label)}</span>`)
-      .join("")}<span>Click the spectrogram to jump there</span>`;
+      .join("")}<span>Click the spectrogram, or focus it and use ← →, to move the playhead</span>`;
     this.#playhead.hidden = false;
     this.#tick();
   }
@@ -361,6 +407,12 @@ class Spectrogram extends HTMLElement {
     this.#time.textContent = this.#duration
       ? `${clock(this.#clipStart + now)} · ${Math.max(0, now).toFixed(1)} of ${this.#duration.toFixed(1)} s`
       : clock(this.#clipStart);
+    this.#stage.setAttribute("aria-valuemax", this.#duration.toFixed(1));
+    this.#stage.setAttribute("aria-valuenow", Math.max(0, now).toFixed(1));
+    this.#stage.setAttribute(
+      "aria-valuetext",
+      this.#duration ? `${clock(this.#clipStart + now)}, ${now.toFixed(1)} of ${this.#duration.toFixed(1)} seconds` : "No clip",
+    );
     if (!this.#audio.paused) this.#frame = requestAnimationFrame(this.#tick);
   };
 

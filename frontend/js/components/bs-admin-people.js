@@ -211,7 +211,10 @@ class AdminPeople extends BaseElement {
         tr.sub td { padding-top: 0; }
         tr.sub .error { margin-bottom: 0; }
         @media (max-width: 860px) { .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); } }
+        h1 { margin-bottom: var(--bs-space-5); }
       </style>
+
+      <h1>People</h1>
 
       <div class="columns">
         <div>

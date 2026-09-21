@@ -49,6 +49,14 @@ function announce() {
   }
 }
 
+// Every route change starts at the top of the page (<bs-app> does the
+// scrolling, once it has drawn the new page). Left on "auto" the browser would
+// also try to restore a scroll offset on Back, against a page that hasn't
+// fetched its rows yet and is the wrong height -- two answers, neither of them
+// where the reader was. One deterministic answer is worth more than a restore
+// that lands short.
+history.scrollRestoration = "manual";
+
 window.addEventListener("popstate", announce);
 
 // One delegated listener handles every in-app link, including links inside

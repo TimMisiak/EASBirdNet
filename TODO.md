@@ -384,48 +384,15 @@ being rediscovered.
 
 ## Frontend details
 
-- **Route changes move neither focus nor scroll, and never set
-  `document.title`** (`router.js:13-18`). Opening a detection renders at the old
-  scroll offset, focus stays put, and every history entry reads "Birdsense —
-  Eastside Audubon".
-- **Five of the eight signed-in pages have no heading at all** —
-  `bs-detections`, `bs-my-uploads`, `bs-admin-uploads`, `bs-admin-people`,
-  `bs-admin-recorders`. The only heading on those routes is the shell's
-  time-of-day greeting, so a screen-reader user hears "Good morning." and then a
-  table.
-- **The spectrogram can't be seeked without a mouse**
-  (`bs-spectrogram.js:185-190`). The `<audio>` has no `controls`; seeking is a
-  click listener on a div with no `tabindex`, `role` or key handler. ←/→ are
-  bound to navigation, not scrubbing, so the obvious keys do the opposite of
-  what an audio player implies.
-- **`bs-progress-bar` interpolates `label` into `aria-label` unescaped**
-  (`bs-progress-bar.js:35`). The caller escapes on the way in
-  (`bs-upload-file-list.js:55`), but the browser decodes entities, so
-  `getAttribute` hands back the raw path. Only a self-supplied filename reaches
-  it today; it is the one attribute interpolation that bypasses `escapeHTML`.
-- **A malformed percent-escape in a path throws before anything renders**
-  (`bs-app-page.js:79-84`) — `/admin/uploads/%zz` gives a blank page instead of
-  the 404 screen.
-- **`viaDirectoryPicker`'s bare `catch` turns every failure into "changed their
-  mind"** (`card-scan.js:33-37`) — a `SecurityError` or `NotAllowedError` is
-  reported as cancellation, which renders no message at all. Check
-  `error.name === "AbortError"`.
-- **The 404 page's link says "Back to the detections page" but points at `/`**,
-  the public landing page (`bs-app.js:110`).
-- **`<a href="#recheck" data-action="back">` is a fake link**
-  (`bs-upload-check.js:98`) — the hash goes nowhere and the click is intercepted.
-  Should be a `<button>`, like the identical control ten lines below.
-- **A bare `<span>` is a direct child of `<ol class="band">`**
-  (`bs-upload-steps.js:70`), which only permits `<li>`.
-- **The document-level `:focus-visible` ring never reaches a component**
-  (`app.css:128`) — outline isn't inherited and document stylesheets stop at the
-  shadow boundary, so every button and link falls back to the UA ring. The
-  comment above it claims the opposite. Move it into an adopted sheet, as
-  `.field:focus-visible` already is.
-- **Dead code**: `#route` assigned and never read (`bs-app.js:46,75`);
-  `const user = await session.signIn(body)` unused (`bs-signin-page.js:81`);
-  `--bs-amber-track`, `--bs-bg-deep`, `--bs-surface-band` defined and never
-  referenced.
+- **Two coordinator screens scroll the whole page sideways on a phone** —
+  `/admin/uploads` and `/admin/people` at 420px wide. **[verified]** The page
+  scrolls horizontally by 422px and 68px respectively; `/app/detections`, which
+  has the same kind of table, doesn't. It is not the table: `.table-scroll` and
+  `.tabs` both already set `overflow-x: auto`, `body.scrollWidth` and the
+  shell's `<main>` both measure exactly the viewport, and suppressing
+  `bs-admin-uploads`'s `.ref a::after` row-cover changes nothing — so something
+  else is overflowing the document without widening `<body>`. Reproduce with a
+  420px viewport and `window.scrollTo(9999, 0)`.
 - **Hard-coded spacing is pervasive despite the token rule** — `1.125rem`,
   `1.375rem`, `2.125rem` and friends in nearly every component, plus
   `rgba(35, 64, 47, 0.16)` at `bs-station-map.js:101`. Either widen the spacing

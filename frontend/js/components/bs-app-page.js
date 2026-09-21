@@ -32,6 +32,10 @@ import "./bs-admin-upload-detail.js";
  * URL still says which pages are admin-only. A card's own page,
  * /admin/uploads/{reference}, sits under All uploads, and so does each
  * detection's, /admin/uploads/{reference}/detections/{id}.
+ *
+ * The greeting is a salutation, not a heading: the one <h1> on every one of
+ * these routes is the page's own, so a reader moving by headings lands on what
+ * they came for rather than on "Good morning.".
  */
 const UPLOAD = "/app/upload";
 const DETECTIONS = "/app/detections";
@@ -76,6 +80,7 @@ class AppPage extends BaseElement {
     const step = STEPS[here];
     const shown = TABS.filter((t) => !t.admin || session.isAdmin());
     const tab = step ? TABS[0] : (shown.find((t) => here === t.path || here.startsWith(`${t.path}/`)) ?? TABS[0]);
+    // <bs-app> has no route for a path that doesn't decode, so these can't throw.
     const [listed = "", listedDetection = ""] = here.startsWith(`${DETECTIONS}/`)
       ? here.slice(DETECTIONS.length + 1).split("/").map(decodeURIComponent)
       : [];
@@ -93,6 +98,13 @@ class AppPage extends BaseElement {
           flex-wrap: wrap;
           margin-bottom: var(--bs-space-5);
         }
+        /* Set like the h1 it used to be; it is a greeting, not the page's name. */
+        .greeting {
+          font-family: var(--bs-font-display);
+          font-weight: 400;
+          font-size: clamp(1.9rem, 1.3rem + 2vw, 2.375rem);
+          letter-spacing: -0.01em;
+        }
         /* The coordinator's tabs are the same strip, set a little apart. */
         .sep {
           flex: none;
@@ -105,7 +117,7 @@ class AppPage extends BaseElement {
       </style>
 
       <div class="head">
-        <h1>${greeting()}</h1>
+        <p class="greeting">${greeting()}</p>
       </div>
 
       <nav class="tabs" aria-label="Your sections">

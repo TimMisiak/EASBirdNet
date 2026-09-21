@@ -95,7 +95,7 @@ class UploadCheck extends BaseElement {
         <div class="card-line">
           Card <span class="mono">${escapeHTML(card?.label ?? upload.stationId)}</span> ·
           ${count(upload.fileCount + (card?.skipped?.length ?? 0))} files read ·
-          <a href="#recheck" data-action="back">Choose a different card</a>
+          <a href="/app/upload">Choose a different card</a>
         </div>
       </div>
 
@@ -165,7 +165,7 @@ class UploadCheck extends BaseElement {
                    <p>
                      ${flagged === 1 ? "One night looks" : `${count(flagged)} nights look`} unusual.
                      That's fine — just check the notes say why, or
-                     <a href="/app/upload" data-action="back">edit the details</a>.
+                     <a href="/app/upload">edit the details</a>.
                    </p>
                  </div>`
               : ""

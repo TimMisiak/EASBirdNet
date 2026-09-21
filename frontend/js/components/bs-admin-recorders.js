@@ -246,7 +246,10 @@ class AdminRecorders extends BaseElement {
         .saved { margin-top: var(--bs-space-2); text-align: center; }
         .delete, .confirm { margin-top: var(--bs-space-3); }
         @media (max-width: 860px) { .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); } }
+        h1 { margin-bottom: var(--bs-space-5); }
       </style>
+
+      <h1>Recorders</h1>
 
       <div class="columns">
         <div>

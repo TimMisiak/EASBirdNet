@@ -40,6 +40,10 @@ class AdminUploads extends UploadsTable {
     });
   }
 
+  get heading() {
+    return "All uploads";
+  }
+
   get filters() {
     return FILTERS;
   }

@@ -97,6 +97,11 @@ export class UploadsTable extends BaseElement {
     return [];
   }
 
+  /** The page's heading. The shell's greeting isn't one, so this is the <h1>. */
+  get heading() {
+    return "";
+  }
+
   /** Load the list. Throwing keeps the table that is already showing. */
   async fetch() {
     throw new Error("uploads-table: a subclass supplies fetch()");
@@ -199,6 +204,7 @@ export class UploadsTable extends BaseElement {
 
     this.shadowRoot.innerHTML = `
       <style>
+        h1 { margin-bottom: var(--bs-space-5); }
         .filters { margin-bottom: var(--bs-space-5); }
         th { padding-top: 0; }
         td { padding-top: 0.9375rem; padding-bottom: 0.9375rem; font-size: 0.90625rem; vertical-align: middle; }
@@ -218,6 +224,7 @@ export class UploadsTable extends BaseElement {
         ${this.extraStyles}
       </style>
 
+      <h1>${this.heading}</h1>
       ${this.header}
 
       <div class="filters">

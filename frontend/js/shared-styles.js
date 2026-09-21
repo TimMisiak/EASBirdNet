@@ -28,10 +28,16 @@ const sheet = (css) => {
  * `[hidden]` rule loses to any `display` a component sets, so `el.hidden` needs
  * the `!important` form to mean anything. `.visually-hidden` is text for a
  * screen reader and nobody else -- the label on an actions column, say.
+ *
+ * The focus ring is here for the same reason as box-sizing: `outline` isn't
+ * inherited, so the document's rule reaches nothing inside a shadow root, and
+ * every button and link in the app would fall back to the UA ring -- which is
+ * what the tokens exist to replace, and what disappears against forest green.
  */
 export const reset = sheet(`
   *, *::before, *::after { box-sizing: border-box; }
   [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--bs-focus); outline-offset: 2px; }
   .visually-hidden {
     position: absolute;
     width: 1px;

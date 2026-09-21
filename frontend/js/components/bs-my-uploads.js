@@ -29,6 +29,10 @@ class MyUploads extends UploadsTable {
   /** A resume that failed, shown under its row: {reference, message}. */
   #resumeError = null;
 
+  get heading() {
+    return "My uploads";
+  }
+
   get filters() {
     return FILTERS;
   }

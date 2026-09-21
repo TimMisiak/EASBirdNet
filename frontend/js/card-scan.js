@@ -47,7 +47,12 @@ async function viaDirectoryPicker() {
   let handle;
   try {
     handle = await window.showDirectoryPicker({ id: "birdsense-card", mode: "read" });
-  } catch {
+  } catch (error) {
+    // Only an AbortError is "they closed the picker", which the screen shows as
+    // nothing at all. A SecurityError or a NotAllowedError is the browser
+    // refusing, and a volunteer who sees no message has no idea why nothing
+    // happened -- so those travel on to be reported.
+    if (error?.name !== "AbortError") throw error;
     throw new CancelledError();
   }
   const entries = [];

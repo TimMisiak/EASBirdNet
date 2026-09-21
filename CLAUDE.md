@@ -243,6 +243,16 @@ A route may `redirect` instead of naming a page, as a path or as a function of
 the path; the detections tab was two tabs once, so `/admin/detections` and
 `/admin/detections/{reference}/{id}` redirect to the `/app` ones, filters and
 all.
+A route also carries its `title`, and `<bs-app>` does for a route change what
+the browser does for itself on a full load: names the page, goes to the top of
+it, and moves the focus into the region it just drew, so the next Tab is on the
+new page. Only a change of *path* counts -- a page rewriting its own filters
+into the query string is the same page. `scrollRestoration` is `manual` for the
+same reason the title is set here: a page fetches before it can draw, so a
+restored offset lands against the wrong height. Gotcha: a path with a malformed
+percent-escape (`/admin/uploads/%zz`) matches no route and gets the 404 screen,
+because every page under a prefix route decodes the id off the end and
+`decodeURIComponent` throws -- which, out of `render()`, is a blank page.
 
 **Sign-in is OpenID Connect; the roster is the allow-list.** `internal/api/auth.go`
 runs the authorization-code flow (PKCE, state and nonce in one short-lived
@@ -344,7 +354,9 @@ three entries `admin`, which `session.isAdmin()` filters out. So a coordinator
 uploads a card, resumes their own, and reviews detections on the same screens a
 volunteer does, and a screen only has to be built and kept working once. The
 admin tabs keep their `/admin/` paths, because that is what the route guard
-reads and what makes an admin-only page obvious in a link.
+reads and what makes an admin-only page obvious in a link. The shell's greeting
+is a salutation, not a heading: the one `<h1>` on every one of these routes is
+the page's own, so a reader moving by headings lands on what they came for.
 *Revisit when:* the roster grows a third role, or a coordinator's version of a
 shared screen has to differ by more than what it lists.
 
@@ -358,6 +370,11 @@ root's own `<style>`, so an unlayered shared rule silently beats the component
 that adopted it. Every shared sheet is therefore wrapped in
 `@layer bs-base { ... }`, because unlayered rules outrank every layer -- what a
 component writes for itself always wins.
+`reset` is also where the keyboard focus ring lives, for the same reason
+`box-sizing` does: `outline` isn't inherited, so `app.css`'s rule reaches
+nothing inside a shadow root and every button in the app would fall back to the
+UA ring, which is what the tokens are there to replace. The two copies are kept
+in step by hand.
 
 **Go dependencies are fine; the stdlib already covers HTTP.** The "no
 dependencies" rule is about the *frontend* (npm packages, see *No build step*).

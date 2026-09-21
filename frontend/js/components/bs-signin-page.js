@@ -79,7 +79,7 @@ class SignInPage extends BaseElement {
     this.#error = null;
     this.render();
     try {
-      const user = await session.signIn(body);
+      await session.signIn(body);
       navigate("/app");
     } catch (error) {
       this.#busy = false;

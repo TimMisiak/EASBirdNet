@@ -177,7 +177,10 @@ class Detections extends BaseElement {
         .quiet { font-size: 0.8125rem; color: var(--bs-text-muted); }
         .window { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-4); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
+        h1 { margin-bottom: var(--bs-space-5); }
       </style>
+
+      <h1>Detections</h1>
 
       <div class="filters" role="group" aria-label="Review">
         ${STATUSES.map(

@@ -67,7 +67,7 @@ class UploadSteps extends BaseElement {
           return `<li class="step" data-state="${state}"
                       ${n === current ? 'aria-current="step"' : ""}>${n} ${label}</li>`;
         }).join("")}
-        ${reference ? `<span class="reference">${escapeHTML(reference)}</span>` : ""}
+        ${reference ? `<li class="reference">${escapeHTML(reference)}</li>` : ""}
       </ol>
     `;
   }
