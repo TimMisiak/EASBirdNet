@@ -83,6 +83,12 @@ func (h *handlers) tusAccess(uploads tushandler.DataStore, next http.Handler) ht
 	return h.requireSession(func(w http.ResponseWriter, r *http.Request, me db.User) {
 		ctx := r.Context()
 		if id := strings.Trim(strings.TrimPrefix(r.URL.Path, tusPath), "/"); id != "" {
+			// Anything that isn't an id the server minted is refused before the
+			// store is asked for it.
+			if !mintedUploadID(id) {
+				h.problem(w, http.StatusNotFound, "no such upload")
+				return
+			}
 			// An upload that can't be read is left to tusd, which answers 404.
 			if up, err := uploads.GetUpload(ctx, id); err == nil {
 				info, err := up.GetInfo(ctx)
@@ -103,6 +109,35 @@ func (h *handlers) tusAccess(uploads tushandler.DataStore, next http.Handler) ht
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, userKey{}, me)))
 	})
+}
+
+// mintedUploadID reports whether an id is the shape beforeFileUpload gives
+// every upload it creates: "{card}/{random}", two path elements of letters,
+// digits, "-", "_" and ".", neither of them dots alone.
+//
+// Gotcha: Go's ServeMux cleans the *escaped* path, so a percent-encoded ".."
+// survives routing and arrives here as a real path element -- without this,
+// HEAD /api/v1/tus/%2e%2e/secret reads, and PATCH writes, "<dir>/secret"
+// beside the uploads prefix rather than inside it.
+func mintedUploadID(id string) bool {
+	prefix, token, ok := strings.Cut(id, "/")
+	return ok && idElement(prefix) && idElement(token)
+}
+
+// idElement is one element of an upload id: what storagePrefix leaves, and
+// never a name that means a directory.
+func idElement(s string) bool {
+	if s == "" || strings.Trim(s, ".") == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // beforeFileUpload decides whether a file may be sent: its card is the

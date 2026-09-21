@@ -168,17 +168,6 @@ number before anyone budgets from it.
 
 ## 4. Security
 
-### 4.6 tus upload ids from the URL aren't validated before reaching the store
-`backend/internal/api/tus.go:80`
-
-Go's `ServeMux` cleans the *escaped* path, so percent-encoded traversal
-survives: `HEAD /api/v1/tus/%2e%2e/secret` reaches `filestore` at
-`<dir>/uploads/../secret.info`. It is **contained** — the ownership check
-(`tus.go:88-96`) rejects anything whose `.info` metadata doesn't name a card the
-caller can see, and only the server picks ids — so there is no known exposure.
-Worth a shape check anyway, because the containment is incidental rather than
-intended.
-
 ### 4.7 Two decisions to make deliberately, not by default — **[decide]**
 
 - **Volunteer addresses in logs.** `auth.go:337,347` and `main.go:398-402` log

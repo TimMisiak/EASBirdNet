@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	tushandler "github.com/tus/tusd/v2/pkg/handler"
+
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
@@ -71,15 +73,26 @@ type tusServer struct {
 	srv   *httptest.Server
 	store db.Store
 	files storage.Store
+	dir   string
 }
 
 func newTusServer(t *testing.T) *tusServer {
 	t.Helper()
-	store, files := newTestStore(t), testFiles(t)
+	return newTusServerIn(t, t.TempDir())
+}
+
+// newTusServerIn is newTusServer over a directory the test can look inside.
+func newTusServerIn(t *testing.T, dir string) *tusServer {
+	t.Helper()
+	files, err := storage.OpenLocal(dir)
+	if err != nil {
+		t.Fatalf("open test file storage: %v", err)
+	}
+	store := newTestStore(t)
 	mux := muxFor(store, files, false)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &tusServer{t: t, mux: mux, srv: srv, store: store, files: files}
+	return &tusServer{t: t, mux: mux, srv: srv, store: store, files: files, dir: dir}
 }
 
 type tusReply struct {
@@ -307,6 +320,49 @@ func TestTusUploadIsOnlyReachableThroughItsCard(t *testing.T) {
 		if r := s.do(method, location, nil, nil, jane); r.status != http.StatusMethodNotAllowed {
 			t.Errorf("%s an upload = %d, want 405", method, r.status)
 		}
+	}
+}
+
+// Go's ServeMux cleans the *escaped* path, so a percent-encoded ".." survives
+// routing and reaches the handler as a real path element. An id that isn't the
+// shape the server mints must be refused before the store is asked for it --
+// this plants the upload record such a request would otherwise reach, naming a
+// card the caller can see so the ownership check wouldn't stop it either.
+func TestTusRefusesUploadIdsTheServerDidntMint(t *testing.T) {
+	dir := t.TempDir()
+	s := newTusServerIn(t, dir)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 1))
+	ref := reg.Upload.Reference
+
+	bin := filepath.Join(dir, "secret")
+	if err := os.WriteFile(bin, audio(1)[:40], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := json.Marshal(tushandler.FileInfo{
+		ID: "../secret", Size: 100, Offset: 40,
+		MetaData: tushandler.MetaData{metaReference: ref, metaPath: reg.Files[0].Path},
+		Storage:  map[string]string{"Type": "filestore", "Path": bin},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin+".info", info, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"%2e%2e/secret", "..%2fsecret", "%2e%2e%2fsecret", "a/b/c", "nostroke", "./x", "../secret"} {
+		r := s.do(http.MethodHead, s.srv.URL+tusPath+id, nil, nil, jane)
+		if r.status != http.StatusNotFound || r.header.Get("Upload-Offset") != "" {
+			t.Errorf("HEAD %s = %d, offset %q; want 404 and no offset", id, r.status, r.header.Get("Upload-Offset"))
+		}
+		if r := s.patch(jane, s.srv.URL+tusPath+id, 40, audio(2)[40:]); r.status != http.StatusNotFound {
+			t.Errorf("PATCH %s = %d, want 404", id, r.status)
+		}
+	}
+	kept, err := os.ReadFile(bin)
+	if err != nil || len(kept) != 40 {
+		t.Errorf("planted file = %d bytes, %v; want the 40 it was written with", len(kept), err)
 	}
 }
 
