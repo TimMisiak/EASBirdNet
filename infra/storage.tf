@@ -60,6 +60,28 @@ resource "azurerm_role_assignment" "operator_blob" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
+# When the lifecycle rule below tiers an original down to cool. Cool is only
+# worth it for blobs that will still be here in a month: it bills a 30-day
+# minimum, so tiering a blob the app is about to delete costs a month of cool
+# storage for a whole card -- the opposite of a saving, and on every normal
+# card. Hence a date derived from the app's own, not a constant.
+locals {
+  # Cool's early-deletion period: a blob removed less than this after being
+  # tiered is billed as though it had stayed.
+  cool_minimum_days = 30
+
+  # When the rule tiers an original down. The app deletes a card's originals
+  # var.audio_retention_days after the card was *received*, while this rule
+  # counts from each blob's last modification, which is earlier by however
+  # long the card took to upload. So tier a cool period past the app's own
+  # date: a blob still here by then is one the app is never going to delete --
+  # an abandoned partial upload, a failed delete, or a card whose analysis
+  # never finished -- and it lives on until var.audio_backstop_days, long
+  # enough to be worth tiering. With retention off (0) nothing under
+  # audio/uploads/ is the app's to delete, so the plain cool period is right.
+  audio_cool_days = var.audio_retention_days == 0 ? local.cool_minimum_days : var.audio_retention_days + local.cool_minimum_days
+}
+
 # One rule, on the originals only: reviewers play clips on demand, and a clip
 # is what the retention policy keeps for good, so audio/clips/ is not named
 # here at all and stays hot.
@@ -73,10 +95,7 @@ resource "azurerm_role_assignment" "operator_blob" {
 # in the normal course of things.
 #
 # No tier_to_archive: an archived blob can't be read without a rehydrate, and
-# internal/analysis reads originals straight out of the container. Cool is
-# fine, and by var.audio_retention_days the app has usually deleted the blob
-# anyway; what this tiers is the stragglers the rule below eventually deletes,
-# which are always older than cool's 30-day early-deletion charge.
+# internal/analysis reads originals straight out of the container.
 resource "azurerm_storage_management_policy" "this" {
   storage_account_id = azurerm_storage_account.this.id
 
@@ -91,9 +110,18 @@ resource "azurerm_storage_management_policy" "this" {
 
     actions {
       base_blob {
-        tier_to_cool_after_days_since_modification_greater_than = 30
+        tier_to_cool_after_days_since_modification_greater_than = local.audio_cool_days
         delete_after_days_since_modification_greater_than       = var.audio_backstop_days
       }
+    }
+  }
+
+  # The backstop has to leave a tiered straggler a full cool period, or the
+  # delete above pays the early-deletion charge this rule exists to avoid.
+  lifecycle {
+    precondition {
+      condition     = var.audio_backstop_days >= local.audio_cool_days + local.cool_minimum_days
+      error_message = "audio_backstop_days (${var.audio_backstop_days}) must be at least ${local.audio_cool_days + local.cool_minimum_days}: the rule tiers originals to cool after ${local.audio_cool_days} days (audio_retention_days + ${local.cool_minimum_days}), and deleting them less than ${local.cool_minimum_days} days later is billed as though they had stayed."
     }
   }
 }

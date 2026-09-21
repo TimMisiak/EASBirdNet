@@ -241,19 +241,6 @@ it's added afterwards. The server logs the exact URI at startup
 documented procedure. This is also where the custom-domain decision
 (DEPLOYMENT.md *Open questions*) has to be made, since it changes the URI again.
 
-### 5.8 The lifecycle rule tiers blobs to cool just before the app deletes them
-`infra/storage.tf:94` vs `infra/variables.tf:112`
-
-`tier_to_cool_after_days_since_modification_greater_than = 30` is hard-coded,
-and `audio_retention_days` also defaults to 30. The lifecycle scan runs daily;
-the app's sweep runs every 6 hours.
-
-**If not fixed:** normal cards get tiered to cool a few hours before deletion
-and incur cool's 30-day early-deletion charge — roughly a card's full month of
-cool storage each time, the opposite of what the doc claims the rule is for.
-Either make it `audio_retention_days` + margin, or drop the cool action; the
-rule's purpose is the delete backstop anyway.
-
 ### 5.9 The irreplaceable data has the weakest durability in the stack
 `infra/storage.tf:23-28` vs `infra/cosmos.tf:41-44`
 

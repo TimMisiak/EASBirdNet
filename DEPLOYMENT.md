@@ -161,8 +161,8 @@ and anything a failed delete left behind:
 
 | Action | After | Why |
 |--------|-------|-----|
-| tier to cool | 30 days since last modification | For the stragglers the app doesn't manage. By then a managed blob is usually deleted anyway, and a straggler always outlives cool's 30-day early-deletion charge. |
-| delete | `audio_backstop_days`, 180 by default | Far enough out that it is never what removes a card normally. A card the app is deliberately holding — one whose analysis never finished — does lose its audio here, so don't tighten it towards the retention window. |
+| tier to cool | `audio_retention_days` + 30 days since last modification, so 60 by default | For the stragglers the app doesn't manage, which live until the delete below. Cool bills a 30-day minimum, so this deliberately clears the app's own date by a full cool period: the rule counts from each blob's last modification and the app counts from when the card was *received*, which is later by however long the card took to upload. Tiering at a flat 30 would put a normal card into cool hours before the app deletes it and bill a month of cool for the whole card. |
+| delete | `audio_backstop_days`, 180 by default | Far enough out that it is never what removes a card normally. A card the app is deliberately holding — one whose analysis never finished — does lose its audio here, so don't tighten it towards the retention window. It also has to stay 30 days clear of the tier above, which `storage.tf` checks with a `precondition` at plan time. |
 | tier to archive | *unset* | An archived blob can't be read without a rehydrate, and `internal/analysis` reads originals straight out of the container. |
 
 ### 8. Storage data-plane role — `azurerm_role_assignment`
@@ -519,7 +519,7 @@ The rules and the failure ordering are in SCHEMA.md, *Audio retention*.
 | Setting | Where | Default | What it does |
 |---------|-------|---------|--------------|
 | `audio_retention_days` | `infra/variables.tf` → `BIRDSENSE_AUDIO_RETENTION_DAYS` | 30 | The policy. `0` keeps originals until someone deletes the card. |
-| `audio_backstop_days` | `infra/variables.tf` → the lifecycle rule | 180 | The net for what the app never recorded. Not the policy; see resource 7. |
+| `audio_backstop_days` | `infra/variables.tf` → the lifecycle rule | 180 | The net for what the app never recorded. Not the policy; see resource 7. Must stay at least 60 days past `audio_retention_days`, which resource 7 checks at plan time. |
 
 Why the app rather than the lifecycle rule alone: the rule is prod-only, so dev
 would behave differently; it can't tell an analyzed file from one still queued;
