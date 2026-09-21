@@ -36,6 +36,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │       ├── shared-styles.js Constructable stylesheets for repeated primitives
 │       ├── format.js        Dates, sizes, counts, durations
 │       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
+│       ├── detection-list.js The detections list: its view, and the pages held
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
@@ -155,7 +156,13 @@ on the past three months, with those dates filled into its date fields, so what
 bounds the list is on the screen and a reviewer can widen it; the server's
 window is what a request that names no dates at all still gets.
 `GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
-beside the page. Neither is a nicety. A season is millions of detection
+beside the page. `js/detection-list.js` is the browser's side of this: it reads
+the tab's filters and sort off the query string, asks for a page, and *holds*
+the few pages it has fetched. That is what lets a detection opened from the
+list have Previous and Next step through the list -- in its order, across
+cards, and on into the next page when a reviewer reaches the end of one --
+without re-running the search on every step. A detection opened from anywhere
+else (a card, a link that carries no list) steps through its file instead. Neither is a nicety. A season is millions of detection
 documents, and the Cosmos SDK can't page or sort a cross-partition query
 (SCHEMA.md), so every row that matches is decoded into the memory of the one
 replica that is also running BirdNET. The default window is what makes the
@@ -541,7 +548,8 @@ be removed or was, and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
-minimum confidence and the days heard, and opens the same detection page. It
+minimum confidence and the days heard, and opens the same detection page, where Previous, Next and the arrow keys step
+through the list as filtered and sorted rather than through the file. It
 opens on the past three months, with those dates in its own date fields.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;

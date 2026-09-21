@@ -1,8 +1,9 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { clock, dateAtTime, longDate, shortDate } from "../format.js";
+import { clock, count, dateAtTime, longDate, shortDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
+import * as list from "../detection-list.js";
 import { navigate } from "../router.js";
 import * as session from "../session.js";
 import "./bs-chip.js";
@@ -11,11 +12,18 @@ import "./bs-spectrogram.js";
 /**
  * <bs-detection-detail reference="OWL-20260914-SR03" detection="det_…"> -- one
  * detection, for review: its clip to hear and see, and Confirm or Discard.
- * Previous and next step through the other detections in the same file.
  *
  * It is opened from a card's page, and goes back there, or from the list of
  * every detection, which it goes back to with that list's filters. Its links
  * stay under whichever it was opened from.
+ *
+ * Previous and Next step through whichever sequence it was opened from, which
+ * is the point of them: a reviewer who filtered the list to unreviewed Barn
+ * Owls, most confident first, is working through *that*, so stepping follows
+ * it -- across cards, and across the list's pages, where the next page is
+ * fetched as they reach it (detection-list.js holds the pages, so nothing
+ * re-runs the search). Opened from a card instead, or from a link that lost
+ * the list, they step through the file's own detections in the order heard.
  *
  * The other species BirdNET heard during the clip, from the same file's
  * detections, are marked on the spectrogram beside this one and listed below
@@ -34,21 +42,51 @@ import "./bs-spectrogram.js";
 
 /**
  * How many of the file's detections to ask for at once: the API's largest
- * page. They are what Previous and Next step through, and what the spectrogram
- * marks as also heard, so a file with more than this many is stepped through
- * up to here rather than to its end.
+ * page. They are what the spectrogram marks as also heard, and what stepping
+ * follows when there is no list to follow, so a file with more than this many
+ * is stepped through up to here rather than to its end.
  */
 const SIBLINGS_LIMIT = 500;
+
+/**
+ * The last file's detections, kept across navigations. Stepping through a
+ * night stays in one file for run after run, and asking for up to
+ * SIBLINGS_LIMIT of them again on every step is the one expensive thing about
+ * a step that doesn't change file.
+ */
+let lastFile = { key: "", detections: [] };
+
+/** A file's detections, in the order heard. They are a convenience: [] will do. */
+async function fileDetections(reference, fileId) {
+  const key = `${reference}/${fileId}`;
+  if (lastFile.key === key) return lastFile.detections;
+  const detections = await api
+    .fetchFileDetections(reference, fileId, SIBLINGS_LIMIT)
+    .then((body) => body.detections, () => []);
+  lastFile = { key, detections };
+  return detections;
+}
 
 class DetectionDetail extends BaseElement {
   static styles = [typography, controls, panels, tables];
   static observedAttributes = ["reference", "detection", "list"];
 
-  /** {status, upload, file, detection, siblings, error}; siblings are the file's detections, in order. */
+  /**
+   * {status, upload, file, detection, siblings, place, error}. siblings are
+   * the file's detections, in order; place is where this detection sits in
+   * the list it was opened from ({index, total, prev, next}), or null when
+   * there is no such list to sit in.
+   */
   #state = { status: "loading" };
   /** The verdict being saved, if one is. */
   #saving = "";
   #saveError = "";
+  /**
+   * Which detection the last load was for. Upgrading this element reports
+   * every attribute it was written with and then connects, which is four
+   * notices of the same detection; this is what makes that one load.
+   */
+  #asked = "";
 
   connectedCallback() {
     super.connectedCallback();
@@ -60,7 +98,7 @@ class DetectionDetail extends BaseElement {
     document.removeEventListener("keydown", this.#onKey);
   }
 
-  /** ← and → step through the file's detections; space plays or pauses the clip. */
+  /** ← and → step through the list or the file; space plays or pauses the clip. */
   #onKey = (event) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     if (this.#state.status !== "ready") return;
@@ -70,11 +108,11 @@ class DetectionDetail extends BaseElement {
     if (typing) return;
 
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      const { prev, next } = this.#neighbours();
+      const { prev, next } = this.#steps();
       const to = event.key === "ArrowLeft" ? prev : next;
       if (!to) return;
       event.preventDefault();
-      navigate(this.#href(to.id));
+      navigate(to);
     } else if (event.key === " ") {
       // A focused button or link already answers space itself.
       if (focus instanceof Element && focus.closest("button, a")) return;
@@ -85,14 +123,31 @@ class DetectionDetail extends BaseElement {
     }
   };
 
-  /** The detections either side of this one in its file, or null at either end. */
-  #neighbours() {
-    const { detection, siblings } = this.#state;
+  /**
+   * What Previous and Next step through: the list this detection was opened
+   * from when it was opened from one, and otherwise the file's own detections.
+   * {scope, at, of, prev, next}, where at is the 0-based place in that
+   * sequence (-1 if it isn't in it), of is how long it is, and prev and next
+   * are hrefs or null at either end.
+   */
+  #steps() {
+    const { detection, siblings, place } = this.#state;
+    if (place) {
+      return {
+        scope: "list",
+        at: place.index,
+        of: place.total,
+        prev: place.prev && this.#stepHref(place.prev),
+        next: place.next && this.#stepHref(place.next),
+      };
+    }
     const at = siblings.findIndex((s) => s.id === detection.id);
     return {
+      scope: "file",
       at,
-      prev: at > 0 ? siblings[at - 1] : null,
-      next: at >= 0 && at < siblings.length - 1 ? siblings[at + 1] : null,
+      of: siblings.length,
+      prev: at > 0 ? this.#href(siblings[at - 1].id) : null,
+      next: at >= 0 && at < siblings.length - 1 ? this.#href(siblings[at + 1].id) : null,
     };
   }
 
@@ -120,11 +175,7 @@ class DetectionDetail extends BaseElement {
   }
 
   attributeChangedCallback() {
-    if (!this.isConnected) return;
-    this.#state = { status: "loading" };
-    this.#saving = this.#saveError = "";
-    this.render();
-    this.#load();
+    if (this.isConnected) this.#load();
   }
 
   get reference() {
@@ -144,19 +195,29 @@ class DetectionDetail extends BaseElement {
   async #load() {
     const reference = this.reference;
     const id = this.detectionId;
+    const asked = `${reference}\n${id}\n${this.getAttribute("list") ?? ""}`;
+    if (asked === this.#asked) return;
+    this.#asked = asked;
+    this.#state = { status: "loading" };
+    this.#saving = this.#saveError = "";
+    this.render();
+
+    const view = this.#view;
     let next;
     try {
-      const { upload, file, detection } = await api.fetchDetection(reference, id);
-      // Previous and next are a convenience; the page works without them.
-      const siblings = await api
-        .fetchFileDetections(reference, file.id, SIBLINGS_LIMIT)
-        .then((body) => body.detections)
-        .catch(() => []);
-      next = { status: "ready", upload, file, detection, siblings };
+      // Where this sits in the list needs neither the detection nor the file,
+      // so it is asked for beside them -- and usually answers from the page
+      // the reviewer opened this from, without asking anyone.
+      const [{ upload, file, detection }, place] = await Promise.all([
+        api.fetchDetection(reference, id),
+        view ? list.place(view, reference, id).catch(() => null) : null,
+      ]);
+      const siblings = await fileDetections(reference, file.id);
+      next = { status: "ready", upload, file, detection, siblings, place };
     } catch (error) {
       next = { status: "error", error };
     }
-    if (reference !== this.reference || id !== this.detectionId) return;
+    if (asked !== this.#asked) return;
     this.#state = next;
     if (this.isConnected) this.render();
   }
@@ -173,6 +234,8 @@ class DetectionDetail extends BaseElement {
       this.#state.detection = saved;
       const i = siblings.findIndex((d) => d.id === saved.id);
       if (i >= 0) siblings[i] = saved;
+      // The list's own rows are held for stepping; a verdict shows in them too.
+      list.reviewed(this.reference, saved);
     } catch (error) {
       this.#saveError = error.message;
     }
@@ -187,19 +250,43 @@ class DetectionDetail extends BaseElement {
     return { path: url.pathname, search: url.search };
   }
 
+  /** That list's view -- its filters, sort and page -- or null. */
+  get #view() {
+    const from = this.#list;
+    return from ? list.viewFrom(new URLSearchParams(from.search)) : null;
+  }
+
+  /**
+   * A link to another detection in the same file: under the list it was
+   * opened from, so the way back survives, or under the card.
+   */
   #href(id) {
     const ref = encodeURIComponent(this.reference);
-    const list = this.#list;
-    return list
-      ? `${list.path}/${ref}/${encodeURIComponent(id)}${list.search}`
+    const from = this.#list;
+    return from
+      ? `${from.path}/${ref}/${encodeURIComponent(id)}${from.search}`
       : `/admin/uploads/${ref}/detections/${encodeURIComponent(id)}`;
+  }
+
+  /**
+   * A link to the next or previous row of the list: its own card, and the
+   * list's page rewritten to the one that row is on, so "All detections" goes
+   * back to where the reviewer would find it.
+   */
+  #stepHref({ reference, id, page }) {
+    const from = this.#list;
+    const params = new URLSearchParams(from.search);
+    if (page > 1) params.set("page", page);
+    else params.delete("page");
+    const search = params.toString();
+    return `${from.path}/${encodeURIComponent(reference)}/${encodeURIComponent(id)}${search ? `?${search}` : ""}`;
   }
 
   render() {
     const { status, error } = this.#state;
-    const list = this.#list;
-    const back = list
-      ? { href: `${list.path}${list.search}`, label: "All detections" }
+    const from = this.#list;
+    const back = from
+      ? { href: `${from.path}${from.search}`, label: "All detections" }
       : { href: `/admin/uploads/${encodeURIComponent(this.reference)}`, label: this.reference };
 
     this.shadowRoot.innerHTML = `
@@ -267,19 +354,20 @@ class DetectionDetail extends BaseElement {
   }
 
   #page() {
-    const { upload, file, detection: d, siblings } = this.#state;
-    const { at, prev, next } = this.#neighbours();
+    const { upload, file, detection: d } = this.#state;
+    const steps = this.#steps();
     const span = d.endSec - d.startSec;
     const windows = Math.round(span / 3);
+    const where = steps.scope === "list" ? "in this list" : "in this file";
 
     return `
       <div class="nav">
-        <span class="eyebrow">${at >= 0 ? `Detection ${at + 1} of ${siblings.length} in this file` : "Detection"}</span>
+        <span class="eyebrow">${steps.at >= 0 ? `Detection ${count(steps.at + 1)} of ${count(steps.of)} ${where}` : "Detection"}</span>
         ${
-          siblings.length > 1
+          steps.of > 1
             ? `<span class="steps">
-                 ${prev ? `<a href="${escapeHTML(this.#href(prev.id))}">← Previous</a>` : `<span class="off">← Previous</span>`}
-                 ${next ? `<a href="${escapeHTML(this.#href(next.id))}">Next →</a>` : `<span class="off">Next →</span>`}
+                 ${steps.prev ? `<a href="${escapeHTML(steps.prev)}">← Previous</a>` : `<span class="off">← Previous</span>`}
+                 ${steps.next ? `<a href="${escapeHTML(steps.next)}">Next →</a>` : `<span class="off">Next →</span>`}
                </span>`
             : ""
         }
@@ -333,7 +421,7 @@ class DetectionDetail extends BaseElement {
           </dl>
           ${this.#alsoHeardSection()}
         </div>
-        <section class="panel review" aria-live="polite">${this.#reviewPanel(next)}</section>
+        <section class="panel review" aria-live="polite">${this.#reviewPanel(steps.next)}</section>
       </div>
     `;
   }
@@ -378,6 +466,7 @@ class DetectionDetail extends BaseElement {
     return `<bs-chip kind="${kind}">${escapeHTML(label)}</bs-chip>`;
   }
 
+  /** next is the href of the next detection to review, or null at the end. */
   #reviewPanel(next) {
     const d = this.#state.detection;
     // dateAtTime ends in "a.m." or "p.m.", which is already the full stop.
@@ -406,7 +495,7 @@ class DetectionDetail extends BaseElement {
         }
       </div>
       ${this.#saveError ? `<p class="error" role="alert">Couldn't save that: ${escapeHTML(this.#saveError)}</p>` : ""}
-      ${d.reviewStatus !== "unreviewed" && next ? `<a class="next" href="${escapeHTML(this.#href(next.id))}">Next detection →</a>` : ""}
+      ${d.reviewStatus !== "unreviewed" && next ? `<a class="next" href="${escapeHTML(next)}">Next detection →</a>` : ""}
       <p class="note">Only confirmed detections appear on the public page. Discarded ones are kept, to measure BirdNET against.</p>
     `;
   }
@@ -414,7 +503,7 @@ class DetectionDetail extends BaseElement {
   /** Redraws what a verdict changes, leaving the clip alone. */
   #renderReview() {
     if (this.#state.status !== "ready") return;
-    const { next } = this.#neighbours();
+    const { next } = this.#steps();
     const panel = this.$(".review");
     const chip = this.$(".chip-slot");
     if (panel) panel.innerHTML = this.#reviewPanel(next);

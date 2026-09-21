@@ -38,7 +38,15 @@ export function onNavigate(listener) {
 }
 
 function announce() {
-  for (const listener of listeners) listener(path());
+  // Drawing a path is what swaps the elements that listen for it, so the set
+  // changes under this loop: a snapshot keeps the ones that subscribed
+  // part-way through out (they are already drawing this path), and the
+  // membership check keeps the ones that have just been torn down out. Either
+  // one left in draws the same path a second time.
+  const at = path();
+  for (const listener of [...listeners]) {
+    if (listeners.has(listener)) listener(at);
+  }
 }
 
 window.addEventListener("popstate", announce);

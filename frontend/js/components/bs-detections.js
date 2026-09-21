@@ -3,7 +3,17 @@ import { controls, forms, tables, typography } from "../shared-styles.js";
 import { count, dateAtTime } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import { path, query, replaceQuery } from "../router.js";
-import * as api from "../api.js";
+import {
+  CONFIDENCES,
+  DEFAULT_MONTHS,
+  PAGE_SIZE,
+  SORTS,
+  STATUSES,
+  defaultDates,
+  loadPage,
+  paramsFor,
+  viewFrom,
+} from "../detection-list.js";
 import * as session from "../session.js";
 import "./bs-chip.js";
 
@@ -19,7 +29,9 @@ import "./bs-chip.js";
  *
  * The filters live in the query string (/app/detections?species=Strix+varia),
  * so a reload or a link to a colleague shows the same list. The server filters,
- * sorts and pages; this only asks.
+ * sorts and pages; this only asks. What it asks for, and the page it gets
+ * back, live in detection-list.js, so the detection page can step through this
+ * same list without asking for it again.
  *
  * It opens on the past DEFAULT_MONTHS months, with those dates filled into the
  * date fields rather than left blank: a list of detections is always bounded
@@ -31,80 +43,6 @@ import "./bs-chip.js";
  * The filter fields are rendered once and only the results are redrawn, so a
  * date half typed in keeps its focus while the list catches up.
  */
-const PAGE_SIZE = 50;
-
-/** How far back the list looks until the date fields say otherwise. */
-const DEFAULT_MONTHS = 3;
-
-const STATUSES = [
-  { id: "", label: "All" },
-  { id: "unreviewed", label: "Unreviewed" },
-  { id: "confirmed", label: "Confirmed" },
-  { id: "rejected", label: "Discarded" },
-];
-
-/** Minimum confidence choices, in percent; 0 is any. */
-const CONFIDENCES = [0, 50, 70, 80, 90];
-
-/** The columns that sort, and which way each starts. */
-const SORTS = { heard: "desc", species: "asc", confidence: "desc" };
-
-const DATE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** A date as YYYY-MM-DD in the browser's timezone, which is what a date field takes. */
-function dayOf(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-/** The dates the list starts on: the DEFAULT_MONTHS months up to today. */
-function defaultDates(now = new Date()) {
-  const from = new Date(now);
-  from.setMonth(from.getMonth() - DEFAULT_MONTHS);
-  return { from: dayOf(from), to: dayOf(now) };
-}
-
-/**
- * The list's view as the query string gives it, anything unreadable left at
- * its default. dates are the range a query string that names no readable ones
- * of its own gets, so a bare /app/detections is the past DEFAULT_MONTHS months.
- */
-function viewFrom(params, dates) {
-  const sort = Object.hasOwn(SORTS, params.get("sort")) ? params.get("sort") : "heard";
-  const order = params.get("order") === "asc" || params.get("order") === "desc" ? params.get("order") : SORTS[sort];
-  const min = Number(params.get("min"));
-  const status = params.get("status") ?? "";
-  return {
-    status: STATUSES.some((s) => s.id === status) ? status : "",
-    species: params.get("species") ?? "",
-    min: CONFIDENCES.includes(min) ? min : 0,
-    from: DATE.test(params.get("from")) ? params.get("from") : dates.from,
-    to: DATE.test(params.get("to")) ? params.get("to") : dates.to,
-    sort,
-    order,
-    page: Math.max(1, Number.parseInt(params.get("page"), 10) || 1),
-  };
-}
-
-/** The query string for a view, leaving out what is at its default. */
-function paramsFor(view) {
-  const params = new URLSearchParams();
-  if (view.status) params.set("status", view.status);
-  if (view.species) params.set("species", view.species);
-  if (view.min) params.set("min", view.min);
-  if (view.from) params.set("from", view.from);
-  if (view.to) params.set("to", view.to);
-  if (view.sort !== "heard") params.set("sort", view.sort);
-  if (view.order !== SORTS[view.sort]) params.set("order", view.order);
-  if (view.page > 1) params.set("page", view.page);
-  return params;
-}
-
-/** Midnight at the start of a YYYY-MM-DD day, in the browser's timezone. */
-function startOfDay(date, addDays = 0) {
-  const d = new Date(`${date}T00:00:00`);
-  d.setDate(d.getDate() + addDays);
-  return d;
-}
 
 class Detections extends BaseElement {
   static styles = [typography, controls, forms, tables];
@@ -158,18 +96,14 @@ class Detections extends BaseElement {
   async #load() {
     const asked = ++this.#asked;
     const view = this.#view;
-    const params = { sort: view.sort, order: view.order, limit: PAGE_SIZE, offset: (view.page - 1) * PAGE_SIZE };
-    if (view.status) params.status = view.status;
-    if (view.species) params.species = view.species;
-    if (view.min) params.minConfidence = view.min / 100;
-    if (view.from) params.since = startOfDay(view.from).toISOString();
-    if (view.to) params.until = startOfDay(view.to, 1).toISOString();
 
     this.#busy = true;
     this.#update();
     let next;
     try {
-      const { detections, total, species, window: bounded } = await api.fetchDetections(params);
+      // The page is held by detection-list.js as well as shown here, so
+      // Previous and Next on a detection opened from it cost nothing.
+      const { detections, total, species, window: bounded } = await loadPage(view);
       next = { status: "ready", detections, total, species, window: bounded ?? null, error: null };
     } catch (error) {
       next = { ...this.#state, status: this.#state.status === "loading" ? "error" : this.#state.status, error };
