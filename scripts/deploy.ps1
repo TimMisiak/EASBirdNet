@@ -6,7 +6,8 @@
 .DESCRIPTION
     Terraform owns the running image, so this is the whole deploy -- nothing
     here runs `az containerapp update`, which would be drift the next apply
-    reverts. One-time setup, and what to do the first time, is in README.md.
+    reverts. One-time setup, and what to do the first time, is in README.md;
+    rolling back to an earlier image is ROLLBACK.md.
 
 .PARAMETER AllowDirty
     Deploy a dirty working tree. The tag gets a timestamp appended, so it is
@@ -17,10 +18,18 @@
     commit. This is the rollback: pass a tag an earlier deploy pushed and the
     script skips git and the build entirely, so it neither needs a clean tree
     nor waits on `az acr build`. The tag has to exist in the registry already;
-    if it doesn't, the script says so and lists the recent ones.
+    if it doesn't, the script says so and lists what is there.
+
+.PARAMETER ListTags
+    Print the rollback menu and exit, deploying nothing: what the registry has,
+    newest build first, each one matched against this clone's git history, with
+    the running tag marked.
 
 .EXAMPLE
     ./scripts/deploy.ps1
+
+.EXAMPLE
+    ./scripts/deploy.ps1 -ListTags
 
 .EXAMPLE
     ./scripts/deploy.ps1 -ImageTag a1b2c3d
@@ -33,7 +42,10 @@ param(
 
     [Parameter(ParameterSetName = 'Rollback', Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$ImageTag
+    [string]$ImageTag,
+
+    [Parameter(ParameterSetName = 'List', Mandatory = $true)]
+    [switch]$ListTags
 )
 
 Set-StrictMode -Version Latest
@@ -60,19 +72,120 @@ function Invoke-Terraform {
     terraform '-chdir=infra' @args
 }
 
+# How many images the rollback menu shows. Deploys are rare enough that ten is
+# weeks of them, and a rollback older than that is a decision, not a reflex.
+$script:MenuSize = 10
+
+# Whether the menu could be annotated at all, set by Get-ImageMenu. A tag with
+# no commit behind it means two different things -- git isn't here to ask, or
+# it is and has never heard of this sha -- and only the second is interesting.
+$script:HaveGit = $false
+
+# The rollback menu. A tag is a commit, so the registry and git history
+# together say both what was actually built and what each one *was* --
+# `az acr repository show-tags` alone gives a column of shas, which is no help
+# when the question is which one to go back to. `--orderby time_desc` is build
+# order, which is the order someone rolling back thinks in; git supplies the
+# date and subject. A tag can outlive the commit it was built from (a branch
+# that was never merged, a clone that hasn't fetched), so git not knowing one
+# is reported rather than hidden: it is still deployable, you just can't read
+# what it is from here.
+function Get-ImageMenu([string]$Acr, [int]$Count) {
+    $tags = @(az acr repository show-tags --name $Acr --repository birdsense `
+            --orderby time_desc --top $Count --output tsv 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    $script:HaveGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
+    $menu = @()
+    foreach ($raw in $tags) {
+        $tag = $raw.Trim()
+        if ($tag -eq '') { continue }
+
+        # `<sha>-dirty-<timestamp>`, from -AllowDirty: the commit is the part
+        # in front, and what the tree held on top of it is unknowable from here.
+        $dirty = $tag -match '-dirty-\d+$'
+        $sha = $tag -replace '-dirty-\d+$', ''
+
+        $entry = [pscustomobject]@{
+            Tag     = $tag
+            Dirty   = $dirty
+            InGit   = $false
+            OnHead  = $false
+            Date    = ''
+            Subject = ''
+        }
+
+        if ($script:HaveGit) {
+            $line = (git show -s '--format=%cs%x09%s' "$sha^{commit}" 2>$null)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($line)) {
+                $parts = ([string]$line) -split "`t", 2
+                $entry.InGit = $true
+                $entry.Date = $parts[0]
+                $entry.Subject = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+                git merge-base --is-ancestor "$sha^{commit}" HEAD 2>$null | Out-Null
+                $entry.OnHead = ($LASTEXITCODE -eq 0)
+            }
+        }
+        $menu += $entry
+    }
+    return , $menu
+}
+
+function Format-ImageMenu($Menu, [string]$Running) {
+    $lines = @()
+    foreach ($entry in $Menu) {
+        $mark = if ($Running -and $entry.Tag -eq $Running) { '*' } else { ' ' }
+
+        $subject = $entry.Subject
+        if ($subject.Length -gt 52) {
+            $subject = $subject.Substring(0, 51) + '...'
+        }
+
+        $what =
+        if (-not $entry.InGit) { if ($script:HaveGit) { 'not a commit in this clone' } else { '' } }
+        elseif ($entry.OnHead) { '{0}  {1}' -f $entry.Date, $subject }
+        else { '{0}  {1}  [not on HEAD]' -f $entry.Date, $subject }
+
+        if ($entry.Dirty) { $what = "$what  [dirty build]" }
+
+        $lines += '  {0} {1,-26} {2}' -f $mark, $entry.Tag, $what
+    }
+    # One string, not the array: a pipeline unrolls an array of lines into
+    # Write-Host one way and a single-line menu another.
+    return ($lines -join [Environment]::NewLine)
+}
+
+# What Terraform currently has applied, or $null if it can't be read (no state
+# access, nothing applied yet). Only ever used to annotate or warn, so a
+# failure here is never fatal.
+function Get-RunningTag {
+    $running = (Invoke-Terraform 'output' '-raw' 'image_tag' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($running)) {
+        return $null
+    }
+    return ([string]$running).Trim()
+}
+
 $rollback = $PSCmdlet.ParameterSetName -eq 'Rollback'
+$listOnly = $PSCmdlet.ParameterSetName -eq 'List'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
-    $tools = if ($rollback) { @('az', 'terraform') } else { @('az', 'terraform', 'git') }
+    # Only a build needs git (the tag is HEAD); -ListTags reads it if it's
+    # there and says so if it isn't.
+    $tools = if ($rollback -or $listOnly) { @('az', 'terraform') } else { @('az', 'terraform', 'git') }
     foreach ($tool in $tools) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
             Die "$tool isn't installed, or isn't on PATH"
         }
     }
 
-    if (-not (Test-Path 'infra/prod.tfvars')) {
+    # Both of the other modes end in an apply, which reads it. -ListTags
+    # deploys nothing, so it works on a machine that has no secrets at all.
+    if (-not $listOnly -and -not (Test-Path 'infra/prod.tfvars')) {
         Die 'infra/prod.tfvars is missing; copy infra/prod.tfvars.example and fill it in'
     }
 
@@ -81,6 +194,9 @@ try {
         # on a bad day is the one they were mid-fix in. The image already
         # exists, so nothing here depends on git at all.
         $tag = $ImageTag.Trim()
+    }
+    elseif ($listOnly) {
+        $tag = $null
     }
     else {
         # The image tag is the commit, so what's running is always something
@@ -117,22 +233,53 @@ try {
         Die 'could not read acr_name from Terraform (first deploy?): run the one-time setup in README.md, or pass it, e.g. $env:BIRDSENSE_ACR = "crbirdsenseprod"'
     }
 
+    if ($listOnly) {
+        $menu = Get-ImageMenu $acr $script:MenuSize
+        if ($null -eq $menu) {
+            Die "could not list the images in $acr"
+        }
+        if ($menu.Count -eq 0) {
+            Die "$acr has no birdsense images yet"
+        }
+
+        $running = Get-RunningTag
+        Write-Host "deploy: birdsense images in ${acr}, newest build first"
+        Write-Host (Format-ImageMenu $menu $running)
+        if ($running) {
+            Write-Host "deploy: * is the tag Terraform has applied ($running)"
+        }
+        if (-not $script:HaveGit) {
+            Write-Host 'deploy: git is not on PATH, so these are tags with no commits behind them'
+        }
+        Write-Host 'deploy: roll one back with ./scripts/deploy.ps1 -ImageTag <tag>'
+        exit 0
+    }
+
     if ($rollback) {
         # Applying a tag that isn't in the registry is a revision that can't
         # pull its image, found out minutes later from Container Apps. Ask
-        # first, and name the tags that are actually there -- "which sha do I
-        # go back to" is the question a rollback starts with.
+        # first, and show the menu -- "which sha do I go back to" is the
+        # question a rollback starts with, and a typo'd sha and a sha that was
+        # never built look identical until something lists them.
         az acr repository show --name $acr --image "birdsense:$tag" --output none 2>$null
         if ($LASTEXITCODE -ne 0) {
-            $recent = @(az acr repository show-tags --name $acr --repository birdsense `
-                    --orderby time_desc --top 10 --output tsv 2>$null)
-            $known = if ($LASTEXITCODE -eq 0 -and $recent.Count -gt 0) {
-                "recent tags in ${acr}:`n  " + ($recent -join "`n  ")
+            Write-Host "deploy: birdsense:$tag isn't in $acr" -ForegroundColor Red
+            $menu = Get-ImageMenu $acr $script:MenuSize
+            if ($null -eq $menu -or $menu.Count -eq 0) {
+                Die "and its images couldn't be listed; try: az acr repository show-tags --name $acr --repository birdsense"
             }
-            else {
-                "could not list the tags in $acr"
-            }
-            Die "birdsense:$tag isn't in $acr -- $known"
+            Write-Host 'deploy: what is there, newest build first:'
+            Write-Host (Format-ImageMenu $menu (Get-RunningTag))
+            Die 'nothing was deployed'
+        }
+
+        # Container Apps keys revisions off the image string, so applying the
+        # tag that is already applied produces no new revision at all. Worth
+        # saying out loud in a rollback, where "nothing happened" is exactly
+        # the symptom being chased.
+        $running = Get-RunningTag
+        if ($running -and $running -eq $tag) {
+            Write-Host "deploy: warning -- $tag is already the applied tag; this creates no new revision" -ForegroundColor Yellow
         }
         Write-Host "deploy: birdsense:$tag is already built; skipping the build"
     }

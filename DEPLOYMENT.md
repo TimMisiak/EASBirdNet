@@ -391,21 +391,10 @@ Two rules the script enforces, both about the tag being the commit sha:
   so re-pushing a tag the app already runs creates no new revision at all: the
   deploy would look like it worked and change nothing.
 
-**Rolling back** is the same script with the tag named:
-
-```powershell
-./scripts/deploy.ps1 -ImageTag <sha>
-```
-
-It applies an image that is already in the registry, so it skips git and the
-build entirely -- neither rule above applies, nothing is rebuilt, and a rollback
-can't be held up by PyPI or Zenodo being down. Both of those matter at the
-moment a rollback is wanted: the tree is usually mid-fix and the wait is
-minutes. The tag has to exist, so the script checks it first rather than leaving
-Container Apps to fail the pull a few minutes later, and lists the recent tags
-when it doesn't. What is running now is `terraform output -raw image_tag`; what
-you can go back to is
-`az acr repository show-tags --name <acr> --repository birdsense --orderby time_desc`.
+**Rolling back** is the same script with an earlier tag
+(`./scripts/deploy.ps1 -ListTags`, then `-ImageTag <sha>`), which skips the
+build entirely. [ROLLBACK.md](ROLLBACK.md) is the whole procedure, including
+what a rollback does *not* undo.
 
 Terraform's own state lives in a storage account created by hand, outside this
 configuration (see [README.md](README.md#one-time-setup)). Terraform owning the
@@ -443,8 +432,8 @@ to find out why a volunteer's card hasn't moved.
 
 - `unavailable` means the image or its settings are wrong -- the venv,
   `analyze.py` or the models aren't where `BIRDSENSE_BIRDNET_*` says. Nothing
-  at runtime fixes that: deploy a good image (or apply an older `image_tag`,
-  *Deploying a new version*). The cards are picked up as soon as the new
+  at runtime fixes that: deploy a good image, or roll back to one
+  ([ROLLBACK.md](ROLLBACK.md)). The cards are picked up as soon as the new
   revision comes up, in the order they were received.
 - `failing` is usually the identity losing a role, or Cosmos throttling. Fix
   the cause; no restart is needed, because the queue retries the pass on its

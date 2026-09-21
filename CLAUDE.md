@@ -6,7 +6,8 @@ static frontend, so the whole app is one container with no reverse proxy, no
 Node runtime, and no separate deploy for the UI.
 
 What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
-runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
+runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md),
+and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 
 ```
 /
@@ -46,6 +47,7 @@ runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md).
 │                    deploying runs from Windows and Linux; dev is Linux)
 ├── SCHEMA.md           Stored documents: containers, fields, queries
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
+├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
 └── docker-compose.yml
 ```
@@ -327,8 +329,8 @@ which is a day after the card was erased.
 **Terraform owns what is deployed.** `infra/` is the whole Azure stack and
 `scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
 `terraform apply -var image_tag=<sha>`. One owner for the running image means a
-rollback is applying an older tag and `terraform plan` is never wrong about the
-app, at the cost of needing Terraform credentials to deploy. So nothing runs
+rollback is applying an older tag (ROLLBACK.md) and `terraform plan` is never
+wrong about the app, at the cost of needing Terraform credentials to deploy. So nothing runs
 `az containerapp update` -- that is drift the next apply reverts.
 *Revisit when:* deploys move to CI, which should get an identity that can push
 images and update the app but not touch state; that is the point of

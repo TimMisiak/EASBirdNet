@@ -46,16 +46,16 @@ Terraform owns the running image, so a deploy is one script:
 
 It refuses a dirty working tree, because the image tag is the commit sha.
 
-Rolling back is the same script, pointed at an image that is already built:
+Rolling back is the same script with an earlier tag, which skips the build:
 
 ```powershell
+./scripts/deploy.ps1 -ListTags           # what could I roll back to?
 ./scripts/deploy.ps1 -ImageTag a1b2c3d   # apply an existing tag, don't build
 ```
 
-That skips git and the build, so it needs neither a clean tree nor a rebuild.
-The tag has to be in the registry already; if it isn't, the script says so and
-lists the recent ones. `terraform "-chdir=infra" output -raw image_tag` is what
-is running now.
+`-ListTags` deploys nothing: it prints what the registry holds against this
+clone's git history, newest build first. [ROLLBACK.md](ROLLBACK.md) is the
+procedure and what a rollback doesn't undo.
 
 ### One-time setup
 

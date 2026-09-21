@@ -290,8 +290,10 @@ outcome logged at Warn.
 cache, so every deploy pip-installs the pinned requirements and re-downloads
 ~90 MB of models from Zenodo.
 
-**If not fixed:** multi-minute deploys, and a deploy — including an emergency
-rollback — that can fail because PyPI or Zenodo is having a bad day.
+**If not fixed:** multi-minute deploys, and a deploy that can fail because PyPI
+or Zenodo is having a bad day. A rollback is no longer exposed to this —
+`deploy.ps1 -ImageTag` applies an image that is already built (ROLLBACK.md) —
+so this is now about forward deploys only.
 
 ### 5.12 DEPLOYMENT.md's own pre-flight checks are still outstanding — **[needs Azure]**
 
