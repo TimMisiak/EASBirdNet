@@ -46,6 +46,17 @@ Terraform owns the running image, so a deploy is one script:
 
 It refuses a dirty working tree, because the image tag is the commit sha.
 
+Rolling back is the same script, pointed at an image that is already built:
+
+```powershell
+./scripts/deploy.ps1 -ImageTag a1b2c3d   # apply an existing tag, don't build
+```
+
+That skips git and the build, so it needs neither a clean tree nor a rebuild.
+The tag has to be in the registry already; if it isn't, the script says so and
+lists the recent ones. `terraform "-chdir=infra" output -raw image_tag` is what
+is running now.
+
 ### One-time setup
 
 Needs PowerShell 7+ (`pwsh`), the Azure CLI (`az login`) and Terraform 1.9+.

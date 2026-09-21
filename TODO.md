@@ -241,16 +241,6 @@ it's added afterwards. The server logs the exact URI at startup
 documented procedure. This is also where the custom-domain decision
 (DEPLOYMENT.md *Open questions*) has to be made, since it changes the URI again.
 
-### 5.7 There is no rollback path in the tooling
-`scripts/deploy.ps1:66`
-
-DEPLOYMENT.md says "a rollback is applying an older tag", but the script always
-derives the tag from `git rev-parse --short HEAD` and takes no `-ImageTag`
-parameter.
-
-**If not fixed:** a rollback means hand-running Terraform under pressure, with
-the PowerShell argument-quoting rules from README.md. One parameter.
-
 ### 5.8 The lifecycle rule tiers blobs to cool just before the app deletes them
 `infra/storage.tf:94` vs `infra/variables.tf:112`
 
