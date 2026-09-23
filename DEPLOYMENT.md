@@ -8,8 +8,9 @@ described in [SCHEMA.md](SCHEMA.md).
 `infra/` is this file as Terraform (`azurerm` provider), one file per group of
 resources: `main.tf` (resource group, identity), `cosmos.tf`, `storage.tf`,
 `registry.tf`, `app.tf` (logs, environment, container app),
-`monitor.tf` (the action group, the alert rules and the cost budget), plus
-`variables.tf` and `outputs.tf`. The short version of running it is in
+`domain.tf` (the custom domain, if there is one), `monitor.tf` (the action
+group, the alert rules and the cost budget), plus `variables.tf` and
+`outputs.tf`. The short version of running it is in
 [README.md](README.md#deploying); this file is the why. When the two disagree,
 the Terraform is what runs -- fix this file.
 
@@ -251,12 +252,11 @@ normal rather than a sick replica.
 
 Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 
-**Custom domain** (optional, when chosen): `azurerm_container_app_custom_domain`
-with a managed certificate, plus a CNAME and `asuid` TXT record at the DNS
-host. The records have to resolve publicly before Azure will attach the domain
-or issue the certificate, so a hosts-file entry can't stand in for them. When
-it lands, register the matching redirect URI with the provider *first*, then
-set `public_url` -- see [Sign-in](#sign-in).
+**Custom domain** (optional): the app answers on its own
+`<app>.<region>.azurecontainerapps.io` hostname until one is bound, and binding
+one is `infra/domain.tf` plus two DNS records, a certificate and a change of
+`public_url`, in that order. [Custom domain](#custom-domain) is the whole of
+it.
 
 ### 13. Action group — `azurerm_monitor_action_group`
 
@@ -365,6 +365,154 @@ and so does the server at startup, which is what covers a deployment that sets
 `oidc_google_client_id` and `_secret` would follow the same shape, and the
 sign-in page grows a second button on its own -- `GET /api/v1/session` reports
 which providers the server has, and the page renders a button per provider.
+
+## Custom domain
+
+Out of the box the app answers on `ca-birdsense-prod.<region>.azurecontainerapps.io`,
+which works and is unmemorable. A name like `owls.eastsideaudubon.org` is three
+separate things: two DNS records, a hostname bound to the app with a
+certificate, and the app being told it has moved. `infra/domain.tf` owns the
+middle one. The first is DNS, which is hosted outside Azure and so is nobody's
+to automate here; the last is `public_url` and the identity provider, and is
+deliberately last.
+
+**It has to be done in stages**, and the order is forced: Azure checks the DNS
+records while it creates the custom domain, so the records exist first -- but
+the value one of them carries comes from the container app, which already
+exists. Nothing here is a chicken-and-egg problem, as long as the steps are in
+this order. Everything before step 5 is invisible to anyone using the app.
+
+### 1. Read what the records need
+
+Both values are attributes of the container app **as it already runs**, so
+there is nothing to deploy first and nothing in `domain.tf` to set yet:
+
+```sh
+terraform -chdir=infra output -raw app_fqdn
+terraform -chdir=infra console   # then: nonsensitive(azurerm_container_app.this.custom_domain_verification_id)
+```
+
+`console` reads the attribute straight out of the state file. `nonsensitive()`
+is needed because the provider marks that attribute sensitive -- it is a value
+we are about to publish in DNS, so there is nothing to protect. Or ask Azure
+and skip Terraform entirely:
+
+```sh
+az containerapp show --resource-group rg-birdsense-prod --name ca-birdsense-prod \
+  --query properties.customDomainVerificationId --output tsv
+```
+
+**`terraform output -raw custom_domain_verification_id` only works after an
+apply.** An output isn't a thing that exists in Azure; it is written into the
+state file when Terraform applies, so an output added to `outputs.tf` is
+invisible to `terraform output` until then. Adding one is not a deploy: the
+plan says `No changes` with a `Changes to Outputs` block, no revision starts
+and nothing restarts. Apply it whenever it's convenient -- or just use one of
+the two commands above and never think about it.
+
+### 2. Create the two records
+
+| Name | Type | Value | What it does |
+|------|------|-------|--------------|
+| `owls` | CNAME | the app's hostname | Sends the name to the Container Apps environment. |
+| `asuid.owls` | TXT | the verification id | Proves we own the name, so nobody else can bind it. |
+
+`eastsideaudubon.org` is hosted outside Azure, so both are made by hand at
+whoever hosts the zone and Terraform is told nothing about them: `infra/` has
+no `azurerm_dns_*` resources, and this step is not something an apply can do.
+Give them a short TTL if the host allows one -- they are made once, and the
+cost of a typo is waiting for it to expire before Azure will look again.
+
+Both have to resolve **publicly** before step 3: Azure looks them up from
+outside, so a hosts file or a private resolver can't stand in. Check from
+somewhere off our network:
+
+```sh
+dig +short owls.eastsideaudubon.org CNAME
+dig +short asuid.owls.eastsideaudubon.org TXT
+```
+
+Between here and step 4 the name resolves to an ingress that doesn't know it
+yet: HTTPS gets a certificate-name warning, because the environment's wildcard
+certificate doesn't cover our name, and past it Azure's own 404. That is the
+expected state at this point, not a mistake.
+
+### 3. Bind the hostname
+
+Set it in `prod.tfvars` and apply:
+
+```hcl
+custom_domain = "owls.eastsideaudubon.org"
+```
+
+```powershell
+$tag = (terraform "-chdir=infra" output -raw image_tag)
+terraform "-chdir=infra" apply "-var-file=prod.tfvars" "-var" "image_tag=$tag"
+```
+
+Applying the tag that is already running is how any settings change goes out
+without a rebuild ([README.md](README.md#deploying)). Nothing about the
+container app changes here, so no new revision starts and no upload in flight
+is cut.
+
+That creates `azurerm_container_app_custom_domain` -- the only resource the
+custom domain has -- and Azure reads the `asuid` TXT record while it does. `Failed to validate the custom hostname` means the
+records aren't resolving yet -- wait for the TTL and apply again; nothing is
+half-created. The hostname arrives **unbound**: there is no certificate, so
+HTTPS on the new name still fails. That is step 4.
+
+### 4. Issue the certificate
+
+```sh
+az containerapp hostname bind --resource-group rg-birdsense-prod \
+  --name ca-birdsense-prod --hostname owls.eastsideaudubon.org \
+  --validation-method CNAME
+```
+
+That issues Azure's free **managed certificate** and binds it, which takes a
+few minutes. Azure renews it from then on, so there is no expiry to diarize --
+unlike the client secret. It is the one thing in this stack created outside
+Terraform, and it doesn't become drift: the two fields it fills in
+(`certificate_binding_type` and `container_app_environment_certificate_id`) are
+in the custom domain's `ignore_changes`, or the next apply would want to
+replace the binding and take the certificate with it.
+
+It is a command rather than a resource because the provider has no way to point
+a custom domain at a managed certificate: the writable field takes an
+environment *certificate* id, and a managed one is a different resource type
+(`managedCertificates`), which it refuses. `azurerm_container_app_environment_managed_certificate`
+will create such a certificate, but nothing can attach it -- so this is the
+pattern the provider's own documentation gives. Bringing our own certificate
+would be `azurerm_container_app_environment_certificate` and that field
+instead, and then renewing it every year would be ours to remember.
+
+### 5. Move the app onto it
+
+Two steps, in this order, because the app builds its redirect URI from
+`public_url` and the provider rejects one it doesn't know:
+
+1. Register `https://owls.eastsideaudubon.org/api/v1/auth/microsoft/callback`
+   as a redirect URI on the Entra app registration. Adding one is additive --
+   the `azurecontainerapps.io` one keeps working, so there is no window where
+   sign-in is broken.
+2. Set `public_url = "https://owls.eastsideaudubon.org"` in `prod.tfvars` and
+   apply it the same way as step 3. Until this, a volunteer who arrives on the
+   new name is still sent back to the old one after signing in:
+   `BIRDSENSE_PUBLIC_URL` is configuration, not the request's `Host` header
+   (see [Container app](#12-container-app--azurerm_container_app)). This one
+   *is* a change to the container app, so it starts a new revision.
+
+Both names serve the app afterwards, and the old one is the fallback if
+anything is wrong. The session cookie is scoped to the host that set it, so
+everyone signs in once more on the new name; nothing else moves.
+
+**What this doesn't cover.** The zone apex (`eastsideaudubon.org` itself)
+can't be a CNAME. Azure supports an apex -- an A record to the Container Apps
+environment's static IP, with the same `asuid` TXT record -- but that IP is
+only stable for the life of the environment, so a subdomain is the one to
+choose. Nothing redirects the old hostname to the new one; both answer. And
+there is no `www` alias: a second name means a second
+`azurerm_container_app_custom_domain` and a second certificate.
 
 ## Ordering
 
@@ -730,7 +878,10 @@ can't be changed in place.
 
 ## Open questions that change this file
 
-- **Custom domain**: e.g. `birdsense.eastsideaudubon.org`, and who controls DNS.
+- **Custom domain**: which name. How to bind one is settled and written down
+  ([Custom domain](#custom-domain)), and `eastsideaudubon.org` is hosted
+  outside Azure, so the two DNS records are always somebody's manual step and
+  whoever administers that zone has to make them.
 - **Secrets**: the client secret and session key are Container Apps secrets,
   which means they are in the Terraform state file. Key Vault with the app's
   managed identity reading them would keep them out of state, and would give
@@ -773,6 +924,7 @@ from this file to that one.
 | 13 | Action group, mailing `alert_emails` | `azurerm_monitor_action_group` | `monitor.tf` |
 | 14 | Five alert rules: replica restarts, 5xx, BirdNET unavailable, service health, resource health | `azurerm_monitor_metric_alert` ×2, `azurerm_monitor_scheduled_query_rules_alert_v2`, `azurerm_monitor_activity_log_alert` ×2 | `monitor.tf` |
 | 15 | Monthly cost budget on the resource group | `azurerm_consumption_budget_resource_group` | `monitor.tf` |
+| 16 | Custom domain, if one is configured: the hostname bound to the app. Its DNS records are made at our DNS host, and its certificate is Azure's managed one, bound by hand -- see [Custom domain](#custom-domain) | `azurerm_container_app_custom_domain` | `domain.tf` |
 
 **Variables** (`variables.tf`): six are required and have no default --
 `image_tag`, `bootstrap_admin`, `session_key`, `oidc_microsoft_client_id`,
@@ -780,12 +932,15 @@ from this file to that one.
 [What is watched](#what-is-watched) for why that last one has no default).
 Everything else has the default this file describes: `subscription_id` (null, so `ARM_SUBSCRIPTION_ID` from the
 environment), `public_url` (empty, so the container app's own hostname),
+`custom_domain` (empty, so the app answers only on its own hostname),
 `oidc_microsoft_tenant` (`common`), `env`, `location`, `name_suffix`, `cpu`,
 `memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
 `budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
 second tfvars file with `env = "staging"`.
 
-**Outputs** (`outputs.tf`): `app_url` and `app_fqdn`, `acr_name` (which
+**Outputs** (`outputs.tf`): `app_url` and `app_fqdn`,
+`custom_domain_verification_id` (the two a custom domain's DNS records are
+built from), `acr_name` (which
 `scripts/deploy.ps1` reads) and `acr_login_server`, `cosmos_endpoint`,
 `blob_endpoint`, `identity_client_id`, `resource_group`, and `image_tag` --
 what is deployed right now, so a settings change can be applied without a

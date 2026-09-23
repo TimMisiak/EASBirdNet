@@ -104,6 +104,17 @@ variable "public_url" {
   }
 }
 
+variable "custom_domain" {
+  description = "Hostname to bind to the app alongside its own `<app>.<region>.azurecontainerapps.io` one, e.g. owls.eastsideaudubon.org. Empty (the default) binds none. Our DNS is hosted outside Azure, so its CNAME and asuid TXT records are made by hand there and have to resolve publicly before this can be applied -- see DEPLOYMENT.md, Custom domain. Binding a name doesn't move the app onto it: public_url does that, one step later, once the provider has the matching redirect URI."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.custom_domain == "" || can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.custom_domain))
+    error_message = "custom_domain must be a bare lowercase hostname, with no scheme, port, path or trailing dot: owls.eastsideaudubon.org, not https://owls.eastsideaudubon.org/."
+  }
+}
+
 variable "oidc_microsoft_client_id" {
   description = "Application (client) ID of the Entra ID app registration volunteers sign in through. Required: outside dev mode OpenID Connect is the only way in."
   type        = string

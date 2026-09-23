@@ -128,5 +128,10 @@ $tag = (terraform "-chdir=infra" output -raw image_tag)
 terraform "-chdir=infra" apply "-var-file=prod.tfvars" "-var" "image_tag=$tag"
 ```
 
+Putting the app on a custom domain (`owls.eastsideaudubon.org`) is one of
+those, but in stages -- two DNS records, then an apply, then one `az` command
+for the certificate, and only then `public_url`. DEPLOYMENT.md,
+[Custom domain](DEPLOYMENT.md#custom-domain), is the order.
+
 See [CLAUDE.md](CLAUDE.md) for the architecture decisions, layout, and
 conventions, and [SCHEMA.md](SCHEMA.md) for the data model.

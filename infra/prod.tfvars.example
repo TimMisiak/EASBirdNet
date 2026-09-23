@@ -63,6 +63,14 @@ session_key = "generate one, don't use this line"
 # day the custom domain does, and register the matching redirect URI first.
 # public_url = "https://owls.eastsideaudubon.org"
 
+# The hostname to bind to the app, if there is one. Its two DNS records have to
+# exist at our DNS host and resolve before this applies, and the name serves
+# HTTPS only after one `az containerapp hostname bind` -- DEPLOYMENT.md,
+# Custom domain, is the order to do it in. Setting this is not the same as
+# setting public_url above: the name answers first, the app moves onto it
+# afterwards.
+# custom_domain = "owls.eastsideaudubon.org"
+
 # `common` accepts any organization and any personal Microsoft account, which
 # is what volunteers with their own addresses need. A tenant GUID here would
 # restrict sign-in to that one directory.
