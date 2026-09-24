@@ -466,8 +466,14 @@ HTTPS on the new name still fails. That is step 4.
 ```sh
 az containerapp hostname bind --resource-group rg-birdsense-prod \
   --name ca-birdsense-prod --hostname owls.eastsideaudubon.org \
-  --validation-method CNAME
+  --environment cae-birdsense-prod --validation-method CNAME
 ```
+
+`--environment` is what asks for a *managed* certificate: it is where the
+certificate is created, and the alternative is `--certificate` naming one that
+already exists. Leaving both out is
+`Please specify at least one of parameters: --certificate and --environment`,
+not a default.
 
 That issues Azure's free **managed certificate** and binds it, which takes a
 few minutes. Azure renews it from then on, so there is no expiry to diarize --
