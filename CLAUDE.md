@@ -29,7 +29,11 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
-│   ├── images/         Third-party logos (Google, Microsoft), official files
+│   ├── images/         Official files: Google/Microsoft sign-in logos, and
+│   │                   Eastside Audubon's logo and favicon (from
+│   │                   eastsideaudubon.org -- replace, don't edit)
+│   │                   barred-owl.jpg: the home and sign-in banner, CC BY
+│   │                   4.0 -- its credit on both pages must stay with it
 │   └── js/
 │       ├── main.js         Imports every component so they self-register
 │       ├── api.js          fetch wrapper for /api/v1
@@ -47,6 +51,9 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 ├── scripts/deploy.ps1  Build the image in ACR, apply the new tag (pwsh:
 │                    deploying runs from Windows and Linux; dev is Linux)
 ├── SCHEMA.md           Stored documents: containers, fields, queries
+├── THIRD_PARTY_NOTICES.md  Credits and licences (BirdNET's models are CC BY-NC-SA
+│                    4.0: non-commercial); shipped in the image
+├── LICENSES/           Full licence texts the notices refer to
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
@@ -71,8 +78,9 @@ long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
 A few things are not served from this repo, and each degrades rather than
 breaks in a container with no outbound network:
-- The webfonts (Newsreader, IBM Plex Sans/Mono), linked from Google Fonts in
-  `index.html`. Every rule names a real fallback, so you get system fonts.
+- The mono webfont (IBM Plex Mono), linked from Google Fonts in `index.html`.
+  Text is Helvetica Neue/Arial, the main site's own stack, so it needs no
+  download; every rule names a real fallback.
 - Leaflet, for the recorders map. It comes from jsDelivr through the import map
   in `index.html` (pinned version and SRI hash); its CSS is linked inside
   `<bs-station-map>`'s shadow root, so bump both together. The component

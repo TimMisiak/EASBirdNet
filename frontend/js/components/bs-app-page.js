@@ -103,7 +103,7 @@ class AppPage extends BaseElement {
           font-family: var(--bs-font-display);
           font-weight: 400;
           font-size: clamp(1.9rem, 1.3rem + 2vw, 2.375rem);
-          letter-spacing: -0.01em;
+          color: var(--bs-heading);
         }
         /* The coordinator's tabs are the same strip, set a little apart. */
         .sep {

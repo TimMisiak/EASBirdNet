@@ -14,6 +14,8 @@
 !backend
 !analyzer
 !frontend
+!THIRD_PARTY_NOTICES.md
+!LICENSES
 
 # ...and, under those, what the image has no use for.
 backend/data

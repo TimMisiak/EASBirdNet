@@ -150,7 +150,7 @@ class UploadCheck extends BaseElement {
           </div>
           ${
             already
-              ? `<div class="panel panel--parchment">
+              ? `<div class="panel panel--callout">
                    <h3>Picking up where you left off</h3>
                    <p>
                      ${count(already)} of ${count(upload.fileCount)} files are already uploaded.

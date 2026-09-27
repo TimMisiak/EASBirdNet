@@ -238,7 +238,7 @@ class AdminRecorders extends BaseElement {
           padding: var(--bs-space-3);
         }
         .station:hover { background: var(--bs-surface-sunk); }
-        .station[aria-current="true"] { background: var(--bs-surface); box-shadow: inset 3px 0 0 var(--bs-amber); }
+        .station[aria-current="true"] { background: var(--bs-surface); box-shadow: inset 3px 0 0 var(--bs-accent); }
         .station-name { display: block; font-size: 0.90625rem; }
         .station-meta { display: block; font-family: var(--bs-font-mono); font-size: 0.71875rem; color: var(--bs-text-muted); margin-top: 0.1875rem; }
         .station--new { color: var(--bs-link); font-size: 0.90625rem; border-bottom: 1px solid var(--bs-border); }
@@ -257,7 +257,7 @@ class AdminRecorders extends BaseElement {
           <p class="note" style="margin-top: var(--bs-space-3);">
             ${
               editing
-                ? `Click the map or drag the green pin to move ${escapeHTML(editing)}.
+                ? `Click the map or drag the dark blue pin to move ${escapeHTML(editing)}.
                    Coordinates can be typed beside it instead.`
                 : `Click anywhere on the map to drop a pin, or drag it to correct the position.
                    Coordinates fill in beside it and can be typed instead.`
@@ -299,7 +299,7 @@ class AdminRecorders extends BaseElement {
             </div>
 
             ${this.#formError ? `<p class="error">${escapeHTML(this.#formError.message)}</p>` : ""}
-            <button class="btn btn--forest btn--small btn--block" ${this.#busy ? "disabled" : ""}>
+            <button class="btn btn--navy btn--small btn--block" ${this.#busy ? "disabled" : ""}>
               ${this.#submitLabel()}
             </button>
             ${this.#saved ? `<p class="note saved" role="status">Changes saved.</p>` : ""}

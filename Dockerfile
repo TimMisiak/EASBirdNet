@@ -58,6 +58,9 @@ COPY --from=build /out/birdsense /out/birdsense-analyze /app/
 COPY analyzer/analyze.py analyzer/clip.py /app/analyzer/
 # The frontend has no build step, so the source files are the shipped files.
 COPY frontend/ /app/frontend/
+# The image carries the BirdNET models, so it carries their licence too.
+COPY THIRD_PARTY_NOTICES.md /app/
+COPY LICENSES/ /app/LICENSES/
 
 USER birdsense
 EXPOSE 8080

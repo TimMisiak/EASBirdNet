@@ -5,48 +5,57 @@
  * hard-codes a color or spacing value. Component-specific rules live inside the
  * component's own <style>, not here.
  *
- * The palette is a field-notebook one: paper and ink, forest green for
- * structure, amber for anything that asks the volunteer to act. */
+ * The palette is a sibling of Eastside Audubon's (eastsideaudubon.org), so
+ * Birdsense reads as part of that site when it links here without copying it:
+ * white pages, a deeper take on the society's navy for structure and headings,
+ * and copper -- the complement of the Steller's Jay blue -- for anything that
+ * asks the volunteer to act. */
 
 :root {
-  /* The design has one look, deliberately: paper. No dark variant. */
+  /* The design has one look, deliberately: light. No dark variant. */
   color-scheme: light;
 
-  /* Paper and ink */
-  --bs-bg: #f7f5ef;
+  /* Page and ink */
+  --bs-bg: #ffffff;
   --bs-surface: #ffffff;
-  --bs-surface-sunk: #f1efe8;
-  --bs-field: #fdfcf8;
+  --bs-surface-sunk: #f4f5f7;
+  --bs-field: #fafbfc;
 
-  --bs-border: #dfdcd1;
-  --bs-border-strong: #c9c5b8;
-  --bs-rule: #e7e4da;
-  --bs-track: #e3e0d6;
+  --bs-border: #dde1e7;
+  --bs-border-strong: #c4cad3;
+  --bs-rule: #e7eaee;
+  --bs-track: #e2e6eb;
 
-  --bs-text: #1c201b;
-  --bs-text-soft: #3c4239;
-  --bs-text-body: #4a5145;
-  --bs-text-quiet: #5a604f;
-  --bs-text-muted: #6c7268;
+  --bs-text: #1a1a1a;
+  --bs-text-soft: #333333;
+  --bs-text-body: #474747;
+  --bs-text-quiet: #555555;
+  --bs-text-muted: #666666;
+  --bs-heading: var(--bs-navy);
 
-  /* Forest: mastheads, primary buttons, confirmed things */
-  --bs-forest: #23402f;
-  --bs-forest-hover: #2f5039;
-  --bs-forest-edge: #16281d;
-  --bs-on-forest: #f0efe6;
-  --bs-on-forest-nav: #e6e4d8;
-  --bs-on-forest-body: #d5d8cc;
-  --bs-on-forest-muted: #a9b3a3;
+  /* Navy: headings, the footer, the hero, confirmed things */
+  --bs-navy: #142a45;
+  --bs-navy-hover: #1f3c60;
+  --bs-navy-edge: #0b1b2f;
+  /* Navy laid over the banner photo, so white type on it stays readable. */
+  --bs-navy-wash: rgba(20, 42, 69, 0.6);
+  --bs-on-navy: #ffffff;
+  --bs-on-navy-nav: #ffffff;
+  --bs-on-navy-body: rgba(255, 255, 255, 0.85);
+  --bs-on-navy-muted: rgba(255, 255, 255, 0.7);
 
-  /* Amber: the accent, and every call to action */
-  --bs-amber: #c9852b;
-  --bs-amber-hover: #e0a03a;
-  --bs-amber-ink: #8a5a18;
-  --bs-amber-edge: #7a5514;
+  /* Copper: the accent, and every call to action */
+  --bs-accent: #b4532a;
+  --bs-accent-hover: #c96434;
+  --bs-accent-ink: #933f1d;
+  --bs-accent-edge: #7e3517;
+  --bs-on-accent: #ffffff;
 
-  /* Parchment: advisory panels that aren't warnings */
-  --bs-parchment: #efe9da;
-  --bs-parchment-border: #dfd5be;
+  /* Blush: advisory callouts that aren't warnings */
+  --bs-callout: #fbf0ea;
+  --bs-callout-border: #e8c3ae;
+
+  /* Notice: the one warm panel, for something the volunteer should check */
   --bs-notice: #fbf3e0;
   --bs-notice-border: #c9ae77;
   --bs-notice-text: #4a3d20;
@@ -66,9 +75,9 @@
   --bs-chip-attention-text: #7a3b22;
 
   /* Species marks on a spectrogram, in order: a strip and its darker edge.
-   * The first is amber, for the detection under review. */
-  --bs-species-1: var(--bs-amber);
-  --bs-species-1-ink: var(--bs-amber-ink);
+   * The first is the copper accent, for the detection under review. */
+  --bs-species-1: var(--bs-accent);
+  --bs-species-1-ink: var(--bs-accent-ink);
   --bs-species-2: #3f7ea6;
   --bs-species-2-ink: #25506e;
   --bs-species-3: #8c5a9e;
@@ -80,9 +89,9 @@
   --bs-species-6: #6d7b8a;
   --bs-species-6-ink: #434e59;
 
-  --bs-link: #8a5a18;
-  --bs-link-hover: #23402f;
-  --bs-focus: #23402f;
+  --bs-link: var(--bs-accent);
+  --bs-link-hover: var(--bs-navy);
+  --bs-focus: var(--bs-accent);
 
   /* Spacing. The design works on a 4px grid; these are the steps it uses. */
   --bs-space-1: 0.25rem;
@@ -98,8 +107,9 @@
   --bs-radius: 2px;
   --bs-radius-pill: 999px;
 
-  --bs-font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --bs-font-display: Newsreader, Georgia, "Times New Roman", serif;
+  /* The main site sets everything in Helvetica Neue, falling back to Arial. */
+  --bs-font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --bs-font-display: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --bs-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Two content widths: the public page runs a little wider than the app. */

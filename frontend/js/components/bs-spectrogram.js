@@ -105,7 +105,7 @@ class Spectrogram extends HTMLElement {
           left: 0;
           width: 2px;
           margin-left: -1px;
-          background: var(--bs-amber-ink);
+          background: var(--bs-accent-ink);
           pointer-events: none;
         }
         /* What was heard: a solid strip above the plot in its lane, dashed edges down it. */
@@ -142,7 +142,7 @@ class Spectrogram extends HTMLElement {
       </style>
 
       <div class="bar">
-        <button class="btn btn--forest btn--small play" type="button" disabled>▶ Play</button>
+        <button class="btn btn--navy btn--small play" type="button" disabled>▶ Play</button>
         <span class="time">0:00</span>
         <span class="status" role="status"></span>
       </div>

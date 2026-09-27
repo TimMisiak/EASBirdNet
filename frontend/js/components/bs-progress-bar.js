@@ -1,9 +1,9 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 
 /**
- * <bs-progress-bar value="64"> -- the amber bar used for card progress. It fills
- * forest green once complete, which is the same "confirmed" green used for a
- * finished night in the upload checklist.
+ * <bs-progress-bar value="64"> -- the copper bar used for card progress. It fills
+ * navy once complete, which is the same "confirmed" navy used for a finished
+ * night in the upload checklist.
  *
  * Attributes: value (0-100), size ("thin" | default), label (accessible name).
  *
@@ -30,7 +30,7 @@ class ProgressBar extends BaseElement {
         .fill {
           height: 100%;
           width: ${value}%;
-          background: ${complete ? "var(--bs-forest)" : "var(--bs-amber)"};
+          background: ${complete ? "var(--bs-navy)" : "var(--bs-accent)"};
           transition: width 200ms linear;
         }
       </style>

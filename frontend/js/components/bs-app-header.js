@@ -35,11 +35,11 @@ class AppHeader extends BaseElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; background: var(--bs-forest); color: var(--bs-on-forest); }
+        :host { display: block; background: var(--bs-surface); color: var(--bs-text); border-bottom: 1px solid var(--bs-rule); }
         .bar {
           max-width: var(--bs-measure);
           margin: 0 auto;
-          padding: var(--bs-space-4) var(--bs-space-6);
+          padding: var(--bs-space-3) var(--bs-space-6);
           display: flex;
           align-items: center;
           justify-content: space-between;
@@ -48,22 +48,23 @@ class AppHeader extends BaseElement {
         }
         .brand { background: none; border: none; padding: 0; cursor: pointer; }
         .who { display: flex; align-items: center; gap: 1.125rem; font-size: 0.84375rem; }
-        .name { color: var(--bs-on-forest-muted); }
+        .name { color: var(--bs-text-muted); }
+        .signout:hover { color: var(--bs-link-hover); }
         .signout {
           background: none;
           border: none;
           padding: 0;
-          color: var(--bs-amber);
+          color: var(--bs-link);
           font-size: 0.84375rem;
           cursor: pointer;
           text-decoration: underline;
           text-underline-offset: 2px;
         }
-        @media (max-width: 720px) { .bar { padding: var(--bs-space-4); } }
+        @media (max-width: 720px) { .bar { padding: var(--bs-space-3) var(--bs-space-4); } }
       </style>
       <header class="bar">
         <button class="brand" data-action="home" aria-label="Birdsense home">
-          <bs-brand-mark variant="compact" size="28"></bs-brand-mark>
+          <bs-brand-mark variant="compact" size="44"></bs-brand-mark>
         </button>
         <div class="who">
           <span class="name">${escapeHTML(user?.name ?? "")} · ${role}</span>

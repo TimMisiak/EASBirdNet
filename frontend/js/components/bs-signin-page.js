@@ -141,7 +141,7 @@ class SignInPage extends BaseElement {
             ${group("Admins", "admin")}
             ${group("Volunteers", "volunteer")}
           </select>
-          <button class="btn btn--forest" type="submit" ${this.#busy ? "disabled" : ""}>Sign in</button>
+          <button class="btn btn--navy" type="submit" ${this.#busy ? "disabled" : ""}>Sign in</button>
         </span>
       </form>
     `;
@@ -150,16 +150,31 @@ class SignInPage extends BaseElement {
   render() {
     this.shadowRoot.innerHTML = `
       <style>
+        /* The home page's barred owl, anchored right and faded into navy; the
+           card sits on the navy side, lined up with the site's content edge,
+           so it never covers the owl. */
         :host {
+          position: relative;
+          overflow: hidden;
           display: flex;
           flex: 1;
           min-height: 100vh;
           align-items: center;
-          justify-content: center;
-          background: var(--bs-forest);
-          padding: var(--bs-space-8) var(--bs-space-5);
+          justify-content: flex-start;
+          background: var(--bs-navy);
+          padding: var(--bs-space-8) max(var(--bs-space-5), calc((100% - var(--bs-measure-wide)) / 2 + var(--bs-space-6)));
+        }
+        :host::before {
+          content: "";
+          position: absolute;
+          inset: 0 0 0 auto;
+          width: 64%;
+          background: url("/images/barred-owl.jpg") 50% 22% / cover no-repeat;
+          -webkit-mask-image: linear-gradient(to right, transparent, #000 38%);
+          mask-image: linear-gradient(to right, transparent, #000 38%);
         }
         .card {
+          position: relative;
           width: 440px;
           max-width: 100%;
           background: var(--bs-bg);
@@ -175,9 +190,12 @@ class SignInPage extends BaseElement {
           background: var(--bs-surface);
           border-color: var(--bs-border-strong);
           font-size: 0.9375rem;
+          font-weight: 500;
+          letter-spacing: 0;
+          text-transform: none;
           gap: var(--bs-space-3);
         }
-        .provider:hover:not([disabled]) { border-color: var(--bs-forest); }
+        .provider:hover:not([disabled]) { border-color: var(--bs-navy); }
         /* The providers' own logo files, unaltered, as their brand rules require. */
         .provider .logo { width: 20px; height: 20px; flex: none; }
         .help {
@@ -192,10 +210,10 @@ class SignInPage extends BaseElement {
         .prototype {
           margin-top: 1.375rem;
           padding: var(--bs-space-3) 0.875rem;
-          background: var(--bs-parchment);
-          border: 1px dashed var(--bs-notice-border);
+          background: var(--bs-callout);
+          border: 1px dashed var(--bs-callout-border);
           font-size: 0.78125rem;
-          color: var(--bs-amber-edge);
+          color: var(--bs-accent-edge);
           display: flex;
           flex-direction: column;
           gap: var(--bs-space-2);
@@ -204,10 +222,45 @@ class SignInPage extends BaseElement {
         .prototype .row { display: flex; gap: var(--bs-space-2); }
         .prototype select { flex: 1; min-width: 0; font-size: 0.8125rem; color: var(--bs-text); }
         .prototype button { padding: 0.4375rem 0.75rem; font-size: 0.75rem; }
+        /* CC BY requires the credit, as on the home page. */
+        .credit {
+          position: absolute;
+          right: 0;
+          bottom: 0;
+          margin: 0;
+          padding: 0.25rem 0.625rem;
+          background: var(--bs-navy-wash);
+          font-size: 0.6875rem;
+          line-height: 1.4;
+          color: var(--bs-on-navy-body);
+        }
+        .credit a { color: inherit; }
+        .credit a:hover { color: var(--bs-on-navy); }
+
+        /* Narrow, the owl moves above the card, which overlaps its faded edge. */
+        @media (max-width: 900px) {
+          :host {
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 0 var(--bs-space-4) var(--bs-space-7);
+          }
+          :host::before {
+            position: static;
+            display: block;
+            flex: none;
+            width: calc(100% + 2 * var(--bs-space-4));
+            aspect-ratio: 16 / 10;
+            -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+            mask-image: linear-gradient(to bottom, #000 70%, transparent);
+          }
+          .card { margin-top: -3rem; }
+          .credit { top: 0; bottom: auto; }
+        }
         @media (max-width: 480px) { .card { padding: 1.75rem 1.5rem; } }
       </style>
       <div class="card">
-        <bs-brand-mark variant="inline" on="light" size="30"></bs-brand-mark>
+        <bs-brand-mark variant="inline" size="48"></bs-brand-mark>
         <h1>Sign in</h1>
         <p class="intro">
           Use the email address your coordinator added to the roster.
@@ -223,6 +276,12 @@ class SignInPage extends BaseElement {
         </div>
         ${this.#devPicker()}
       </div>
+      <p class="credit">
+        Barred owl, Ravenna Park, Seattle. Photo:
+        <a href="https://commons.wikimedia.org/wiki/File:Barred_Owl_forest_canopy_Seattle_Washington_2026.jpg"
+           target="_blank" rel="noreferrer">Guywelch2000</a>,
+        <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>
+      </p>
     `;
   }
 }

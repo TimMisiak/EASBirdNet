@@ -50,7 +50,7 @@ class UploadSteps extends BaseElement {
         .step[data-state="current"] {
           background: var(--bs-text);
           border-color: var(--bs-text);
-          color: var(--bs-on-forest);
+          color: var(--bs-on-navy);
         }
         .step[data-state="past"] { color: var(--bs-text-soft); }
         .reference {

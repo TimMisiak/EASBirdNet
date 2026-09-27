@@ -117,7 +117,9 @@ class BirdsenseApp extends BaseElement {
           text-align: center;
           padding: var(--bs-space-8) var(--bs-space-4);
         }
-        .missing h1 { font-family: var(--bs-font-display); font-weight: 400; font-size: 2rem; margin: 0; }
+        .missing h1 { font-family: var(--bs-font-display); font-weight: 400; font-size: 2rem; margin: 0; color: var(--bs-heading); }
+        .missing a { color: var(--bs-link); text-underline-offset: 2px; }
+        .missing a:hover { color: var(--bs-link-hover); }
         /* Focused only to move the reader onto the new page; the ring belongs
            to what they tab to next, not to the page itself. */
         [data-page]:focus { outline: none; }
@@ -176,6 +178,7 @@ class BirdsenseApp extends BaseElement {
     return `
       <bs-app-header></bs-app-header>
       <main class="app" data-page tabindex="-1"><${route.tag}></${route.tag}></main>
+      <bs-site-footer></bs-site-footer>
     `;
   }
 }

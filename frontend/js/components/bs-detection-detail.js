@@ -484,7 +484,7 @@ class DetectionDetail extends BaseElement {
       <h3>Review</h3>
       <p class="verdict">${verdict ?? ""}</p>
       <div class="row">
-        <button class="btn btn--forest btn--small" data-action="review" data-status="confirmed"
+        <button class="btn btn--navy btn--small" data-action="review" data-status="confirmed"
                 aria-pressed="${d.reviewStatus === "confirmed"}" ${busy}>${label("confirmed", "Confirm", "Confirming…")}</button>
         <button class="btn btn--quiet btn--danger btn--small" data-action="review" data-status="rejected"
                 aria-pressed="${d.reviewStatus === "rejected"}" ${busy}>${label("rejected", "Discard", "Discarding…")}</button>

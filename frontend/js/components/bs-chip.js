@@ -46,9 +46,9 @@ class Chip extends BaseElement {
           color: var(--bs-chip-attention-text);
         }
         :host([kind="admin"]) {
-          background: var(--bs-forest);
-          border-color: var(--bs-forest);
-          color: var(--bs-on-forest);
+          background: var(--bs-navy);
+          border-color: var(--bs-navy);
+          color: var(--bs-on-navy);
         }
       </style>
       ${escapeHTML(label)}
