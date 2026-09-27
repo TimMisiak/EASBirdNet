@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Birdsense — Eastside Audubon</title>
+    <meta
+      name="description"
+      content="Acoustic monitoring in East King County: confirmed owl detections from Eastside Audubon's listening stations, and the volunteer tools behind them."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles/app.css" />
+    <!--
+      Third-party ES modules, pinned by version and hash. The import map has to
+      come before the first module script. Leaflet's stylesheet is linked from
+      bs-station-map.js (inside its shadow root); keep the versions in step.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "leaflet": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet-src.esm.js"
+        },
+        "integrity": {
+          "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet-src.esm.js": "sha384-zd+tdvh8fbJAYA8L9jwid1BxMzHku/D6vwnXYzTG7Euqsam73FrDLArv8nyvdlUg"
+        }
+      }
+    </script>
+    <script type="module" src="/js/main.js"></script>
+  </head>
+  <body>
+    <bs-app></bs-app>
+  </body>
+</html>

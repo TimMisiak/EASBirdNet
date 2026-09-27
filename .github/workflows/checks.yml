@@ -1,0 +1,52 @@
+# The checks CLAUDE.md asks for before committing, plus govulncheck, run for
+# everyone. The weekly schedule is the point of the job: an advisory can land
+# against code nobody has touched in a month, and a repo that only scans on
+# push would never hear about it.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      # go-version-file reads backend/go.mod, so the toolchain line there is
+      # the one version this repo builds with -- CI, the Dockerfile and a
+      # laptop all land on the same patch release.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      # The Azurite and BirdNET tests skip themselves without their env vars;
+      # neither runs here.
+      - name: go test
+        run: go test ./...
+
+      # Exits non-zero only for a vulnerability this code can actually reach,
+      # so an advisory in a module we don't call is reported without failing
+      # the build.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

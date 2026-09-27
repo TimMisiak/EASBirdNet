@@ -1,0 +1,77 @@
+# Copy to prod.tfvars and fill in. Not in git: it holds one person's address.
+
+# The first admin, added only if the roster is empty, as `Name <email>` or an
+# email. This is the address they sign in with. See DEPLOYMENT.md, First
+# deploy -- a typo has to be fixed in the Cosmos Data Explorer afterwards,
+# because by then the roster is no longer empty.
+bootstrap_admin = "Your Name <you@eastsideaudubon.org>"
+
+# The subscription to deploy into. Leave it out to use ARM_SUBSCRIPTION_ID
+# from the environment instead.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Who hears from the alert rules (DEPLOYMENT.md, "What is watched"): a replica
+# restarting, 5xx from the app, BirdNET not being runnable, an Azure incident
+# in the region, and the monthly bill. Required -- a stack nobody is watching
+# is what these exist to fix. A list of one is fine; a chapter distribution
+# list is better than one person's address.
+alert_emails = ["birdsense@eastsideaudubon.org"]
+
+# Monthly cost alert for the resource group, in the billing account's
+# currency. It stops nothing: it mails alert_emails at 80% of actual spend and
+# at a forecast of going over. It is here because clips are kept for good, so
+# the bill climbs on its own (DEPLOYMENT.md, Cost).
+# budget_monthly_usd = 150
+
+# Defaults, listed so they are easy to find. Uncomment to change.
+# env         = "prod"
+# location    = "westus2"
+
+# If the storage account, registry or Cosmos account name is taken globally,
+# put a short suffix here and update DEPLOYMENT.md's naming table.
+# name_suffix = ""
+
+# Sized for the analysis queue. Container Apps only allows particular pairs.
+# cpu    = 1.0
+# memory = "2Gi"
+
+# How long a card's original recordings are kept after the card is received,
+# and when the storage lifecycle rule sweeps whatever is left under
+# audio/uploads/. The first is the policy and most of the storage bill; the
+# second is only a net for abandoned uploads (DEPLOYMENT.md, Audio retention).
+# Detections and their clips are never removed by either. Raising the first
+# moves the rule's tier-to-cool date with it, so the second has to stay 60
+# days past it; terraform plan says so if it doesn't.
+# audio_retention_days = 30
+# audio_backstop_days  = 180
+
+# --- Sign-in (DEPLOYMENT.md, "Sign-in") ---
+
+# The Entra ID app registration volunteers sign in through: its Application
+# (client) ID, and a client secret. Create the registration with the redirect
+# URI `terraform output -raw app_url` + /api/v1/auth/microsoft/callback.
+oidc_microsoft_client_id     = "00000000-0000-0000-0000-000000000000"
+oidc_microsoft_client_secret = "the client secret's *value*, not its id"
+
+# Signs the session cookie: any long random string, kept the same across
+# deploys so a new revision doesn't sign everyone out.
+#   openssl rand -base64 32
+session_key = "generate one, don't use this line"
+
+# Where browsers reach Birdsense. Empty (the default) uses the container app's
+# own hostname, which is right until a custom domain exists. Set it the same
+# day the custom domain does, and register the matching redirect URI first.
+# public_url = "https://owls.eastsideaudubon.org"
+
+# The hostname to bind to the app, if there is one. Its two DNS records have to
+# exist at our DNS host and resolve before this applies, and the name serves
+# HTTPS only after one `az containerapp hostname bind` -- DEPLOYMENT.md,
+# Custom domain, is the order to do it in. Setting this is not the same as
+# setting public_url above: the name answers first, the app moves onto it
+# afterwards.
+# custom_domain = "owls.eastsideaudubon.org"
+
+# `common` accepts any organization and any personal Microsoft account, which
+# is what volunteers with their own addresses need. A tenant GUID here would
+# restrict sign-in to that one directory.
+# oidc_microsoft_tenant = "common"

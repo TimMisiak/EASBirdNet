@@ -1,0 +1,24 @@
+# Go build output
+/backend/birdsense
+/backend/bin/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local development database (BIRDSENSE_DB=local)
+/backend/data/
+
+# Python environment for analyzer/ (see CLAUDE.md, "Running it")
+/.venv/
+
+# Terraform (infra/). The provider lock file *is* committed; these are local:
+# .terraform/ is downloaded, backend.hcl names the state account, and the
+# tfvars hold one coordinator's email (see infra/prod.tfvars.example).
+/infra/.terraform/
+/infra/backend.hcl
+/infra/*.tfvars
+*.tfstate
+*.tfstate.*
+crash.log

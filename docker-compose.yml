@@ -1,0 +1,40 @@
+services:
+  birdsense:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # The host port is assigned by the environment; the container always
+    # listens on 8080.
+    ports:
+      - "${HOST_PORT}:8080"
+    environment:
+      BIRDSENSE_ADDR: ":8080"
+      BIRDSENSE_STATIC_DIR: "/app/frontend"
+      # Local development uses the JSON file backend. Azure runs the default,
+      # Cosmos DB -- see DEPLOYMENT.md.
+      BIRDSENSE_DB: "local"
+      BIRDSENSE_LOCAL_DB_PATH: "/app/data/birdsense.json"
+      # Card audio goes to a directory in its own volume. Azure uses Blob
+      # Storage -- see DEPLOYMENT.md.
+      BIRDSENSE_STORAGE: "local"
+      BIRDSENSE_STORAGE_DIR: "/app/audio"
+      # A card's original recordings are removed this long after the card is
+      # received, once BirdNET has finished with it; its detections and their
+      # clips are kept. 0 keeps the originals, which is what a demo container
+      # that is left running for months wants.
+      BIRDSENSE_AUDIO_RETENTION_DAYS: "30"
+      # Dev mode signs in from the roster picker, so no identity provider is
+      # needed. To try the real OpenID Connect flow here instead, fill these in
+      # and register http://localhost:${HOST_PORT}/api/v1/auth/microsoft/callback
+      # as a redirect URI (providers allow plain http for localhost only).
+      # BIRDSENSE_PUBLIC_URL: "http://localhost:${HOST_PORT}"
+      # BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID: ""
+      # BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET: ""
+    volumes:
+      - birdsense-data:/app/data
+      - birdsense-audio:/app/audio
+    restart: unless-stopped
+
+volumes:
+  birdsense-data:
+  birdsense-audio:

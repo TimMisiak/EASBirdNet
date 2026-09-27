@@ -1,0 +1,130 @@
+/* Document-level styles and design tokens.
+ *
+ * Custom properties pierce shadow DOM, so these tokens are how components stay
+ * visually consistent: every component styles itself with var(--bs-*) and never
+ * hard-codes a color or spacing value. Component-specific rules live inside the
+ * component's own <style>, not here.
+ *
+ * The palette is a field-notebook one: paper and ink, forest green for
+ * structure, amber for anything that asks the volunteer to act. */
+
+:root {
+  /* The design has one look, deliberately: paper. No dark variant. */
+  color-scheme: light;
+
+  /* Paper and ink */
+  --bs-bg: #f7f5ef;
+  --bs-surface: #ffffff;
+  --bs-surface-sunk: #f1efe8;
+  --bs-field: #fdfcf8;
+
+  --bs-border: #dfdcd1;
+  --bs-border-strong: #c9c5b8;
+  --bs-rule: #e7e4da;
+  --bs-track: #e3e0d6;
+
+  --bs-text: #1c201b;
+  --bs-text-soft: #3c4239;
+  --bs-text-body: #4a5145;
+  --bs-text-quiet: #5a604f;
+  --bs-text-muted: #6c7268;
+
+  /* Forest: mastheads, primary buttons, confirmed things */
+  --bs-forest: #23402f;
+  --bs-forest-hover: #2f5039;
+  --bs-forest-edge: #16281d;
+  --bs-on-forest: #f0efe6;
+  --bs-on-forest-nav: #e6e4d8;
+  --bs-on-forest-body: #d5d8cc;
+  --bs-on-forest-muted: #a9b3a3;
+
+  /* Amber: the accent, and every call to action */
+  --bs-amber: #c9852b;
+  --bs-amber-hover: #e0a03a;
+  --bs-amber-ink: #8a5a18;
+  --bs-amber-edge: #7a5514;
+
+  /* Parchment: advisory panels that aren't warnings */
+  --bs-parchment: #efe9da;
+  --bs-parchment-border: #dfd5be;
+  --bs-notice: #fbf3e0;
+  --bs-notice-border: #c9ae77;
+  --bs-notice-text: #4a3d20;
+
+  /* Status chips */
+  --bs-chip-done-bg: #e4ede4;
+  --bs-chip-done-border: #a9c2ac;
+  --bs-chip-done-text: #23402f;
+  --bs-chip-progress-bg: #fbf3e0;
+  --bs-chip-progress-border: #c9ae77;
+  --bs-chip-progress-text: #7a5514;
+  --bs-chip-processing-bg: #eae7f0;
+  --bs-chip-processing-border: #b7afc9;
+  --bs-chip-processing-text: #463a63;
+  --bs-chip-attention-bg: #f6e3dc;
+  --bs-chip-attention-border: #d3a894;
+  --bs-chip-attention-text: #7a3b22;
+
+  /* Species marks on a spectrogram, in order: a strip and its darker edge.
+   * The first is amber, for the detection under review. */
+  --bs-species-1: var(--bs-amber);
+  --bs-species-1-ink: var(--bs-amber-ink);
+  --bs-species-2: #3f7ea6;
+  --bs-species-2-ink: #25506e;
+  --bs-species-3: #8c5a9e;
+  --bs-species-3-ink: #5a3769;
+  --bs-species-4: #5f8f3e;
+  --bs-species-4-ink: #3b5c25;
+  --bs-species-5: #b5523b;
+  --bs-species-5-ink: #7a3b22;
+  --bs-species-6: #6d7b8a;
+  --bs-species-6-ink: #434e59;
+
+  --bs-link: #8a5a18;
+  --bs-link-hover: #23402f;
+  --bs-focus: #23402f;
+
+  /* Spacing. The design works on a 4px grid; these are the steps it uses. */
+  --bs-space-1: 0.25rem;
+  --bs-space-2: 0.5rem;
+  --bs-space-3: 0.75rem;
+  --bs-space-4: 1rem;
+  --bs-space-5: 1.375rem;
+  --bs-space-6: 2rem;
+  --bs-space-7: 2.75rem;
+  --bs-space-8: 4.25rem;
+
+  /* Controls are near-square; only pills are round. */
+  --bs-radius: 2px;
+  --bs-radius-pill: 999px;
+
+  --bs-font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bs-font-display: Newsreader, Georgia, "Times New Roman", serif;
+  --bs-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Two content widths: the public page runs a little wider than the app. */
+  --bs-measure: 1120px;
+  --bs-measure-wide: 1180px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bs-bg);
+  color: var(--bs-text);
+  font-family: var(--bs-font);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The document's own focus ring. `outline` isn't inherited and a document
+ * stylesheet stops at the shadow boundary, so this one reaches nothing inside a
+ * component: the copy every shadow root gets is in shared-styles.js's `reset`,
+ * which BaseElement adopts. Keep the two in step. */
+:focus-visible {
+  outline: 2px solid var(--bs-focus);
+  outline-offset: 2px;
+}
