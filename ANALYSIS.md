@@ -187,7 +187,7 @@ Terraform variable, not a rebuild:
 ```
 BIRDSENSE_ANALYSIS_MEM_HEADROOM    default 1 GiB   kept free for Go, clips, page cache
 BIRDSENSE_ANALYSIS_BIRDNET_MEM     default 0.4 GB  peak per task, with margin
-BIRDSENSE_ANALYSIS_BIRDNET_THREADS default 1
+BIRDSENSE_ANALYSIS_BIRDNET_WORKERS default 1       LiteRT is single-threaded; see *The benchmark*
 BIRDSENSE_ANALYSIS_PERCH_MEM       default 2.8 GB
 BIRDSENSE_ANALYSIS_PERCH_THREADS   default 1       raised if M0 shows it scales
 BIRDSENSE_ANALYSIS_MAX_TASKS       default = cores
@@ -198,9 +198,11 @@ When a slot opens:
 1. Take the oldest claimable BirdNET file, if its memory fits.
 2. Otherwise the oldest claimable Perch file, if it fits -- preferring one
    whose audio this replica already holds.
-3. Give it `min(threads setting, free cores)` threads, at least 1. Threads are
-   fixed when the process starts, so this is where a replica that has run out
-   of BirdNET work hands its spare cores to Perch.
+3. Give a Perch task `min(threads setting, free cores)` threads, at least 1.
+   Threads are fixed when the process starts, so this is where a replica that
+   has run out of BirdNET work hands its spare cores to Perch. (BirdNET's
+   interpreter is single-threaded, so a BirdNET task only ever takes more
+   cores as more workers, each costing its own model's memory.)
 
 **Sharing a download.** Today each step copies the file out of storage into
 its own temp directory. On a packed replica, a file's BirdNET and Perch steps
@@ -262,92 +264,125 @@ threads per model*.
 
 ### What is recorded
 
-Each worker writes **JSON Lines**, one file per replica, three record types:
+`internal/perf` writes **JSON Lines**, three record types. They are written by
+today's in-process queue already, so production data starts with the next
+real card (M0), and the worker will write the same records in M3.
 
-**`run`** -- once at start:
-execution and replica name, image tag, cgroup limits (`cpu.max`,
-`memory.max`), CPU model (`/proc/cpuinfo`), the scheduler's settings
-(every `BIRDSENSE_ANALYSIS_*` value), Perch on or off.
+**`run`** -- when the process starts, and again at the top of every segment
+(below), so any one file says what it measured: the instance (the Container
+Apps replica name, or the hostname), the image tag (`BIRDSENSE_IMAGE_TAG`), the
+CPU model, the cgroup limits (`cpu.max`, `memory.max`, or the host's when there
+are none), and the analysis settings (Perch on or off; the scheduler's once
+there is one).
 
-**`sample`** -- every 5 seconds, the whole container and each running task:
+**`sample`** -- every 5 seconds while anything is being analyzed, and once
+more when it stops; an idle server writes nothing:
 
 ```json
 {"type":"sample","t":"2026-10-03T14:02:05Z",
  "cpu":{"usedCores":3.71,"limitCores":4,"throttledMs":120},
  "mem":{"current":6.42e9,"anon":5.90e9,"file":0.48e9,"limit":8.59e9,"oomKills":0},
- "tasks":[{"id":"…","model":"perch","threads":1,"cores":0.98,"pss":2.61e9},
-          {"id":"…","model":"birdnet","threads":1,"cores":1.02,"pss":0.31e9}]}
+ "tasks":[{"id":"…","model":"perch","phase":"analyze","cores":0.98,"pss":2.61e9,"procs":3},
+          {"id":"…","model":"birdnet","phase":"clip","cores":1.02,"pss":0.31e9,"procs":1}]}
 ```
 
 Container figures come from cgroup v2 (`cpu.stat`, `memory.current`,
-`memory.stat`, `memory.events`). Per-task figures sum the task's process
-group from `/proc`: CPU from `stat`, memory as **PSS** from `smaps_rollup`,
-not RSS -- the birdnet package's worker processes share pages with their
-parent, and RSS counts those twice. `anon` vs `file` separates real memory from
-page cache, which the kernel reclaims before it OOM-kills.
+`memory.stat`, `memory.events`). A task's figures sum its scripts' process
+groups from `/proc` -- `internal/birdnet` starts each script in a group of its
+own and reports it through `birdnet.WithObserver` -- with CPU from `stat` and
+memory as **PSS** from `smaps_rollup`, not RSS: birdnet's worker processes
+share pages with the script, and RSS counts those twice. `anon` vs `file`
+separates real memory from page cache, which the kernel reclaims before it
+OOM-kills.
 
-**`task`** -- once per finished task:
+**`task`** -- once per model's pass over a file:
 
 ```json
-{"type":"task","model":"perch","card":"…","file":"…","threads":1,
- "audioSec":3600,"bytes":345600000,"result":"analyzed","detections":212,
- "phases":{"queuedSec":840,"downloadSec":6.1,"analyzeSec":437,"clipSec":22.4,"storeSec":3.0},
- "cpuSec":431,"peakPss":2.63e9,
+{"type":"task","t":"…","id":"…","model":"perch","card":"…","file":"…","path":"DATA/…/x.WAV",
+ "workers":1,"threads":0,"result":"ok","audioSec":3600,"bytes":345600000,"detections":212,
+ "waitSec":840,"wallSec":468.3,
+ "phases":{"download":6.1,"analyze":437,"clip":22.4,"store":2.8},
+ "cpuSec":431,"peakPss":2.63e9,"maxRss":2.1e9,
  "runningAtStart":{"birdnet":2,"perch":1}}
 ```
 
-`audioSec / cpuSec` is the number that matters most: how much audio a core
-gets through per model, at that thread count, while sharing the box. `phases`
-says whether a file is compute-bound or waiting on storage.
+`cpuSec` and `maxRss` are the kernel's own accounting of each script when it
+exits (`wait4`'s rusage, which includes the workers the script joined), so
+they are exact where the samples are not; `peakPss` is the highest a sample
+saw, and a task shorter than one interval has none. `audioSec / cpuSec` is the
+number that matters most: how much audio a core gets through, per model and
+setting, while sharing the box. `phases` says whether a file is compute-bound
+or waiting on storage. `result` is `ok`, `unreadable` or `error`.
 
 ### Where it goes
 
-- **Blob storage**, container `perf`, at
-  `perf/{yyyy-mm-dd}/{execution}/{replica}.jsonl`, as an **append blob**
-  flushed every 30 seconds, so a killed replica loses at most 30 seconds of it.
-  In dev, the same layout under `backend/data/perf/`. About 200 KB per replica
-  per hour; a lifecycle rule deletes it after 180 days.
-- **Log Analytics**, for the `task` records only, as a structured log line
-  (`msg="analysis: task"`), so a quick KQL query answers "how long is Perch
-  taking this week" without downloading anything.
+- **File storage**, under `perf/` in the `audio` container, beside the audio
+  rather than in a container of its own, so it needs no new role or container:
+  `perf/{yyyy-mm-dd}/{instance}/{segmentStart}.jsonl`. `storage.Store` can't
+  append to a blob, so each file is a **segment** that is rewritten whole
+  every 30 seconds and rolled after ten minutes (or 1 MB); a replica killed
+  without warning loses at most 30 seconds. In dev the same names are under
+  `backend/data/audio/perf/`. About 200 KB per busy replica-hour; a lifecycle
+  rule deletes them after 180 days (`infra/storage.tf`). `BIRDSENSE_PERF=off`
+  turns it all off.
+- **Log Analytics**, for the `task` records, as a structured log line
+  (`msg="analysis: task"`, with `audio_per_cpu_sec`), so a quick KQL query
+  answers "how long is Perch taking this week" without downloading anything.
 
 ### Bringing it back
 
 ```sh
 az storage blob download-batch --auth-mode login \
-  --account-name <account> -s perf -d ./perf --pattern '2026-10-0*'
+  --account-name <account> -s audio -d ./perf-data --pattern 'perf/2026-10-*'
 ```
 
-(`grant_operator_blob_access` already gives the operator read access.) Then
-either hand over the `.jsonl` files as they are, or run the summary first:
+(`grant_operator_blob_access` gives the operator read access.) Then either hand
+over the `.jsonl` files as they are, or run the summary first:
 
 ```sh
-cd backend && go run ./cmd/perf ../perf
+cd backend && go run ./cmd/perf ../perf-data
 ```
 
-`cmd/perf` prints, per model and thread count: audio per CPU-second (median and
-p90), peak PSS (median, p95, max), phase breakdown; per replica: CPU
-utilisation as a histogram over time, peak memory against the limit, OOM kills,
-and **the tail** -- minutes at the end of an execution with cores idle while
-the replica was still billed. It prints text you can paste, and the raw files
-are there when the summary doesn't answer the question.
+`cmd/perf` prints three tables: what it was measured on (CPU, limits, image,
+settings); per model, workers and threads -- audio per CPU-second (median and
+slowest tenth), times real time, cores used, peak PSS (p50, p95, max), max RSS
+and how wall time split across the phases; and per instance, while it had
+work -- mean cores, the share of time at <25/<50/<75/≥75% of the CPU limit,
+throttling, peak memory and anon against the limit, and OOM kills. It is text
+to paste; the raw files are there when it doesn't answer the question.
 
 ### The benchmark
 
-Production data shows the packed replica as it runs; it can't show a thread
-count we haven't deployed. So `cmd/analyze` gains a `-bench` mode:
+Production data shows the replica as it runs; it can't show a setting we
+haven't deployed. So `cmd/analyze -bench` runs the model over a file once per
+combination of `-workers` and `-threads` (each a comma-separated list, with
+`-repeat`), one run at a time, samples it the same way, writes the same records
+to `bench-MODEL-TIME.jsonl`, and prints a line per run:
 
 ```sh
-go run ./cmd/analyze -bench -model perch -threads 1,2,4,8 card-file.wav
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/analyze -bench -model perch -threads 1,2,4,8 card-file.wav
 ```
 
-It runs the file once per thread count, one process at a time, with the same
-sampler, and writes the same `task` and `sample` records to a local file.
-`analyze.py` gains `--threads` for this (TensorFlow's intra/inter-op threads for
-Perch, LiteRT's for BirdNET; which knobs the `birdnet` package actually honours
-is part of M0). Run it on a real hour-long card file, not the Osprey clip: model
-loading dominates a short clip.
+What the two settings actually control, from reading birdnet 1.1.1:
 
+- **BirdNET's LiteRT interpreter is hard-coded to one thread**
+  (`num_threads=1` in `birdnet/core/backends.py`). It uses more cores only
+  through `-workers`, which are processes, each with its own model copy.
+- **Perch's TensorFlow uses TensorFlow's default threading: every core the
+  process can see.** So DEPLOYMENT.md's "73 s on one worker" may already have
+  been spread over several cores, and on a shared replica several Perch
+  processes would contend for all of them. `analyze.py --threads N`
+  (`birdnet.Options.Threads`) caps it by setting `TF_NUM_INTRAOP_THREADS` and
+  `OMP_NUM_THREADS` to N and `TF_NUM_INTEROP_THREADS` to 1 before anything
+  loads -- environment variables because birdnet's workers are child
+  processes, which `tf.config` calls in the script wouldn't reach.
+- Starting either model is not single-threaded: on the 14-second Osprey clip,
+  BirdNET with 2 workers used 12.6 CPU-seconds in 3.1 s of wall time, most of
+  it Python, numpy and the model loading. That is why the benchmark wants a
+  real hour-long card file: on a short clip, startup is the measurement.
+
+### What the numbers decide
 ### What the numbers decide
 
 | Question | Read it from |
@@ -378,7 +413,7 @@ Batch on spot VMs would bring the analysis line to roughly $5–15.
 ## Milestones
 
 **M0 -- Measure, in today's architecture.** The sampler, the `run`/`sample`/
-`task` records, the `perf` container and lifecycle rule, `cmd/analyze -bench`,
+`task` records, the `perf/` prefix and its lifecycle rule, `cmd/analyze -bench`,
 `analyze.py --threads`, `cmd/perf`. This runs inside today's in-process queue,
 so the next real card in production produces data before anything else
 changes. Then: bench Perch and BirdNET at 1/2/4/8 threads on a real card file.
@@ -425,7 +460,7 @@ profile or Batch.
 
 | Milestone | State | Notes |
 |---|---|---|
-| M0 Measure | not started | |
+| M0 Measure | code landed 2026-09-28; measurements pending | `internal/perf`, `cmd/perf`, `cmd/analyze -bench`, `analyze.py --threads`; smoke-tested on the Osprey clip and a dev server. Next: deploy, then bench BirdNET (`-workers`) and Perch (`-threads`) on a real hour-long card file, and read the first real card's records. |
 | M1 Claims and leases | not started | |
 | M2 Packing scheduler | not started | |
 | M3 The job | not started | |

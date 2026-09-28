@@ -100,6 +100,7 @@ func TestAnalyzeRejectsBadOptionsWithoutRunning(t *testing.T) {
 		{Sensitivity: 3},
 		{OverlapSec: 3},
 		{Workers: -1},
+		{Threads: -1},
 		{Location: &Location{Latitude: 91}},
 		{Location: &Location{Latitude: 47, Longitude: -122, Week: 49}},
 		{Model: "perch-v3"},
@@ -136,6 +137,39 @@ printf '{"model":"Perch_v2","files":[{"path":"%s","detections":[]}]}' "$1"
 	if strings.TrimSpace(string(got)) != want {
 		t.Errorf("args:\n got  %s\n want %s", got, want)
 	}
+}
+
+// Threads is passed on when it is set, and an observer in the context is told
+// the script's pid when it starts and its resource usage when it exits.
+func TestAnalyzeThreadsAndObserver(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	a := fakePython(t, `
+echo "$@" > '`+argsFile+`'
+while [ "$1" != "--" ]; do shift; done; shift
+printf '{"model":"Perch_v2","files":[{"path":"%s","detections":[]}]}' "$1"
+`)
+	var o recordingObserver
+	if _, err := a.Analyze(WithObserver(context.Background(), &o), []string{"/cards/a.wav"}, Options{Model: ModelPerch, Threads: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(argsFile)
+	want := "analyze.py --min-confidence 0.25 --sensitivity 1 --overlap 0 --top-k 5 --workers 1 --model perch --threads 2 -- /cards/a.wav"
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("args:\n got  %s\n want %s", got, want)
+	}
+	if o.started == 0 || o.exited != o.started || o.state == nil || !o.state.Success() {
+		t.Errorf("observer saw started %d, exited %d (%v)", o.started, o.exited, o.state)
+	}
+}
+
+type recordingObserver struct {
+	started, exited int
+	state           *os.ProcessState
+}
+
+func (o *recordingObserver) Started(pid int) { o.started = pid }
+func (o *recordingObserver) Exited(pid int, state *os.ProcessState) {
+	o.exited, o.state = pid, state
 }
 
 // birdnet does inference in child processes, so cancelling has to take those

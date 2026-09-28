@@ -22,6 +22,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
@@ -96,6 +97,24 @@ func main() {
 	// way -- an unanalyzable card waits in processing rather than being lost.
 	queue := analysis.New(store, files, cfg.Analyzer, log)
 	queue.Perch = cfg.Perch
+	// What each file's analysis costs, written beside the audio. It stops
+	// after the queue, so the last task's record is flushed.
+	perfCtx, stopPerf := context.WithCancel(context.Background())
+	perfDone := make(chan struct{})
+	if cfg.Perf {
+		instance := perf.Instance()
+		queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
+			Instance: instance, Version: cfg.ImageTag,
+			Settings: map[string]any{"perch": cfg.Perch, "inProcess": true},
+		}, log)
+		log.Info("analysis performance records on", "instance", instance)
+		go func() {
+			defer close(perfDone)
+			queue.Perf.Run(perfCtx)
+		}()
+	} else {
+		close(perfDone)
+	}
 	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
 	analysisDone := make(chan struct{})
 	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
@@ -167,6 +186,8 @@ func main() {
 	// A BirdNET run in flight is killed; its file is queued again next start.
 	stopAnalysis()
 	<-analysisDone
+	stopPerf()
+	<-perfDone
 	// A sweep in flight stops between files; the next start finishes it.
 	stopRetention()
 	<-retentionDone
@@ -251,6 +272,28 @@ type config struct {
 	// turns it on: it needs TensorFlow in the image and several times
 	// BirdNET's memory and time (DEPLOYMENT.md).
 	Perch bool
+	// Perf records what analysis costs the machine -- CPU, memory, time per
+	// phase -- into file storage under perf/, for sizing the replica that runs
+	// it (ANALYSIS.md, *Performance data*). On unless BIRDSENSE_PERF is off.
+	Perf bool
+	// ImageTag is the image this is, when the deployment says
+	// (BIRDSENSE_IMAGE_TAG), so performance records name what they measured.
+	ImageTag string
+}
+
+// onOff reads a switch. A typo would quietly leave something off (or on), so
+// only the spellings below are accepted.
+func onOff(name string, fallback bool) (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
+	case "":
+		return fallback, nil
+	case "off", "false", "0":
+		return false, nil
+	case "on", "true", "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be on or off, not %q", name, v)
+	}
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -323,15 +366,14 @@ func configFromEnv() (config, error) {
 	}
 	cfg.Retention = retention.Policy{Window: time.Duration(days) * 24 * time.Hour}
 
-	// A typo here would quietly leave a model off (or on), so only the
-	// spellings below are accepted.
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("BIRDSENSE_PERCH"))); v {
-	case "", "off", "false", "0":
-	case "on", "true", "1":
-		cfg.Perch = true
-	default:
-		return cfg, fmt.Errorf("BIRDSENSE_PERCH must be on or off, not %q", v)
+	var err error
+	if cfg.Perch, err = onOff("BIRDSENSE_PERCH", false); err != nil {
+		return cfg, err
 	}
+	if cfg.Perf, err = onOff("BIRDSENSE_PERF", true); err != nil {
+		return cfg, err
+	}
+	cfg.ImageTag = os.Getenv("BIRDSENSE_IMAGE_TAG")
 
 	if err := readAuth(&cfg); err != nil {
 		return cfg, err

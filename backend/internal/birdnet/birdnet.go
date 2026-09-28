@@ -81,6 +81,11 @@ type Options struct {
 	// of the model (~250 MB resident for BirdNET, some 2 GB for Perch on
 	// TensorFlow), so raise it with the memory limit.
 	Workers int `json:"workers"`
+	// Threads caps the threads Perch's TensorFlow runs each worker's
+	// inference on; 0 leaves TensorFlow's default, which is every core the
+	// process can see. BirdNET ignores it: its LiteRT interpreter runs on one
+	// thread, so BirdNET uses more cores through Workers instead.
+	Threads int `json:"threads,omitempty"`
 	// Location, if set, limits the species to those BirdNET's geo model
 	// expects there. Perch is limited to the same species, matched by
 	// scientific name.
@@ -171,7 +176,7 @@ func (a Analyzer) Analyze(ctx context.Context, paths []string, opts Options) (Re
 	// if one outlives the script.
 	cmd.WaitDelay = 5 * time.Second
 
-	if err := cmd.Run(); err != nil {
+	if err := run(ctx, cmd); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Result{}, fmt.Errorf("birdnet: %w", ctxErr)
 		}
@@ -245,6 +250,8 @@ func (o Options) validate() error {
 		return errors.New("birdnet: TopK must be positive")
 	case o.Workers < 1:
 		return errors.New("birdnet: Workers must be positive")
+	case o.Threads < 0:
+		return errors.New("birdnet: Threads can't be negative")
 	}
 	if l := o.Location; l != nil {
 		switch {
@@ -269,6 +276,9 @@ func (o Options) args() []string {
 	}
 	if o.Model != ModelBirdNET {
 		args = append(args, "--model", o.Model)
+	}
+	if o.Threads != 0 {
+		args = append(args, "--threads", strconv.Itoa(o.Threads))
 	}
 	if l := o.Location; l != nil {
 		args = append(args, "--latitude", f(l.Latitude), "--longitude", f(l.Longitude))

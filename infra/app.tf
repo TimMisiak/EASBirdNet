@@ -142,6 +142,12 @@ resource "azurerm_container_app" "this" {
         name  = "BIRDSENSE_PERCH"
         value = var.perch_enabled ? "on" : "off"
       }
+      # So the analysis performance records under perf/ say which image they
+      # measured (ANALYSIS.md, *Performance data*). They are on by default.
+      env {
+        name  = "BIRDSENSE_IMAGE_TAG"
+        value = var.image_tag
+      }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
       env {

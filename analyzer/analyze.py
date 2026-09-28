@@ -44,6 +44,16 @@ def main() -> int:
     # package's own logging and tqdm download bars.
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 
+    if args.threads:
+        # TensorFlow reads these when it starts, in whichever process that is,
+        # and birdnet's inference workers are child processes: environment
+        # variables reach them where tf.config calls made here would not.
+        # OMP_NUM_THREADS caps oneDNN's own pool the same way. BirdNET's
+        # LiteRT interpreter is single-threaded whatever these say.
+        for name in ("TF_NUM_INTRAOP_THREADS", "OMP_NUM_THREADS"):
+            os.environ[name] = str(args.threads)
+        os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+
     import birdnet
 
     # LiteRT runs the TFLite model without TensorFlow, which would add ~600 MB.
@@ -135,6 +145,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--overlap", type=float, default=0.0, help="seconds, 0 to <3 (<5 for Perch)")
     p.add_argument("--top-k", type=int, default=5, help="species kept per window")
     p.add_argument("--workers", type=int, default=1, help="inference processes; each loads the model")
+    p.add_argument("--threads", type=int, default=0,
+                   help="TensorFlow threads per worker, for Perch; 0 is TensorFlow's default (every core)")
     p.add_argument("--latitude", type=float)
     p.add_argument("--longitude", type=float)
     p.add_argument("--week", type=int, help="1-48, four per month; omit for year-round")
@@ -146,6 +158,8 @@ def parse_args() -> argparse.Namespace:
         p.error("--week needs --latitude and --longitude")
     if not args.files:
         p.error("no files to analyze")
+    if args.threads < 0:
+        p.error("--threads can't be negative")
     # Absolute paths are what birdnet reports back, so results can be matched
     # to inputs whatever the working directory.
     args.files = list(dict.fromkeys(os.path.abspath(f) for f in args.files))

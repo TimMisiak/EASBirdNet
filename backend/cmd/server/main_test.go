@@ -270,6 +270,22 @@ func TestConfigFromEnvPerch(t *testing.T) {
 	}
 }
 
+// Performance records are on unless they are turned off.
+func TestConfigFromEnvPerf(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	for v, want := range map[string]bool{"": true, "off": false, "on": true} {
+		t.Setenv("BIRDSENSE_PERF", v)
+		if cfg, err := configFromEnv(); err != nil || cfg.Perf != want {
+			t.Errorf("BIRDSENSE_PERF=%q: perf = %v, %v; want %v", v, cfg.Perf, err, want)
+		}
+	}
+	t.Setenv("BIRDSENSE_PERF", "sometimes")
+	if _, err := configFromEnv(); err == nil {
+		t.Error("BIRDSENSE_PERF=sometimes was accepted")
+	}
+}
+
 // Nothing the production startup path does -- bootstrapping the roster, then
 // wiring the API -- may put a placeholder person into the database.
 func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {

@@ -16,12 +16,14 @@ Moving analysis out of the web app into a Container Apps job is designed in
 ├── .github/workflows/  CI: gofmt, vet, tests and govulncheck
 ├── backend/            Go module: API + static file server
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
-│   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server)
+│   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
+│   ├── cmd/perf/       CLI: summarizes internal/perf's records for sizing analysis
 │   └── internal/
 │       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
 │       ├── api/        JSON handlers under /api/v1/
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
+│       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
@@ -696,6 +698,18 @@ TensorFlow on top, ~1.3 GB, and downloads its ~380 MB model on first use:
 
 ```sh
 .venv/bin/pip install -r analyzer/requirements.txt -r analyzer/requirements-perch.txt
+```
+
+Measuring analysis, for sizing the replica that runs it (ANALYSIS.md,
+*Performance data*): the server records every file's analysis -- CPU, memory,
+time per phase -- under `perf/` in file storage (`backend/data/audio/perf` in
+dev; `BIRDSENSE_PERF=off` stops it). `cmd/analyze -bench` measures one file at
+several settings, and `cmd/perf` summarizes either:
+
+```sh
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/analyze -bench -model perch -threads 1,2,4 card-file.wav
+go run ./cmd/perf bench-*.jsonl data/audio/perf
 ```
 
 Container (compose sets `BIRDSENSE_DB=local` and `BIRDSENSE_STORAGE=local`, and

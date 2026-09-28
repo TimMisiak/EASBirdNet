@@ -48,6 +48,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -134,6 +135,10 @@ type Queue struct {
 
 	// Perch runs Perch over each file after BirdNET. Set it before Run.
 	Perch bool
+	// Perf, if set, records what each model's pass over a file cost:
+	// time per phase, CPU and memory (ANALYSIS.md, *Performance data*).
+	// Set it before Run.
+	Perf *perf.Recorder
 
 	wake chan struct{}
 	// attempts counts failures per step and audio file id (step.attemptKey).
@@ -608,7 +613,15 @@ func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) e
 //
 // What is wrong with the file itself comes back as unreadable; settle sorts
 // that from everything else.
-func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step) (result, error) {
+func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step) (res result, err error) {
+	task := q.Perf.Begin(s.model)
+	var size int64
+	if task != nil {
+		ctx = birdnet.WithObserver(ctx, task)
+		wait := q.waited(f, s)
+		defer func() { task.End(q.taskRecord(card, f, wait, size, res, err)) }()
+	}
+	task.Phase("download")
 	local, cleanup, err := q.fetch(ctx, f)
 	defer cleanup()
 	switch {
@@ -617,6 +630,11 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 	case err != nil:
 		return result{}, fmt.Errorf("copying the audio out of storage: %w", err)
 	}
+	if task != nil {
+		if fi, err := os.Stat(local); err == nil {
+			size = fi.Size()
+		}
+	}
 
 	night, _ := time.ParseInLocation(time.DateOnly, f.Night, pacific)
 	opts := settings
@@ -624,6 +642,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 	if lat, lon := card.Recorder.Latitude, card.Recorder.Longitude; lat != 0 || lon != 0 {
 		opts.Location = &birdnet.Location{Latitude: lat, Longitude: lon, Week: birdnet.Week(night)}
 	}
+	task.Phase("analyze")
 	ran, err := q.analyzer.Analyze(ctx, []string{local}, opts)
 	switch {
 	case err != nil:
@@ -634,7 +653,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 		return result{}, unreadable(ran.Files[0].Error)
 	}
 
-	res := result{model: ran.Model}
+	res = result{model: ran.Model}
 	res.start, res.startKnown = RecordedAt(f.Path)
 	if f.RecordedAt != nil {
 		res.start, res.startKnown = *f.RecordedAt, true
@@ -662,6 +681,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.flac", i)), StartSec: clipStart, EndSec: clipEnd}
 	}
 	// Cut even a file with nothing heard in it, for its duration and sample rate.
+	task.Phase("clip")
 	res.recording, err = q.analyzer.Cut(ctx, local, clips)
 	if err != nil {
 		return result{}, fmt.Errorf("cutting clips: %w", err)
@@ -669,6 +689,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 	// A model and cutting clips take minutes over a file, long enough for its
 	// card to be deleted. Checking before anything is stored keeps a deleted
 	// card's clips out of storage.
+	task.Phase("store")
 	if _, err := q.store.GetAudioFile(ctx, card.ID, f.ID); err != nil {
 		return result{}, err
 	}
@@ -686,6 +707,44 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 	}
 	res.detections = len(detections)
 	return res, nil
+}
+
+// waited is how long a file has been waiting for a step: since it landed, for
+// BirdNET, and since BirdNET finished with it, for Perch. 0 when that isn't
+// recorded.
+func (q *Queue) waited(f db.AudioFile, s step) float64 {
+	since := f.UploadedAt
+	if s.model == birdnet.ModelPerch {
+		since = f.AnalyzedAt
+	}
+	if since == nil {
+		return 0
+	}
+	return q.now().Sub(*since).Round(time.Second).Seconds()
+}
+
+// taskRecord is what run knows about a pass over a file, for internal/perf,
+// which adds the timings, CPU and memory.
+func (q *Queue) taskRecord(card db.Upload, f db.AudioFile, wait float64, size int64, res result, err error) perf.Task {
+	rec := perf.Task{
+		Card: card.ID, File: f.ID, Path: f.Path,
+		Workers: max(settings.Workers, birdnet.DefaultWorkers), Threads: settings.Threads,
+		Result: "ok", Detections: res.detections, AudioSec: res.recording.DurationSec,
+		Bytes: size, WaitSec: wait,
+	}
+	if rec.AudioSec == 0 {
+		// A pass that failed before cutting clips never learned the
+		// duration; an earlier pass over the file may have.
+		rec.AudioSec = f.DurationSec
+	}
+	var bad unreadable
+	switch {
+	case errors.As(err, &bad):
+		rec.Result, rec.Error = "unreadable", err.Error()
+	case err != nil:
+		rec.Result, rec.Error = "error", err.Error()
+	}
+	return rec
 }
 
 var errSkip = errors.New("analysis: file is no longer queued")

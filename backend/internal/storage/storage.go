@@ -99,6 +99,18 @@ func ClipName(uploadID, detectionID string) string {
 	return clipPrefix + "/" + Segment(uploadID) + "/" + Segment(detectionID) + ".flac"
 }
 
+// perfPrefix is where the analysis performance records go (internal/perf):
+// outside uploads/ and clips/, so no card's delete or retention sweep touches
+// them, and a lifecycle rule of their own expires them.
+const perfPrefix = "perf"
+
+// PerfName is where one segment of one process's performance records is
+// stored: a day's directory, then the process (a replica, in Azure), then
+// the segment, named by when it began.
+func PerfName(day, instance, segment string) string {
+	return perfPrefix + "/" + Segment(day) + "/" + Segment(instance) + "/" + Segment(segment) + ".jsonl"
+}
+
 // Segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a
 // level to a name or climb out of one. It is what every element of a stored
 // name goes through: the card prefix and the random token an upload id is

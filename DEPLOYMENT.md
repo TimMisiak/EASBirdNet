@@ -149,11 +149,14 @@ which is why originals are kept for only a month (see *Audio retention* and
 **Blob container** — `azurerm_storage_container`: name `audio`, access type
 `private`. Card audio is at `uploads/{uploadId}/{random}`, each with a
 `.info` blob beside it, and the clips the server cuts for review are at
-`clips/{uploadId}/{detectionId}.flac`, well under a MB each (SCHEMA.md). The app tries to create the container at
+`clips/{uploadId}/{detectionId}.flac`, well under a MB each (SCHEMA.md). The
+analysis performance records are at `perf/{day}/{replica}/{segment}.jsonl`
+([ANALYSIS.md](ANALYSIS.md), *Performance data*). The app tries to create the container at
 startup and carries on if it exists; Terraform should still own it.
 
-**Lifecycle** — `azurerm_storage_management_policy`, one rule on prefix
-`audio/uploads/`. It deliberately never names `audio/clips/`, which stays hot:
+**Lifecycle** — `azurerm_storage_management_policy`, a rule on prefix
+`audio/uploads/`, below, and one that deletes the performance records under
+`audio/perf/` after 180 days. Neither names `audio/clips/`, which stays hot:
 clips are what retention keeps for good, and reviewers play them on demand.
 
 The rule is **not** the retention policy. The app deletes originals itself
@@ -242,6 +245,8 @@ normal rather than a sick replica.
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_AUDIO_RETENTION_DAYS` | `var.audio_retention_days`, default `30` | How long a card's original recordings are kept once BirdNET has finished with them; `0` keeps them for good. Detections and their clips are never removed by it. See [Audio retention](#audio-retention). |
 | `BIRDSENSE_PERCH` | `on` when `var.perch_enabled`, else `off` (the default) | Runs Perch over every file after BirdNET, as a second list of detections. Needs the larger container; see [Perch](#perch). |
+| `BIRDSENSE_PERF` | *unset*, so on | Records what analysis costs the replica -- CPU, memory, time per phase -- under `perf/` in the audio container, for sizing the analysis replica. `off` stops it. See [ANALYSIS.md](ANALYSIS.md), *Performance data*. |
+| `BIRDSENSE_IMAGE_TAG` | `var.image_tag` | Only so the performance records name the image they measured. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |

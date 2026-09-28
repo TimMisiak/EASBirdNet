@@ -487,6 +487,18 @@ never something to assume. One consequence: re-analyzing a file analyzed before
 FLAC writes its clips under the `.flac` names and leaves the `.wav` ones, which
 go when the card does -- deleting a card deletes everything under its prefix.
 
+The analysis performance records (ANALYSIS.md, *Performance data*) are the one
+thing in the container that isn't audio:
+
+```
+perf/{yyyy-mm-dd}/{instance}/{segmentStart}.jsonl
+```
+
+JSON Lines from `internal/perf`, one directory per process (the replica, in
+Azure) and one file per ten-minute segment, each starting with the process's
+`run` record. Nothing in the app reads them, no card owns them, and a lifecycle
+rule deletes them after 180 days.
+
 Beside each file, tusd keeps `{name}.info`: a small JSON record of the upload,
 with its size and the metadata the server set (`reference`, `path`,
 `audioFileId`, `userId`). In Azure a file is a block blob whose block list is
