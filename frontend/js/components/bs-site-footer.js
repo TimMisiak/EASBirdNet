@@ -1,11 +1,11 @@
 import { BaseElement } from "./base-element.js";
 
 // The two of the main site's footer links that matter to a Birdsense visitor.
-// They go out to eastsideaudubon.org.
-const MAIN_SITE = "https://www.eastsideaudubon.org";
+// Volunteering is Eastside Audubon's sign-up form on Neon CRM; contact is on
+// eastsideaudubon.org.
 const LINKS = [
-  ["Get involved", "/program-night"],
-  ["Contact us", "/contact"],
+  ["Volunteer", "https://eastsideaudubon.app.neoncrm.com/forms/volunteer"],
+  ["Contact us", "https://www.eastsideaudubon.org/contact"],
 ];
 
 /**
@@ -59,7 +59,7 @@ class SiteFooter extends BaseElement {
       </style>
       <footer class="inner">
         <nav aria-label="Eastside Audubon">
-          ${LINKS.map(([label, href]) => `<a href="${MAIN_SITE}${href}">${label}</a>`).join("")}
+          ${LINKS.map(([label, href]) => `<a href="${href}">${label}</a>`).join("")}
         </nav>
         <div class="fine">
           <p>
