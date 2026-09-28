@@ -293,7 +293,14 @@ the resource group with exactly `Microsoft.App/jobs/read`,
 `Microsoft.App/jobs/start/action` and `Microsoft.App/jobs/executions/read`,
 assigned to the app's identity on the job alone. Creating a role definition
 needs `Microsoft.Authorization/roleDefinitions/write`, which Owner and User
-Access Administrator have; a deployer with only Contributor can't apply this.
+Access Administrator have. A deployer who can only *assign* roles (Role Based
+Access Control Administrator) sets `analysis_job_starter_role` to a built-in
+role instead -- `"Contributor"` is certain to exist, and on the job alone it
+can change or delete that job but reach nothing else; a narrower built-in role
+for jobs is better if the tenant has one (`az role definition list --query
+"[?contains(roleName,'Jobs')].roleName"`). A deployer who can't assign roles
+at all leaves `analysis_job_enabled` off until someone can; nothing about the
+job is then assigned, and the web app analyzes by itself.
 
 **Watching it.** `az containerapp job execution list --name caj-birdsense-prod
 -g rg-birdsense-prod -o table` lists recent executions and how they ended. A

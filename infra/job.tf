@@ -128,8 +128,13 @@ resource "azurerm_container_app_job" "analysis" {
 }
 
 # Just enough for the app to start the job and see its executions -- not to
-# change it, stop it, or touch anything else in the group.
+# change it, stop it, or touch anything else in the group. Defining a role
+# needs Owner or User Access Administrator; with analysis_job_starter_role set
+# to a built-in role instead, none is defined and that one is assigned, on the
+# job alone. Nothing is assigned while the job is off.
 resource "azurerm_role_definition" "job_starter" {
+  count = var.analysis_job_enabled && var.analysis_job_starter_role == "" ? 1 : 0
+
   name        = "Birdsense analysis job starter (${local.base})"
   scope       = azurerm_resource_group.this.id
   description = "Start executions of the Birdsense analysis job and list them. Given to the web app's identity (ANALYSIS.md, Starting the job)."
@@ -146,7 +151,10 @@ resource "azurerm_role_definition" "job_starter" {
 }
 
 resource "azurerm_role_assignment" "app_job_starter" {
-  scope              = azurerm_container_app_job.analysis.id
-  role_definition_id = azurerm_role_definition.job_starter.role_definition_resource_id
-  principal_id       = azurerm_user_assigned_identity.this.principal_id
+  count = var.analysis_job_enabled ? 1 : 0
+
+  scope                = azurerm_container_app_job.analysis.id
+  role_definition_id   = var.analysis_job_starter_role == "" ? azurerm_role_definition.job_starter[0].role_definition_resource_id : null
+  role_definition_name = var.analysis_job_starter_role == "" ? null : var.analysis_job_starter_role
+  principal_id         = azurerm_user_assigned_identity.this.principal_id
 }

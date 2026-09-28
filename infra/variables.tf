@@ -65,6 +65,12 @@ variable "analysis_job_enabled" {
   default     = true
 }
 
+variable "analysis_job_starter_role" {
+  description = "The role the web app's identity gets on the analysis job, to start it. Empty (the default) defines a custom role that can only read, start and list the job's executions -- which needs Owner or User Access Administrator to apply. Set a built-in role's name instead, e.g. \"Contributor\", to apply with only the right to assign roles; it is assigned on the job alone, so it reaches nothing else."
+  type        = string
+  default     = ""
+}
+
 variable "analysis_cpu" {
   description = "vCPU for each analysis worker replica. It packs BirdNET and Perch into what it has (ANALYSIS.md, Packing); Consumption allows up to 4.0."
   type        = number
