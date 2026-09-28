@@ -95,9 +95,10 @@ func main() {
 	// restart once the environment is right. So the server starts it either
 	// way -- an unanalyzable card waits in processing rather than being lost.
 	queue := analysis.New(store, files, cfg.Analyzer, log)
+	queue.Perch = cfg.Perch
 	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
 	analysisDone := make(chan struct{})
-	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script)
+	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
 	go func() {
 		defer close(analysisDone)
 		queue.Run(analysisCtx)
@@ -245,6 +246,11 @@ type config struct {
 	// has finished with them. Detections and their clips are kept for good
 	// either way.
 	Retention retention.Policy
+	// Perch runs Google's Perch v2 over every file after BirdNET, as a second
+	// opinion stored beside BirdNET's detections. Off unless BIRDSENSE_PERCH
+	// turns it on: it needs TensorFlow in the image and several times
+	// BirdNET's memory and time (DEPLOYMENT.md).
+	Perch bool
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -316,6 +322,16 @@ func configFromEnv() (config, error) {
 		days = n
 	}
 	cfg.Retention = retention.Policy{Window: time.Duration(days) * 24 * time.Hour}
+
+	// A typo here would quietly leave a model off (or on), so only the
+	// spellings below are accepted.
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("BIRDSENSE_PERCH"))); v {
+	case "", "off", "false", "0":
+	case "on", "true", "1":
+		cfg.Perch = true
+	default:
+		return cfg, fmt.Errorf("BIRDSENSE_PERCH must be on or off, not %q", v)
+	}
 
 	if err := readAuth(&cfg); err != nil {
 		return cfg, err

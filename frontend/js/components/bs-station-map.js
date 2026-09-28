@@ -85,9 +85,9 @@ class StationMap extends HTMLElement {
           width: 26px;
           height: 26px;
           border-radius: 50%;
-          background: var(--bs-amber);
-          border: 2px solid var(--bs-amber-edge);
-          color: var(--bs-text);
+          background: var(--bs-accent);
+          border: 2px solid var(--bs-accent-edge);
+          color: var(--bs-on-accent);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -95,10 +95,10 @@ class StationMap extends HTMLElement {
           font-size: 0.6875rem;
         }
         .pin--draft {
-          background: var(--bs-forest);
-          border-color: var(--bs-forest-edge);
-          color: var(--bs-on-forest);
-          box-shadow: 0 0 0 6px rgba(35, 64, 47, 0.16);
+          background: var(--bs-navy);
+          border-color: var(--bs-navy-edge);
+          color: var(--bs-on-navy);
+          box-shadow: 0 0 0 6px rgba(20, 42, 69, 0.16);
           cursor: grab;
         }
         .hint, .fallback {

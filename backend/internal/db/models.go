@@ -105,6 +105,9 @@ type Upload struct {
 	FilesAnalyzed  int `json:"filesAnalyzed"`
 	FilesFailed    int `json:"filesFailed"`
 	DetectionCount int `json:"detectionCount"`
+	// PerchDetectionCount is what Perch found on the card, when it was run
+	// (AudioFile.Perch); DetectionCount stays BirdNET's alone.
+	PerchDetectionCount int `json:"perchDetectionCount,omitempty"`
 
 	Status       string `json:"status"`
 	StatusDetail string `json:"statusDetail,omitempty"`
@@ -145,7 +148,11 @@ type Night struct {
 // Analysis records how BirdNET was run over a card, so a detection can be
 // traced back to the model and settings that produced it.
 type Analysis struct {
-	Model         string     `json:"model"` // e.g. "BirdNET_GLOBAL_6K_V2.4"
+	Model string `json:"model"` // e.g. "BirdNET_GLOBAL_6K_V2.4"
+	// PerchModel is the Perch model that ran as a second step, e.g.
+	// "Perch_v2", or empty when Perch wasn't run. It uses MinConfidence and
+	// OverlapSec too; Sensitivity is BirdNET's alone.
+	PerchModel    string     `json:"perchModel,omitempty"`
 	MinConfidence float64    `json:"minConfidence"`
 	Sensitivity   float64    `json:"sensitivity"`
 	OverlapSec    float64    `json:"overlapSec"`
@@ -162,6 +169,25 @@ const (
 	AudioAnalyzed  = "analyzed"  // BirdNET has run over it
 	AudioFailed    = "failed"    // unreadable or analysis failed
 )
+
+// Statuses of a file's Perch step (PerchRun). Perch runs after BirdNET, so a
+// file is only queued for it once BirdNET has analyzed it.
+const (
+	PerchQueued    = "queued"    // waiting for Perch
+	PerchAnalyzing = "analyzing" // Perch is running over it
+	PerchAnalyzed  = "analyzed"  // Perch has run over it
+	PerchFailed    = "failed"    // Perch couldn't, which leaves BirdNET's result as it was
+)
+
+// PerchRun is how the Perch step went on one file. It is separate from the
+// file's own Status, which stays BirdNET's: Perch is a second opinion, and
+// failing to get one takes nothing away from the first.
+type PerchRun struct {
+	Status         string     `json:"status"`
+	StatusDetail   string     `json:"statusDetail,omitempty"`
+	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
+	DetectionCount int        `json:"detectionCount"`
+}
 
 // AudioDetailNotOnCard is the StatusDetail of a failed file that was on a
 // card's list, but not on the list the card was registered with again. It is
@@ -195,8 +221,11 @@ type AudioFile struct {
 	// gone. The file's detections and their clips are kept.
 	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	// Perch is the file's Perch step, absent when Perch wasn't turned on
+	// when BirdNET finished with the file.
+	Perch     *PerchRun `json:"perch,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Review statuses. Only confirmed detections are ever shown publicly.
@@ -206,12 +235,21 @@ const (
 	ReviewRejected   = "rejected"
 )
 
-// Detection is BirdNET hearing one species in one audio file, above the
-// analysis threshold, over a run of consecutive 3-second windows. The analysis
-// queue merges the windows, so StartSec and EndSec span the run and Confidence
-// is the highest of its windows.
+// The models a detection can come from (Detection.Model).
+const (
+	ModelBirdNET = "birdnet"
+	ModelPerch   = "perch"
+)
+
+// Detection is BirdNET (or Perch) hearing one species in one audio file, above
+// the analysis threshold, over a run of consecutive windows (3 seconds for
+// BirdNET, 5 for Perch). The analysis queue merges the windows, so StartSec
+// and EndSec span the run and Confidence is the highest of its windows.
 type Detection struct {
-	ID          string `json:"id"`
+	ID string `json:"id"`
+	// Model is which model heard it, ModelBirdNET or ModelPerch. Detections
+	// stored before Perch have none, and are BirdNET's; ModelOf reads it.
+	Model       string `json:"model,omitempty"`
 	UploadID    string `json:"uploadId"`
 	AudioFileID string `json:"audioFileId"`
 	RecorderID  string `json:"recorderId"`
@@ -252,6 +290,15 @@ type Review struct {
 	CorrectedScientificName string    `json:"correctedScientificName,omitempty"`
 	CorrectedCommonName     string    `json:"correctedCommonName,omitempty"`
 	Note                    string    `json:"note,omitempty"`
+}
+
+// ModelOf is which model heard a detection, ModelBirdNET for one stored
+// before detections said.
+func (d Detection) ModelOf() string {
+	if d.Model == "" {
+		return ModelBirdNET
+	}
+	return d.Model
 }
 
 // Species is the species a detection counts as: the reviewer's correction when
@@ -345,6 +392,17 @@ func AudioFileID(uploadID, cardPath string) string {
 // BirdNET output overwrites rather than duplicates.
 func DetectionID(audioFileID string, startMs int64, scientificName string) string {
 	return "det_" + digest(audioFileID, fmt.Sprint(startMs), scientificName)
+}
+
+// ModelDetectionID is DetectionID for a detection by either model. BirdNET's
+// are DetectionID itself, so the ids stored before Perch still name the same
+// detections; Perch's add the model, so the two models hearing one species at
+// the same moment are two detections rather than one overwriting the other.
+func ModelDetectionID(model, audioFileID string, startMs int64, scientificName string) string {
+	if model == "" || model == ModelBirdNET {
+		return DetectionID(audioFileID, startMs, scientificName)
+	}
+	return "det_" + digest(audioFileID, fmt.Sprint(startMs), scientificName, model)
 }
 
 func digest(parts ...string) string {

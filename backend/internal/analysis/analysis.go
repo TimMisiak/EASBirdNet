@@ -1,5 +1,6 @@
 // Package analysis runs BirdNET over the audio of received cards and stores
-// what it hears.
+// what it hears, and, when Queue.Perch is set, runs Google's Perch v2 over
+// the same files as a second opinion.
 //
 // The queue is the database. A card whose last file has landed is
 // "processing", and each of its files in "uploaded" status is waiting for
@@ -8,8 +9,14 @@
 // the consecutive windows in which one species was heard (merge.go), cuts a
 // clip of each detection into storage, writes the detections, and marks the
 // file analyzed.
-// When no file on a card is left, the card moves on to in_review, or to
-// needs_attention if BirdNET couldn't read some of it.
+// With Perch on, a file BirdNET has analyzed is then queued for Perch, which
+// goes through the same steps and stores its detections beside BirdNET's,
+// each marked with the model that heard it. It is a step of its own
+// (db.AudioFile.Perch), taken one file at a time after BirdNET has caught up,
+// so a card waiting for BirdNET never waits behind Perch, and Perch failing on
+// a file leaves BirdNET's result on it as it was.
+// When no file on a card is left for either, the card moves on to in_review,
+// or to needs_attention if BirdNET couldn't read some of it.
 //
 // Because the state lives in the Store rather than in memory, a restart (a
 // deploy, a crash, a replica scaled in) loses nothing: the next Run picks up
@@ -50,6 +57,9 @@ type Analyzer interface {
 	// Check reports whether Analyze and Cut can run at all. The queue calls it
 	// before it starts, and again until it passes.
 	Check(ctx context.Context) error
+	// CheckPerch reports whether Analyze can run birdnet.ModelPerch too. The
+	// queue calls it instead of Check when Perch is on.
+	CheckPerch(ctx context.Context) error
 	Analyze(ctx context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error)
 	Cut(ctx context.Context, source string, clips []birdnet.Clip) (birdnet.Recording, error)
 }
@@ -122,8 +132,12 @@ type Queue struct {
 	analyzer Analyzer
 	log      *slog.Logger
 
+	// Perch runs Perch over each file after BirdNET. Set it before Run.
+	Perch bool
+
 	wake chan struct{}
-	// attempts counts BirdNET failures per audio file id. It is only touched
+	// attempts counts failures per step and audio file id (step.attemptKey).
+	// It is only touched
 	// by Run's goroutine, and a restart forgetting it just allows a few more
 	// tries.
 	attempts map[string]int
@@ -236,19 +250,25 @@ func (q *Queue) waitReady(ctx context.Context) bool {
 	delay := q.checkDelay
 	for {
 		checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
-		err := q.analyzer.Check(checkCtx)
+		check := q.analyzer.Check
+		if q.Perch {
+			// Perch was asked for, so a server that can't run it says so
+			// rather than finishing cards without it.
+			check = q.analyzer.CheckPerch
+		}
+		err := check(checkCtx)
 		cancel()
 		if ctx.Err() != nil {
 			return false
 		}
 		if err == nil {
 			q.setStatus(StateReady, "")
-			q.log.Info("analysis: BirdNET is available; working through received cards")
+			q.log.Info("analysis: BirdNET is available; working through received cards", "perch", q.Perch)
 			return true
 		}
 		q.setStatus(StateUnavailable, err.Error())
-		q.log.Warn("BirdNET isn't available, so received cards will wait in processing; set BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_BIRDNET_SCRIPT",
-			"err", err, "retry_in", delay)
+		q.log.Warn("BirdNET isn't available, so received cards will wait in processing; set BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_BIRDNET_SCRIPT (and install analyzer/requirements-perch.txt, or turn BIRDSENSE_PERCH off, if Perch is on)",
+			"err", err, "perch", q.Perch, "retry_in", delay)
 		if !sleep(ctx, delay) {
 			return false
 		}
@@ -263,34 +283,60 @@ var errRetry = errors.New("analysis: attempt failed")
 // drain analyzes every queued file on every processing card, and finishes each
 // card as its last file is done. It returns early on a failure Run should
 // pause for.
+//
+// BirdNET comes first, on every card, and Perch (when it is on) takes one file
+// at a time after that, going back to BirdNET between each: Perch is several
+// times slower, so a card that arrives while a long one is getting its second
+// opinion still gets its first one straight away.
 func (q *Queue) drain(ctx context.Context) error {
-	// Wake-ups that arrive while draining are covered by this pass, as long as
-	// the card list is read after them.
-	select {
-	case <-q.wake:
-	default:
-	}
-	cards, err := q.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusProcessing})
-	if err != nil {
-		return err
-	}
-	// First come, first analyzed.
-	slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
-	for _, card := range cards {
-		err := q.processCard(ctx, card)
-		if errors.Is(err, db.ErrNotFound) {
-			// Only deleting a card removes its documents, so one that has gone
-			// from under the queue is a card being deleted. Detections stored
-			// for it after the delete swept past them go now.
-			q.log.Info("analysis: card deleted while being analyzed", "upload", card.ID)
-			if err := q.store.DeleteUpload(ctx, card.ID); err != nil && !errors.Is(err, db.ErrNotFound) {
-				return err
-			}
-			continue
+	for {
+		// Wake-ups that arrive while draining are covered by this pass, as
+		// long as the card list is read after them.
+		select {
+		case <-q.wake:
+		default:
 		}
+		cards, err := q.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusProcessing})
 		if err != nil {
 			return err
 		}
+		// First come, first analyzed.
+		slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
+		for _, card := range cards {
+			if err := q.gone(ctx, card, q.processCard(ctx, card)); err != nil {
+				return err
+			}
+		}
+		if !q.Perch {
+			return nil
+		}
+		ran := false
+		for _, card := range cards {
+			ran, err = q.perchNext(ctx, card)
+			if err := q.gone(ctx, card, err); err != nil {
+				return err
+			}
+			if ran {
+				break
+			}
+		}
+		if !ran {
+			return nil
+		}
+	}
+}
+
+// gone passes on what processing a card returned, unless it is the card
+// having been deleted from under the queue. Only deleting a card removes its
+// documents, so that is a card being deleted, and detections stored for it
+// after the delete swept past them go now.
+func (q *Queue) gone(ctx context.Context, card db.Upload, err error) error {
+	if !errors.Is(err, db.ErrNotFound) {
+		return err
+	}
+	q.log.Info("analysis: card deleted while being analyzed", "upload", card.ID)
+	if err := q.store.DeleteUpload(ctx, card.ID); err != nil && !errors.Is(err, db.ErrNotFound) {
+		return err
 	}
 	return nil
 }
@@ -302,12 +348,26 @@ func receivedAt(u db.Upload) time.Time {
 	return u.UpdatedAt
 }
 
+// processCard runs BirdNET over each of a card's queued files, and finishes
+// the card if that leaves nothing waiting.
 func (q *Queue) processCard(ctx context.Context, card db.Upload) error {
 	files, err := q.store.ListAudioFiles(ctx, card.ID)
 	if err != nil {
 		return err
 	}
 	for _, f := range files {
+		if !q.Perch && perchWaiting(f) {
+			// Queued for Perch while it was on, and it is off now. The file
+			// never got its second opinion, so it says none.
+			if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+				if perchWaiting(*f) {
+					f.Perch = nil
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
 		if !queued(f) {
 			continue
 		}
@@ -328,10 +388,39 @@ func (q *Queue) processCard(ctx context.Context, card db.Upload) error {
 	return q.tally(ctx, card.ID)
 }
 
+// perchNext runs Perch over the first of a card's files waiting for it, and
+// reports whether there was one.
+func (q *Queue) perchNext(ctx context.Context, card db.Upload) (bool, error) {
+	files, err := q.store.ListAudioFiles(ctx, card.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range files {
+		if !perchWaiting(f) || queued(f) {
+			continue
+		}
+		if card.Analysis == nil {
+			if card, err = q.startCard(ctx, card.ID); err != nil {
+				return false, err
+			}
+		}
+		if err := q.perchFile(ctx, card, f); err != nil {
+			return true, err
+		}
+		return true, q.tally(ctx, card.ID)
+	}
+	return false, nil
+}
+
 // queued reports whether a file is waiting for BirdNET. A file found
 // "analyzing" was cut off by a restart, so it waits again.
 func queued(f db.AudioFile) bool {
 	return f.Status == db.AudioUploaded || f.Status == db.AudioAnalyzing
+}
+
+// perchWaiting reports whether a file is waiting for Perch, the same way.
+func perchWaiting(f db.AudioFile) bool {
+	return f.Perch != nil && (f.Perch.Status == db.PerchQueued || f.Perch.Status == db.PerchAnalyzing)
 }
 
 // startCard records the settings a card is analyzed with.
@@ -348,11 +437,67 @@ func (q *Queue) startCard(ctx context.Context, id string) (db.Upload, error) {
 	})
 }
 
+// A step is one model's pass over a file. BirdNET's is the file's own status;
+// Perch's is its Perch field, so a second opinion that fails leaves the first
+// as it was.
+type step struct {
+	model string // birdnet.ModelBirdNET or birdnet.ModelPerch
+	// requeue puts a file this step was cut off on back in its queue.
+	requeue func(f *db.AudioFile)
+	// failed records that this step can't be done on the file, and why.
+	failed func(f *db.AudioFile, why string, at time.Time)
+}
+
+var birdnetStep = step{
+	model: birdnet.ModelBirdNET,
+	requeue: func(f *db.AudioFile) {
+		if f.Status == db.AudioAnalyzing {
+			f.Status = db.AudioUploaded
+		}
+	},
+	failed: func(f *db.AudioFile, why string, at time.Time) {
+		f.Status, f.StatusDetail, f.AnalyzedAt, f.DetectionCount = db.AudioFailed, why, &at, 0
+	},
+}
+
+var perchStep = step{
+	model: birdnet.ModelPerch,
+	requeue: func(f *db.AudioFile) {
+		if f.Perch != nil && f.Perch.Status == db.PerchAnalyzing {
+			f.Perch.Status = db.PerchQueued
+		}
+	},
+	failed: func(f *db.AudioFile, why string, at time.Time) {
+		f.Perch = &db.PerchRun{Status: db.PerchFailed, StatusDetail: why, AnalyzedAt: &at}
+	},
+}
+
+// attemptKey is what a step's failures on a file are counted under.
+func (s step) attemptKey(f db.AudioFile) string {
+	return s.model + ":" + f.ID
+}
+
+// unreadable is what is wrong with a file itself, which no retry will change.
+type unreadable string
+
+func (u unreadable) Error() string { return string(u) }
+
+// result is what one model's run over a file stored.
+type result struct {
+	// model is the model's own name for itself, e.g. "Perch_v2".
+	model      string
+	detections int
+	recording  birdnet.Recording
+	// start is when the recording began, when startKnown.
+	start      time.Time
+	startKnown bool
+}
+
 // analyzeFile runs BirdNET over one file and stores the result. It returns an
 // error only for something that should pause the queue: the store failing, or
 // an attempt that failed in a way that may pass. What is wrong with the file
 // itself is recorded on the file, and an attempt that keeps failing runs out
-// of tries (storingFailed, retryOrFail) rather than repeating for good.
+// of tries (retryOrFail) rather than repeating for good.
 func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
 	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
 		if !queued(*f) {
@@ -371,47 +516,142 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 	log.Info("analysis: starting file")
 	began := time.Now()
 
+	res, err := q.run(ctx, card, f, birdnetStep)
+	if err != nil {
+		return q.settle(ctx, birdnetStep, f, err)
+	}
+	analyzed := q.stamp()
+	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+		f.Status, f.StatusDetail = db.AudioAnalyzed, ""
+		f.AnalyzedAt, f.DetectionCount = &analyzed, res.detections
+		f.DurationSec, f.SampleRate = res.recording.DurationSec, res.recording.SampleRate
+		if f.RecordedAt == nil && res.startKnown {
+			t := res.start.UTC()
+			f.RecordedAt = &t
+		}
+		// Queued for Perch now BirdNET is done with it. A file BirdNET has
+		// run over again is queued again, since its Perch detections are
+		// overwritten the same way its own are.
+		f.Perch = nil
+		if q.Perch {
+			f.Perch = &db.PerchRun{Status: db.PerchQueued}
+		}
+		return nil
+	}); err != nil {
+		return q.settle(ctx, birdnetStep, f, fmt.Errorf("marking the file analyzed: %w", err))
+	}
+	if res.model != "" && card.Analysis != nil && card.Analysis.Model == "" {
+		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
+			if u.Analysis != nil && u.Analysis.Model == "" {
+				u.Analysis.Model = res.model
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	delete(q.attempts, birdnetStep.attemptKey(f))
+	log.Info("analysis: finished file", "detections", res.detections, "dur", time.Since(began).Round(time.Second))
+	return nil
+}
+
+// perchFile runs Perch over one file BirdNET has analyzed, and stores what it
+// heard beside BirdNET's detections. It returns an error the same way
+// analyzeFile does, and records what goes wrong on the file's Perch step.
+func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
+	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+		if !perchWaiting(*f) {
+			return errSkip
+		}
+		f.Perch.Status, f.Perch.StatusDetail = db.PerchAnalyzing, ""
+		return nil
+	})
+	switch {
+	case errors.Is(err, errSkip):
+		return nil
+	case err != nil:
+		return err
+	}
+	log := q.log.With("upload", card.ID, "path", f.Path)
+	log.Info("analysis: starting Perch on file")
+	began := time.Now()
+
+	res, err := q.run(ctx, card, f, perchStep)
+	if err != nil {
+		return q.settle(ctx, perchStep, f, err)
+	}
+	analyzed := q.stamp()
+	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+		f.Perch = &db.PerchRun{Status: db.PerchAnalyzed, AnalyzedAt: &analyzed, DetectionCount: res.detections}
+		return nil
+	}); err != nil {
+		return q.settle(ctx, perchStep, f, fmt.Errorf("marking the file analyzed by Perch: %w", err))
+	}
+	if res.model != "" && card.Analysis != nil && card.Analysis.PerchModel == "" {
+		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
+			if u.Analysis != nil && u.Analysis.PerchModel == "" {
+				u.Analysis.PerchModel = res.model
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	delete(q.attempts, perchStep.attemptKey(f))
+	log.Info("analysis: finished Perch on file", "detections", res.detections, "dur", time.Since(began).Round(time.Second))
+	return nil
+}
+
+// run is one model's pass over a file: copy it out of storage, run the model,
+// merge what it heard, cut a clip of each, and store the clips and the
+// detections. The caller records the result on the file.
+//
+// What is wrong with the file itself comes back as unreadable; settle sorts
+// that from everything else.
+func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step) (result, error) {
 	local, cleanup, err := q.fetch(ctx, f)
 	defer cleanup()
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
-		return q.fail(ctx, f, "the audio isn't in storage")
+		return result{}, unreadable("the audio isn't in storage")
 	case err != nil:
-		return q.retryOrFail(ctx, f, fmt.Errorf("copying the audio out of storage: %w", err))
+		return result{}, fmt.Errorf("copying the audio out of storage: %w", err)
 	}
 
 	night, _ := time.ParseInLocation(time.DateOnly, f.Night, pacific)
 	opts := settings
+	opts.Model = s.model
 	if lat, lon := card.Recorder.Latitude, card.Recorder.Longitude; lat != 0 || lon != 0 {
 		opts.Location = &birdnet.Location{Latitude: lat, Longitude: lon, Week: birdnet.Week(night)}
 	}
-	res, err := q.analyzer.Analyze(ctx, []string{local}, opts)
+	ran, err := q.analyzer.Analyze(ctx, []string{local}, opts)
 	switch {
-	case ctx.Err() != nil:
-		return ctx.Err()
 	case err != nil:
-		return q.retryOrFail(ctx, f, err)
-	case len(res.Files) != 1:
-		return q.retryOrFail(ctx, f, fmt.Errorf("BirdNET reported %d files for one", len(res.Files)))
-	case res.Files[0].Error != "":
-		return q.fail(ctx, f, res.Files[0].Error)
+		return result{}, err
+	case len(ran.Files) != 1:
+		return result{}, fmt.Errorf("BirdNET reported %d files for one", len(ran.Files))
+	case ran.Files[0].Error != "":
+		return result{}, unreadable(ran.Files[0].Error)
 	}
 
-	start, startKnown := RecordedAt(f.Path)
+	res := result{model: ran.Model}
+	res.start, res.startKnown = RecordedAt(f.Path)
 	if f.RecordedAt != nil {
-		start, startKnown = *f.RecordedAt, true
+		res.start, res.startKnown = *f.RecordedAt, true
 	}
-	if !startKnown {
+	start := res.start
+	if !res.startKnown {
 		// Without a time in the name, the night is all that is known.
 		start = night
 	}
-	found := merge(res.Files[0].Detections)
+	found := merge(ran.Files[0].Detections)
 	detections := make([]db.Detection, len(found))
 	clips := make([]birdnet.Clip, len(found))
 	for i, d := range found {
 		detections[i] = db.Detection{
 			// Set here rather than by the store, because the clip is named by it.
-			ID:          db.DetectionID(f.ID, int64(d.StartSec*1000), d.ScientificName),
+			ID:          db.ModelDetectionID(s.model, f.ID, int64(d.StartSec*1000), d.ScientificName),
+			Model:       s.model,
 			AudioFileID: f.ID, RecorderID: card.RecorderID,
 			DetectedAt: start.Add(time.Duration(d.StartSec * float64(time.Second))).UTC().Truncate(time.Millisecond),
 			Night:      f.Night, StartSec: d.StartSec, EndSec: d.EndSec,
@@ -422,57 +662,30 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.flac", i)), StartSec: clipStart, EndSec: clipEnd}
 	}
 	// Cut even a file with nothing heard in it, for its duration and sample rate.
-	recording, err := q.analyzer.Cut(ctx, local, clips)
-	switch {
-	case ctx.Err() != nil:
-		return ctx.Err()
-	case err != nil:
-		return q.retryOrFail(ctx, f, fmt.Errorf("cutting clips: %w", err))
+	res.recording, err = q.analyzer.Cut(ctx, local, clips)
+	if err != nil {
+		return result{}, fmt.Errorf("cutting clips: %w", err)
 	}
-	// BirdNET and cutting clips take minutes over a file, long enough for its
+	// A model and cutting clips take minutes over a file, long enough for its
 	// card to be deleted. Checking before anything is stored keeps a deleted
 	// card's clips out of storage.
 	if _, err := q.store.GetAudioFile(ctx, card.ID, f.ID); err != nil {
-		return q.storingFailed(ctx, f, err)
+		return result{}, err
 	}
-	for i, c := range recording.Clips {
+	for i, c := range res.recording.Clips {
 		name := storage.ClipName(card.ID, detections[i].ID)
 		if err := q.putFile(ctx, name, c.Path); err != nil {
-			return q.storingFailed(ctx, f, fmt.Errorf("storing a clip: %w", err))
+			return result{}, fmt.Errorf("storing a clip: %w", err)
 		}
 		detections[i].Clip = &db.Clip{BlobName: name, StartSec: c.StartSec, EndSec: c.EndSec}
 	}
 	if len(detections) > 0 {
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {
-			return q.storingFailed(ctx, f, fmt.Errorf("storing the detections: %w", err))
+			return result{}, fmt.Errorf("storing the detections: %w", err)
 		}
 	}
-	analyzed := q.stamp()
-	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
-		f.Status, f.StatusDetail = db.AudioAnalyzed, ""
-		f.AnalyzedAt, f.DetectionCount = &analyzed, len(detections)
-		f.DurationSec, f.SampleRate = recording.DurationSec, recording.SampleRate
-		if f.RecordedAt == nil && startKnown {
-			t := start.UTC()
-			f.RecordedAt = &t
-		}
-		return nil
-	}); err != nil {
-		return q.storingFailed(ctx, f, fmt.Errorf("marking the file analyzed: %w", err))
-	}
-	if res.Model != "" && card.Analysis != nil && card.Analysis.Model == "" {
-		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
-			if u.Analysis != nil && u.Analysis.Model == "" {
-				u.Analysis.Model = res.Model
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
-	delete(q.attempts, f.ID)
-	log.Info("analysis: finished file", "detections", len(detections), "dur", time.Since(began).Round(time.Second))
-	return nil
+	res.detections = len(detections)
+	return res, nil
 }
 
 var errSkip = errors.New("analysis: file is no longer queued")
@@ -518,62 +731,69 @@ func (q *Queue) putFile(ctx context.Context, name, local string) error {
 	return q.files.Put(ctx, name, src)
 }
 
-// storingFailed is a failure in the steps after BirdNET has read the file:
-// storing a clip, storing the detections, or recording the result. They go
-// through the same attempt counter as a crashed analyzer, because otherwise a
-// failure that never passes -- a blob 403 after a role change, a store that
-// keeps rejecting the write -- re-runs the whole multi-minute pass over a
-// ~300 MB file for good, and every card behind it waits.
-//
-// A card deleted from under the run is not the file's failure: its documents
-// are gone, so drain finishes the delete instead.
-func (q *Queue) storingFailed(ctx context.Context, f db.AudioFile, cause error) error {
-	if ctx.Err() != nil || errors.Is(cause, db.ErrNotFound) {
-		return cause
+// settle turns a step that failed on a file into what the queue does next.
+// What is wrong with the file itself is recorded on it at once. A card deleted
+// from under the run is not the file's failure: its documents are gone, so
+// drain finishes the delete instead. Anything else -- the model crashing or
+// being killed, or storing what it heard failing -- goes through retryOrFail,
+// because otherwise a failure that never passes (a blob 403 after a role
+// change, a store that keeps rejecting the write) re-runs the whole
+// multi-minute pass over a ~300 MB file for good, and every card behind it
+// waits.
+func (q *Queue) settle(ctx context.Context, s step, f db.AudioFile, err error) error {
+	var bad unreadable
+	switch {
+	case errors.As(err, &bad):
+		return q.fail(ctx, s, f, string(bad))
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case errors.Is(err, db.ErrNotFound):
+		return err
 	}
-	return q.retryOrFail(ctx, f, cause)
+	return q.retryOrFail(ctx, s, f, err)
 }
 
-// retryOrFail puts a file back in the queue and pauses the queue, unless the
-// file has had its tries, in which case it fails.
-func (q *Queue) retryOrFail(ctx context.Context, f db.AudioFile, cause error) error {
-	q.attempts[f.ID]++
-	if q.attempts[f.ID] >= maxAttempts {
-		delete(q.attempts, f.ID)
-		q.log.Error("analysis: giving up on a file", "upload", f.UploadID, "path", f.Path, "err", cause)
-		return q.fail(ctx, f, "analysis failed on this file "+fmt.Sprint(maxAttempts)+" times: "+firstLine(cause.Error()))
+// retryOrFail puts a file back in the step's queue and pauses the queue,
+// unless the file has had its tries, in which case the step fails.
+func (q *Queue) retryOrFail(ctx context.Context, s step, f db.AudioFile, cause error) error {
+	key := s.attemptKey(f)
+	q.attempts[key]++
+	if q.attempts[key] >= maxAttempts {
+		delete(q.attempts, key)
+		q.log.Error("analysis: giving up on a file", "upload", f.UploadID, "path", f.Path, "model", s.model, "err", cause)
+		return q.fail(ctx, s, f, "analysis failed on this file "+fmt.Sprint(maxAttempts)+" times: "+firstLine(cause.Error()))
 	}
 	if _, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
-		if f.Status == db.AudioAnalyzing {
-			f.Status = db.AudioUploaded
-		}
+		s.requeue(f)
 		return nil
 	}); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w on %s (attempt %d of %d): %w", errRetry, f.Path, q.attempts[f.ID], maxAttempts, cause)
+	return fmt.Errorf("%w on %s (%s, attempt %d of %d): %w", errRetry, f.Path, s.model, q.attempts[key], maxAttempts, cause)
 }
 
-// fail records that a file can't be analyzed, and why.
-func (q *Queue) fail(ctx context.Context, f db.AudioFile, why string) error {
-	q.log.Warn("analysis: file failed", "upload", f.UploadID, "path", f.Path, "why", why)
-	analyzed := q.stamp()
+// fail records that a step can't be done on a file, and why.
+func (q *Queue) fail(ctx context.Context, s step, f db.AudioFile, why string) error {
+	q.log.Warn("analysis: file failed", "upload", f.UploadID, "path", f.Path, "model", s.model, "why", why)
+	at := q.stamp()
 	_, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
-		f.Status, f.StatusDetail, f.AnalyzedAt, f.DetectionCount = db.AudioFailed, why, &analyzed, 0
+		s.failed(f, why, at)
 		return nil
 	})
 	return err
 }
 
 // tally recounts a card's analysis from its files, and finishes a card that
-// has nothing left queued: in_review, or needs_attention when some files
-// couldn't be analyzed.
+// has nothing left queued for BirdNET or Perch: in_review, or needs_attention
+// when BirdNET couldn't analyze some files. Perch failing on a file doesn't
+// need a coordinator's attention -- BirdNET's result is still there -- so it
+// is only shown on the file.
 func (q *Queue) tally(ctx context.Context, id string) error {
 	files, err := q.store.ListAudioFiles(ctx, id)
 	if err != nil {
 		return err
 	}
-	var analyzed, failed, detections, waiting int
+	var analyzed, failed, detections, perchDetections, waiting int
 	for _, f := range files {
 		switch {
 		case f.StatusDetail == db.AudioDetailNotOnCard:
@@ -585,6 +805,14 @@ func (q *Queue) tally(ctx context.Context, id string) error {
 		default:
 			waiting++
 		}
+		if f.Perch != nil && f.StatusDetail != db.AudioDetailNotOnCard {
+			perchDetections += f.Perch.DetectionCount
+			// A file waiting for Perch holds the card in processing, and so
+			// holds on to its audio: retention only sweeps finished cards.
+			if q.Perch && perchWaiting(f) {
+				waiting++
+			}
+		}
 	}
 	finished := q.stamp()
 	_, err = q.store.UpdateUpload(ctx, id, func(u *db.Upload) error {
@@ -592,6 +820,7 @@ func (q *Queue) tally(ctx context.Context, id string) error {
 			return nil
 		}
 		u.FilesAnalyzed, u.FilesFailed, u.DetectionCount = analyzed, failed, detections
+		u.PerchDetectionCount = perchDetections
 		// A card with no files on record has nothing to finish on.
 		if waiting > 0 || analyzed+failed == 0 {
 			return nil

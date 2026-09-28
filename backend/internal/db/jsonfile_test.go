@@ -300,6 +300,27 @@ func TestJSONFileListFilters(t *testing.T) {
 	if len(unreviewed) != 1 || unreviewed[0].ScientificName != "Tyto alba" {
 		t.Errorf("unreviewed = %d, want the barn owl only", len(unreviewed))
 	}
+
+	// Perch hearing the same owl at the same moment is a detection of its own,
+	// and the model filter tells the two apart. BirdNET's include those stored
+	// before detections named a model.
+	perch := mk(first.ID, 0, "Strix varia", "")
+	perch.Model = ModelPerch
+	if err := s.UpsertDetections(ctx, first.ID, []Detection{perch}); err != nil {
+		t.Fatal(err)
+	}
+	both, _ := s.ListDetections(ctx, DetectionFilter{UploadID: first.ID})
+	if len(both) != 3 || both[0].ID == both[1].ID {
+		t.Errorf("detections on %s = %d, want Perch's owl beside BirdNET's", first.ID, len(both))
+	}
+	perchs, _ := s.ListDetections(ctx, DetectionFilter{Model: ModelPerch})
+	if len(perchs) != 1 || perchs[0].Model != ModelPerch || perchs[0].ID != ModelDetectionID(ModelPerch, "af_"+first.ID, 0, "Strix varia") {
+		t.Errorf("Perch's = %+v, want its one owl", perchs)
+	}
+	birdnets, _ := s.ListDetections(ctx, DetectionFilter{Model: ModelBirdNET})
+	if len(birdnets) != 4 || birdnets[0].Model != "" {
+		t.Errorf("BirdNET's = %d, want the four stored with no model", len(birdnets))
+	}
 }
 
 func TestJSONFileDeleteUpload(t *testing.T) {
@@ -391,6 +412,15 @@ func TestIDsAreStable(t *testing.T) {
 	}
 	if DetectionID("af_1", 732_000, "Strix varia") != DetectionID("af_1", 732_000, "Strix varia") {
 		t.Error("detection id is not deterministic")
+	}
+	// BirdNET's ids didn't change when Perch's were added, so a re-run of a
+	// file analyzed before still overwrites its detections.
+	if ModelDetectionID(ModelBirdNET, "af_1", 732_000, "Strix varia") != DetectionID("af_1", 732_000, "Strix varia") ||
+		ModelDetectionID("", "af_1", 732_000, "Strix varia") != DetectionID("af_1", 732_000, "Strix varia") {
+		t.Error("BirdNET's detection ids changed")
+	}
+	if ModelDetectionID(ModelPerch, "af_1", 732_000, "Strix varia") == DetectionID("af_1", 732_000, "Strix varia") {
+		t.Error("Perch and BirdNET hearing one owl at one moment share an id")
 	}
 	if NewID("usr") == NewID("usr") {
 		t.Error("NewID repeated itself")

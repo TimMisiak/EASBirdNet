@@ -10,8 +10,11 @@ import "./bs-queue-note.js";
 /**
  * <bs-admin-upload-detail reference="OWL-20260914-SR03"> -- one card, file by
  * file: where each is in being sent and analyzed, and, opened, everything
- * BirdNET heard in it, each linked to its own page for review. While the card is still moving the page looks again
- * every few seconds, keeping the filter and the open files as they were.
+ * BirdNET heard in it, each linked to its own page for review. Where the
+ * server runs Perch as a second step, each file says how far Perch has got
+ * with it, and what Perch heard is listed under BirdNET's. While the card is
+ * still moving the page looks again every few seconds, keeping the filter and
+ * the open files as they were.
  *
  * Attribute: reference, the card.
  */
@@ -41,7 +44,10 @@ class AdminUploadDetail extends BaseElement {
   #filter = "all";
   /** Ids of the files whose detections are showing. */
   #open = new Set();
-  /** fileId -> {status, detections, total, count}; count is the file's detectionCount when fetched. */
+  /**
+   * "model:fileId" -> {status, detections, total, count}; count is that
+   * model's detection count for the file when fetched.
+   */
   #heard = new Map();
   #timer = 0;
 
@@ -107,22 +113,27 @@ class AdminUploadDetail extends BaseElement {
     }
   }
 
-  async #fetchHeard(file) {
+  /** Fetch what each model that has finished with a file heard in it. */
+  #fetchHeard(file) {
     if (!file || file.status !== "analyzed") return;
-    const had = this.#heard.get(file.id);
-    if (had && had.status !== "error" && had.count === file.detectionCount) return;
+    this.#fetchModel(file, "birdnet", file.detectionCount);
+    if (file.perch?.status === "analyzed") this.#fetchModel(file, "perch", file.perch.detectionCount);
+  }
 
-    this.#heard.set(file.id, {
-      status: "loading", detections: had?.detections ?? [], total: had?.total ?? 0, count: file.detectionCount,
-    });
+  async #fetchModel(file, model, count) {
+    const key = `${model}:${file.id}`;
+    const had = this.#heard.get(key);
+    if (had && had.status !== "error" && had.count === count) return;
+
+    this.#heard.set(key, { status: "loading", detections: had?.detections ?? [], total: had?.total ?? 0, count });
     let next;
     try {
-      const { detections, total } = await api.fetchFileDetections(this.reference, file.id, HEARD_LIMIT);
-      next = { status: "ready", detections, total, count: file.detectionCount };
+      const { detections, total } = await api.fetchFileDetections(this.reference, file.id, HEARD_LIMIT, model);
+      next = { status: "ready", detections, total, count };
     } catch (error) {
-      next = { status: "error", detections: [], total: 0, count: file.detectionCount, error };
+      next = { status: "error", detections: [], total: 0, count, error };
     }
-    this.#heard.set(file.id, next);
+    this.#heard.set(key, next);
     if (this.isConnected) this.render();
   }
 
@@ -182,6 +193,8 @@ class AdminUploadDetail extends BaseElement {
            attention colour .why uses. */
         .gone { display: block; margin-top: var(--bs-space-1); font-size: 0.78125rem; color: var(--bs-text-muted); }
         .nowrap { white-space: nowrap; }
+        .perch-line { display: block; margin-top: var(--bs-space-1); font-size: 0.78125rem; color: var(--bs-text-muted); }
+        .heard-box h4 { margin: var(--bs-space-4) 0 var(--bs-space-1); font-size: 0.8125rem; }
 
         tr.heard { border-top: 0; background: var(--bs-surface-sunk); }
         tr.heard > td { padding: 0 0 var(--bs-space-4) 1.25rem; }
@@ -216,6 +229,10 @@ class AdminUploadDetail extends BaseElement {
     const analyzing = files.filter((f) => f.status === "analyzing").length;
     const active = FILTERS.find((f) => f.id === this.#filter) ?? FILTERS[0];
     const shown = files.filter(active.match);
+    // Perch's step, on the files it was queued for: only there when the
+    // server ran Perch over this card.
+    const perched = files.filter((f) => f.perch);
+    const perchDone = perched.filter((f) => f.perch.status === "analyzed" || f.perch.status === "failed").length;
 
     return `
       <div class="head">
@@ -235,6 +252,12 @@ class AdminUploadDetail extends BaseElement {
         <div class="stat"><dt>Queued</dt><dd>${count(queued + analyzing)}${analyzing ? ` <small>${count(analyzing)} running</small>` : ""}</dd></div>
         <div class="stat"><dt>Failed</dt><dd>${count(upload.filesFailed)}</dd></div>
         <div class="stat"><dt>Detections</dt><dd>${count(upload.detectionCount)}</dd></div>
+        ${
+          perched.length
+            ? `<div class="stat"><dt>Perch</dt><dd>${count(perchDone)} <small>of ${count(perched.length)} files</small></dd></div>
+               <div class="stat"><dt>Perch detections</dt><dd>${count(upload.perchDetectionCount ?? 0)}</dd></div>`
+            : ""
+        }
       </dl>
       ${
         received
@@ -289,6 +312,7 @@ class AdminUploadDetail extends BaseElement {
       `detections from ${Math.round(a.minConfidence * 100)}% confidence`,
       `started ${escapeHTML(dateAtTime(a.startedAt))}`,
     ];
+    if (a.perchModel) parts.push(`then ${escapeHTML(a.perchModel)}`);
     if (a.finishedAt) parts.push(`finished ${escapeHTML(dateAtTime(a.finishedAt))}`);
     return parts.join(" · ");
   }
@@ -310,6 +334,7 @@ class AdminUploadDetail extends BaseElement {
           <bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip>
           ${file.status === "failed" && file.statusDetail ? `<span class="why">${escapeHTML(file.statusDetail)}</span>` : ""}
           ${file.audioDeletedAt ? `<span class="gone">recording removed ${escapeHTML(shortDate(file.audioDeletedAt))}</span>` : ""}
+          ${perchLine(file.perch)}
         </td>
         <td class="num">${file.status === "analyzed" ? count(file.detectionCount) : "—"}</td>
       </tr>
@@ -330,16 +355,39 @@ class AdminUploadDetail extends BaseElement {
         return `<p class="quiet">Not analyzed: ${escapeHTML(file.statusDetail || "no reason recorded")}.</p>`;
     }
 
-    const heard = this.#heard.get(file.id);
+    const heard = this.#heard.get(`birdnet:${file.id}`);
     if (!heard || (heard.status === "loading" && heard.detections.length === 0)) {
       return `<p class="quiet">Loading detections…</p>`;
     }
     if (heard.status === "error") {
       return `<p class="quiet">Couldn't load the detections: ${escapeHTML(heard.error.message)}</p>`;
     }
+    // Headed only when there are two lists to tell apart.
+    const perch = file.perch?.status === "analyzed";
+    return `
+      ${perch ? `<h4>BirdNET heard</h4>` : ""}
+      ${this.#heardTable(heard, upload, "BirdNET")}
+      ${perch ? `<h4>Perch heard</h4>${this.#perchIn(file, upload)}` : ""}
+    `;
+  }
+
+  /** What Perch heard in a file it has finished with. */
+  #perchIn(file, upload) {
+    const heard = this.#heard.get(`perch:${file.id}`);
+    if (!heard || (heard.status === "loading" && heard.detections.length === 0)) {
+      return `<p class="quiet">Loading Perch's detections…</p>`;
+    }
+    if (heard.status === "error") {
+      return `<p class="quiet">Couldn't load Perch's detections: ${escapeHTML(heard.error.message)}</p>`;
+    }
+    return this.#heardTable(heard, upload, "Perch");
+  }
+
+  /** One model's detections in a file, each linked to its own page. */
+  #heardTable(heard, upload, model) {
     if (heard.detections.length === 0) {
       const floor = upload.analysis ? ` above ${Math.round(upload.analysis.minConfidence * 100)}% confidence` : "";
-      return `<p class="quiet">BirdNET heard nothing${floor} in this file.</p>`;
+      return `<p class="quiet">${model} heard nothing${floor} in this file.</p>`;
     }
     return `
       <table>
@@ -377,6 +425,23 @@ class AdminUploadDetail extends BaseElement {
           : ""
       }
     `;
+  }
+}
+
+/** Where Perch's second opinion on a file stands, as a line under its status, or "". */
+function perchLine(perch) {
+  if (!perch) return "";
+  switch (perch.status) {
+    case "queued":
+      return `<span class="perch-line">Perch: queued</span>`;
+    case "analyzing":
+      return `<span class="perch-line">Perch: analyzing</span>`;
+    case "analyzed":
+      return `<span class="perch-line">Perch: ${count(perch.detectionCount)} ${perch.detectionCount === 1 ? "detection" : "detections"}</span>`;
+    case "failed":
+      return `<span class="why">Perch failed: ${escapeHTML(perch.statusDetail || "no reason recorded")}</span>`;
+    default:
+      return "";
   }
 }
 

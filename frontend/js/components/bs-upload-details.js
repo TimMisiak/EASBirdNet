@@ -159,7 +159,7 @@ class UploadDetails extends BaseElement {
           margin-bottom: 2.125rem;
         }
         .callout-body { min-width: 0; }
-        .callout .eyebrow { color: var(--bs-amber-ink); margin-bottom: var(--bs-space-2); }
+        .callout .eyebrow { color: var(--bs-accent-ink); margin-bottom: var(--bs-space-2); }
         .callout-title { font-family: var(--bs-font-display); font-size: 1.5rem; margin-bottom: 0.375rem; }
         .callout bs-progress-bar { margin-top: 0.875rem; width: 320px; max-width: 100%; }
         @media (max-width: 720px) { .callout .btn { width: 100%; } }
@@ -231,7 +231,7 @@ class UploadDetails extends BaseElement {
         </div>
 
         <div class="aside">
-          <div class="panel panel--parchment">
+          <div class="panel panel--callout">
             <h3>Before you start</h3>
             <ul>
               <li>Card in the reader, reader plugged into this computer</li>
@@ -311,7 +311,7 @@ class UploadDetails extends BaseElement {
         </div>
 
         <div class="aside">
-          <div class="panel panel--parchment">
+          <div class="panel panel--callout">
             <h3>Choosing the card again</h3>
             <ul>
               <li>Choose the same folder as last time: the card itself, not a folder on it</li>

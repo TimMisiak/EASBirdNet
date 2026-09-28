@@ -193,7 +193,7 @@ class AdminPeople extends BaseElement {
         .added { font-size: 0.84375rem; color: var(--bs-text-muted); white-space: nowrap; }
         .roles { display: flex; flex-direction: column; gap: 0.625rem; margin-bottom: var(--bs-space-5); }
         .roles label { display: flex; gap: 0.625rem; align-items: flex-start; font-size: 0.875rem; cursor: pointer; }
-        .roles input { margin-top: 0.1875rem; accent-color: var(--bs-forest); }
+        .roles input { margin-top: 0.1875rem; accent-color: var(--bs-navy); }
         .roles .what { display: block; font-size: 0.78125rem; color: var(--bs-text-muted); }
         .panel p { margin-bottom: 1.125rem; }
         .error { margin-bottom: var(--bs-space-4); }
@@ -270,7 +270,7 @@ class AdminPeople extends BaseElement {
           </div>
 
           ${this.#formError ? `<p class="error">${escapeHTML(this.#formError.message)}</p>` : ""}
-          <button class="btn btn--forest btn--small btn--block" ${this.#busy ? "disabled" : ""}>
+          <button class="btn btn--navy btn--small btn--block" ${this.#busy ? "disabled" : ""}>
             ${this.#busy ? "Adding…" : "Add to the roster"}
           </button>
         </form>
@@ -348,7 +348,7 @@ class AdminPeople extends BaseElement {
         </td>
         <td class="added">${escapeHTML(longDate(person.addedOn))}</td>
         <td class="actions">
-          <button class="btn btn--forest btn--tiny" form="edit-person" ${this.#rowBusy ? "disabled" : ""}>
+          <button class="btn btn--navy btn--tiny" form="edit-person" ${this.#rowBusy ? "disabled" : ""}>
             ${this.#rowBusy ? "Saving…" : "Save"}
           </button>
           <button type="button" class="btn btn--quiet btn--tiny" data-action="cancel">Cancel</button>

@@ -1,9 +1,10 @@
-// Package birdnet identifies birds in audio files by running BirdNET.
+// Package birdnet identifies birds in audio files by running BirdNET, or
+// Google's Perch v2 as a second opinion (Options.Model).
 //
 // BirdNET's maintained runtime is the `birdnet` Python package, so rather than
 // link a model runtime into the Go binary, Analyze runs analyzer/analyze.py as a
-// subprocess and reads its JSON. The Docker image carries the Python
-// environment and the models; see the Dockerfile.
+// subprocess and reads its JSON. The same package runs Perch. The Docker image
+// carries the Python environment and the models; see the Dockerfile.
 package birdnet
 
 import (
@@ -29,6 +30,23 @@ const (
 	DefaultWorkers       = 1
 )
 
+// The models Options.Model can name.
+const (
+	// ModelBirdNET is BirdNET v2.4, on LiteRT: what every card is analyzed
+	// with. It is what an empty Options.Model means.
+	ModelBirdNET = "birdnet"
+	// ModelPerch is Google's Perch v2, which only runs on TensorFlow
+	// (analyzer/requirements-perch.txt). It scores 5-second windows rather
+	// than BirdNET's 3, and its confidence is a softmax over the window's
+	// classes rather than a sigmoid per class, so the two models' scores are
+	// not on the same footing.
+	ModelPerch = "perch"
+)
+
+// windowSec is how long a window each model scores, which is what an overlap
+// has to stay under.
+var windowSec = map[string]float64{ModelBirdNET: 3, ModelPerch: 5}
+
 // Analyzer runs analyze.py with a particular Python.
 type Analyzer struct {
 	// Python is the interpreter with the birdnet package installed, e.g. the
@@ -47,19 +65,25 @@ type Analyzer struct {
 // Options tune a run. Zero fields take the Default* values, so the zero Options
 // is BirdNET's usual configuration with no location filter.
 type Options struct {
+	// Model is ModelBirdNET (the default) or ModelPerch.
+	Model string `json:"model"`
 	// MinConfidence drops detections scored below it (0-1).
 	MinConfidence float64 `json:"minConfidence"`
-	// Sensitivity scales the model's sigmoid, 0.5-1.5; higher reports more.
+	// Sensitivity scales BirdNET's sigmoid, 0.5-1.5; higher reports more.
+	// Perch has no sigmoid to scale, so it ignores this.
 	Sensitivity float64 `json:"sensitivity"`
-	// OverlapSec is how far consecutive 3-second windows overlap, 0 to <3.
+	// OverlapSec is how far consecutive windows overlap: 0 to <3 for
+	// BirdNET's 3-second windows, 0 to <5 for Perch's 5-second ones.
 	OverlapSec float64 `json:"overlapSec"`
 	// TopK is the most species reported for any one window.
 	TopK int `json:"topK"`
 	// Workers is the number of inference processes. Each loads its own copy
-	// of the model (~250 MB resident), so raise it with the memory limit.
+	// of the model (~250 MB resident for BirdNET, some 2 GB for Perch on
+	// TensorFlow), so raise it with the memory limit.
 	Workers int `json:"workers"`
 	// Location, if set, limits the species to those BirdNET's geo model
-	// expects there.
+	// expects there. Perch is limited to the same species, matched by
+	// scientific name.
 	Location *Location `json:"location,omitempty"`
 }
 
@@ -74,7 +98,7 @@ type Location struct {
 // Result is one run over a batch of files.
 type Result struct {
 	// Model names the model that produced the detections, e.g.
-	// "BirdNET_GLOBAL_6K_V2.4", the form db.Analysis.Model stores.
+	// "BirdNET_GLOBAL_6K_V2.4" or "Perch_v2", the form db.Analysis stores.
 	Model string `json:"model"`
 	// Options are the settings the run actually used, defaults filled in.
 	Options Options `json:"options"`
@@ -188,6 +212,9 @@ func Week(t time.Time) int {
 }
 
 func (o Options) withDefaults() Options {
+	if o.Model == "" {
+		o.Model = ModelBirdNET
+	}
 	if o.MinConfidence == 0 {
 		o.MinConfidence = DefaultMinConfidence
 	}
@@ -204,13 +231,16 @@ func (o Options) withDefaults() Options {
 }
 
 func (o Options) validate() error {
+	window, known := windowSec[o.Model]
 	switch {
+	case !known:
+		return fmt.Errorf("birdnet: Model %q is neither %q nor %q", o.Model, ModelBirdNET, ModelPerch)
 	case o.MinConfidence < 0 || o.MinConfidence > 1:
 		return fmt.Errorf("birdnet: MinConfidence %v is outside 0-1", o.MinConfidence)
 	case o.Sensitivity < 0.5 || o.Sensitivity > 1.5:
 		return fmt.Errorf("birdnet: Sensitivity %v is outside 0.5-1.5", o.Sensitivity)
-	case o.OverlapSec < 0 || o.OverlapSec >= 3:
-		return fmt.Errorf("birdnet: OverlapSec %v is outside 0 to <3", o.OverlapSec)
+	case o.OverlapSec < 0 || o.OverlapSec >= window:
+		return fmt.Errorf("birdnet: OverlapSec %v is outside 0 to <%v", o.OverlapSec, window)
 	case o.TopK < 1:
 		return errors.New("birdnet: TopK must be positive")
 	case o.Workers < 1:
@@ -236,6 +266,9 @@ func (o Options) args() []string {
 		"--overlap", f(o.OverlapSec),
 		"--top-k", strconv.Itoa(o.TopK),
 		"--workers", strconv.Itoa(o.Workers),
+	}
+	if o.Model != ModelBirdNET {
+		args = append(args, "--model", o.Model)
 	}
 	if l := o.Location; l != nil {
 		args = append(args, "--latitude", f(l.Latitude), "--longitude", f(l.Longitude))
@@ -278,6 +311,24 @@ func (a Analyzer) Check(ctx context.Context) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("birdnet: %s can't import the birdnet package: %w\n%s", a.Python, err, stderr.String())
+	}
+	return nil
+}
+
+// CheckPerch reports whether Analyze can run ModelPerch as well: Check, and a
+// TensorFlow the birdnet package will run Perch on. Like Check it loads no
+// model, though importing TensorFlow takes a few seconds.
+func (a Analyzer) CheckPerch(ctx context.Context) error {
+	if err := a.Check(ctx); err != nil {
+		return err
+	}
+	var stderr tailBuffer
+	stderr.max = 1 << 10
+	cmd := exec.CommandContext(ctx, a.Python, "-c",
+		"from birdnet.acoustic.models.perch_v2.pb import check_tf_version_for_perch_v2 as c; c()")
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("birdnet: %s can't run Perch (install analyzer/requirements-perch.txt): %w\n%s", a.Python, err, stderr.String())
 	}
 	return nil
 }

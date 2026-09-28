@@ -32,7 +32,7 @@ const sheet = (css) => {
  * The focus ring is here for the same reason as box-sizing: `outline` isn't
  * inherited, so the document's rule reaches nothing inside a shadow root, and
  * every button and link in the app would fall back to the UA ring -- which is
- * what the tokens exist to replace, and what disappears against forest green.
+ * what the tokens exist to replace, and what disappears against the navy.
  *
  * Gotcha: `.visually-hidden` is pinned to `top: 0; left: 0` rather than left at
  * its static position, which is what the usual sr-only recipe does. An absolute
@@ -68,7 +68,7 @@ export const typography = sheet(`
   h1, h2, h3 {
     font-family: var(--bs-font-display);
     font-weight: 400;
-    letter-spacing: -0.01em;
+    color: var(--bs-heading);
     margin: 0;
     text-wrap: pretty;
   }
@@ -109,19 +109,30 @@ export const controls = sheet(`
     justify-content: center;
     gap: var(--bs-space-2);
     padding: 0.9375rem 1.5rem;
-    font-size: 0.9375rem;
     border: 1px solid transparent;
     white-space: nowrap;
+    /* The main site's buttons: bold, uppercase, lightly tracked. */
+    font-size: 0.8125rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
-  .btn--primary { background: var(--bs-amber); color: var(--bs-text); font-weight: 500; }
-  .btn--primary:hover:not([disabled]) { background: var(--bs-amber-hover); }
-  .btn--forest { background: var(--bs-forest); color: var(--bs-on-forest); }
-  .btn--forest:hover:not([disabled]) { background: var(--bs-forest-hover); }
+  .btn--primary { background: var(--bs-accent); color: var(--bs-on-accent); }
+  .btn--primary:hover:not([disabled]) { background: var(--bs-accent-hover); }
+  .btn--navy { background: var(--bs-navy); color: var(--bs-on-navy); }
+  .btn--navy:hover:not([disabled]) { background: var(--bs-navy-hover); }
   .btn--quiet { background: transparent; border-color: var(--bs-border-strong); }
-  .btn--quiet:hover:not([disabled]) { border-color: var(--bs-forest); }
-  .btn--small { padding: 0.6875rem 1.125rem; font-size: 0.875rem; }
-  /* Small enough to sit in a table row without setting its height. */
-  .btn--tiny { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
+  .btn--quiet:hover:not([disabled]) { border-color: var(--bs-navy); }
+  .btn--small { padding: 0.6875rem 1.125rem; font-size: 0.75rem; }
+  /* Small enough to sit in a table row without setting its height, and in
+     sentence case so a column of them doesn't shout. */
+  .btn--tiny {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+  }
   .btn--block { width: 100%; }
 
   /* Destructive actions. Quiet until asked, solid inside the confirmation. */
@@ -159,7 +170,7 @@ export const forms = sheet(`
   textarea.field { padding: var(--bs-space-3); line-height: 1.5; resize: vertical; }
   .field--sunk { background: var(--bs-field); min-height: 2.875rem; font-size: 0.90625rem; }
   .field--mono { font-family: var(--bs-font-mono); font-size: 0.84375rem; }
-  .field:focus-visible { border-color: var(--bs-forest); }
+  .field:focus-visible { border-color: var(--bs-navy); }
   /* A value the volunteer doesn't set: derived, shown, not editable. */
   .readout {
     display: flex;
@@ -235,19 +246,19 @@ export const filters = sheet(`
     background: transparent;
     color: var(--bs-text-body);
   }
-  .filter[aria-pressed="true"] { background: var(--bs-text); border-color: var(--bs-text); color: var(--bs-on-forest); }
+  .filter[aria-pressed="true"] { background: var(--bs-text); border-color: var(--bs-text); color: var(--bs-on-navy); }
   /* What the list holds, pushed to the end of the row. */
   .tally { margin-left: auto; font-size: 0.8125rem; color: var(--bs-text-muted); }
 `);
 
-/** Bordered boxes: the white panel, the parchment aside, the amber notice. */
+/** Bordered boxes: the white panel, the sky callout, the warm notice. */
 export const panels = sheet(`
   .panel {
     background: var(--bs-surface);
     border: 1px solid var(--bs-border);
     padding: var(--bs-space-5) var(--bs-space-6);
   }
-  .panel--parchment { background: var(--bs-parchment); border-color: var(--bs-parchment-border); }
+  .panel--callout { background: var(--bs-callout); border-color: var(--bs-callout-border); }
   .panel--notice {
     background: var(--bs-notice);
     border-color: var(--bs-notice-border);
@@ -323,5 +334,5 @@ export const tabs = sheet(`
     white-space: nowrap;
   }
   .tab:hover { color: var(--bs-text); }
-  .tab[aria-current="page"] { border-bottom-color: var(--bs-amber); color: var(--bs-text); }
+  .tab[aria-current="page"] { border-bottom-color: var(--bs-accent); color: var(--bs-text); }
 `);

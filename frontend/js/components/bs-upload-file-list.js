@@ -124,9 +124,9 @@ const STYLE = `
     }
     .file:first-child { border-top: 0; }
     .dot { grid-area: dot; width: 8px; height: 8px; border-radius: 50%; background: var(--bs-border-strong); }
-    .file[data-state="sending"] .dot { background: var(--bs-amber); }
+    .file[data-state="sending"] .dot { background: var(--bs-accent); }
     .file[data-state="done"] .dot,
-    .file[data-state="already"] .dot { background: var(--bs-forest); }
+    .file[data-state="already"] .dot { background: var(--bs-navy); }
     .file[data-state="failed"] .dot { background: var(--bs-chip-attention-text); }
     .name {
       grid-area: name;

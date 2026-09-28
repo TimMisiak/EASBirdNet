@@ -135,3 +135,10 @@ for the certificate, and only then `public_url`. DEPLOYMENT.md,
 
 See [CLAUDE.md](CLAUDE.md) for the architecture decisions, layout, and
 conventions, and [SCHEMA.md](SCHEMA.md) for the data model.
+
+## Licences
+
+Bird calls are identified with [BirdNET](https://birdnet.cornell.edu/), whose
+models are licensed [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(non-commercial). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for that
+and the other credits, and [LICENSES/](LICENSES/) for the licence texts.

@@ -145,13 +145,14 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `bytesUploaded`  | integer  | Their total size. Capped at `totalBytes`. |
 | `filesAnalyzed`  | integer  | The card's listed audio files in `analyzed` status, recounted by the analysis queue after each file. |
 | `filesFailed`    | integer  | The card's listed audio files in `failed` status, recounted the same way. |
-| `detectionCount` | integer  | Sum of `detectionCount` over the analyzed files. |
+| `detectionCount` | integer  | Sum of `detectionCount` over the analyzed files: BirdNET's detections. |
+| `perchDetectionCount?` | integer | Sum of `perch.detectionCount` over the listed files, when Perch ran over the card. Absent when it didn't. |
 | `status`         | string   | See [Upload status](#upload-status). |
 | `statusDetail?`  | string   | Short human reason shown instead of the status label, e.g. `2 unreadable`. |
 | `analysis?`      | object   | How BirdNET was run over the card; see below. |
 | `startedAt`      | instant  | When the transfer (re)started. |
 | `receivedAt?`    | instant  | When the last file landed. |
-| `processedAt?`   | instant  | When BirdNET finished the card's last file. |
+| `processedAt?`   | instant  | When BirdNET finished the card's last file (and Perch, when it runs, finished its last one too). |
 | `resultsSentAt?` | instant  | When the results email went out. |
 | `audioDeletedAt?`| instant  | When the last of the card's original recordings was removed under [Audio retention](#audio-retention). Its detections and their clips stay. |
 | `createdAt`      | instant  | When the card was first registered. |
@@ -176,10 +177,12 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `overlapSec`    | number  | |
 | `startedAt`     | instant | When the queue started on the card's first file. |
 | `finishedAt?`   | instant | Same as `processedAt`. |
+| `perchModel?`   | string  | The Perch model that ran after BirdNET, `Perch_v2`, set when Perch finishes its first file. Absent when Perch wasn't on. Perch uses `minConfidence` and `overlapSec` too; `sensitivity` is BirdNET's alone. |
 
 Every file is analyzed with the recorder's position (the `recorder` copy) and
 the BirdNET week of its night, so BirdNET's geo model narrows the species to
-those expected there and then.
+those expected there and then. Perch, when it runs, is narrowed to the same
+species, matched by scientific name.
 
 ```json
 {
@@ -245,9 +248,26 @@ interruption produces the same ids instead of duplicates.
 | `uploadedAt?`    | instant | |
 | `analyzedAt?`    | instant | When BirdNET finished with it, or gave up on it. |
 | `audioDeletedAt?`| instant | When the recording itself was removed under [Audio retention](#audio-retention). `blobName` is cleared with it; `status` is unchanged, because it still says what BirdNET made of the file. |
-| `detectionCount` | integer | Detections stored for this file (above threshold). |
+| `detectionCount` | integer | BirdNET's detections stored for this file (above threshold). |
+| `perch?`         | object  | The file's Perch step, when Perch was on as BirdNET finished it; see below. |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
+
+**`perch`**, Perch's second opinion on the file. It is kept apart from
+`status`, which stays BirdNET's, so Perch failing on a file leaves BirdNET's
+result as it was and the card doesn't need attention for it:
+
+| Field            | Type    | Notes |
+|------------------|---------|-------|
+| `status`         | string  | `queued` (BirdNET is done with the file; waiting for Perch) → `analyzing` → `analyzed`, or `failed`. A file found `analyzing` was cut off by a restart and is run again. |
+| `statusDetail?`  | string  | Why it failed, the same way as the file's own. |
+| `analyzedAt?`    | instant | When Perch finished with it, or gave up on it. |
+| `detectionCount` | integer | Perch's detections stored for this file. |
+
+A file queued for Perch holds its card in `processing` (and so holds its audio:
+[Audio retention](#audio-retention) only sweeps finished cards). If Perch is
+turned off while files wait for it, the queue drops their `perch` and the card
+finishes without it.
 
 ```json
 {
@@ -281,7 +301,10 @@ interruption produces the same ids instead of duplicates.
 ## `detections`
 
 A species BirdNET heard above the analysis threshold in one recording, over a
-run of consecutive 3-second windows, plus a volunteer's review of it. The
+run of consecutive 3-second windows, plus a volunteer's review of it. When
+Perch runs as a second step, what it heard is stored here too, over runs of its
+5-second windows, marked with `model: "perch"`; the two models' detections of
+one bird are two documents. The
 analysis queue merges the windows: a species heard in the windows at 0–3 s,
 3–6 s and 6–9 s is one detection from 0 to 9 s, at the highest confidence of the
 three, and a window without it ends the run. The id is derived from the file,
@@ -290,7 +313,8 @@ overwrites rather than duplicates.
 
 | Field            | Type    | Notes |
 |------------------|---------|-------|
-| `id`             | string  | `det_` + first 32 hex characters of SHA-256 over audio file id, start ms and scientific name. |
+| `id`             | string  | `det_` + first 32 hex characters of SHA-256 over audio file id, start ms and scientific name -- and, for Perch's, the model too (`ModelDetectionID`), so BirdNET's ids are what they were before Perch. |
+| `model?`         | string  | `birdnet` or `perch`: which model heard it. Absent on detections stored before Perch, which are BirdNET's. |
 | `uploadId`       | string  | → `uploads.id`. **Partition key.** |
 | `audioFileId`    | string  | → `audioFiles.id` |
 | `recorderId`     | string  | → `recorders.id` |
@@ -298,9 +322,9 @@ overwrites rather than duplicates.
 | `night`          | date    | The evening the night began. |
 | `startSec`       | number  | Start of the run's first window, seconds into the file. |
 | `endSec`         | number  | End of its last window. |
-| `scientificName` | string  | As BirdNET labelled it, e.g. `Strix varia`. |
-| `commonName`     | string  | e.g. `Barred Owl`. |
-| `confidence`     | number  | 0–1, the highest of the run's windows. |
+| `scientificName` | string  | As BirdNET labelled it, e.g. `Strix varia`. Perch's labels are the same scientific names. |
+| `commonName`     | string  | e.g. `Barred Owl`. Perch has none of its own, so its detections carry BirdNET's name for the species, or the scientific name for one BirdNET doesn't know. |
+| `confidence`     | number  | 0–1, the highest of the run's windows. BirdNET's is a sigmoid per species; Perch's is a softmax over the window's classes, so the two aren't on the same footing. |
 | `clip?`          | object  | The stretch of the recording stored for review; see below. Absent on detections stored before clips were cut. |
 | `reviewStatus`   | string  | `unreviewed`, `confirmed` or `rejected`. Top-level so it can be filtered on. |
 | `review?`        | object  | The review; see below. Absent while unreviewed. |
@@ -332,7 +356,8 @@ one -- see CLAUDE.md, *Clips are FLAC*:
 
 The **species a detection counts as** is the correction if there is one,
 otherwise BirdNET's label (`Detection.Species()`). **Only `confirmed`
-detections are ever shown publicly.** Rejected detections are kept, because
+detections are ever shown publicly**, and only BirdNET's: a bird both models
+heard and a reviewer confirmed twice would otherwise count twice. Rejected detections are kept, because
 they are what a threshold or model change gets measured against.
 
 ```json
@@ -385,9 +410,9 @@ Every read the API needs, and what it costs in Cosmos:
 | A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
 | One detection (its page, its clip, a review) | `GetDetection` | `detections` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
-| What was heard in one file (card page, a detection's neighbours) | `ListDetections{UploadID, AudioFileID}` | `detections` | single partition |
-| Public species summary | `ListDetections{ReviewStatus: confirmed, Since}` | `detections` | cross-partition |
-| Every detection (Detections tab) | `ListDetections{Since, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
+| What was heard in one file (card page, a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
+| Public species summary | `ListDetections{ReviewStatus: confirmed, Since, Model: birdnet}` | `detections` | cross-partition |
+| Every detection (Detections tab) | `ListDetections{Since, Model, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
 | Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
@@ -395,7 +420,9 @@ the Cosmos gateway can serve them. So cross-partition queries are limited to
 `SELECT * FROM c WHERE ...` with parameters. **No** `ORDER BY`, aggregates
 (`COUNT`, `SUM`), `DISTINCT`, `TOP`, `OFFSET/LIMIT` or `GROUP BY`. Sorting,
 counting and grouping happen in Go (`internal/db/db.go`), which also keeps the
-two backends' answers identical. If the public summary gets expensive as
+two backends' answers identical. `Model: birdnet` is
+`(NOT IS_DEFINED(c.model) OR c.model = @model)`, because detections stored
+before Perch carry no model. If the public summary gets expensive as
 detections grow, replace it with a precomputed summary document, not a
 cleverer query.
 
@@ -530,13 +557,15 @@ public summary), following these rules:
 | `upload.volunteerName` | `uploads.userName` |
 | `detection.review` | `{by, at}`: `review.userName` and `review.at`; absent while unreviewed |
 | `detection.clip` | `{startSec, endSec}` of `clip`; the blob name isn't sent |
+| `detection.model` | `detections.model`, `birdnet` when absent |
+| `upload.perchDetectionCount`, `upload.analysis.perchModel`, `files[].perch` | the stored fields of the same names (`perch` without its internals) |
 | `upload.audioDeletedAt`, `files[].audioDeletedAt` | the stored fields of the same name |
 | `upload.audioExpiresAt` | computed, not stored: `uploads.receivedAt` + the server's retention window. Left out once the audio has gone, while the card is still being analyzed, or when retention is off |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
 | `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `nights` = distinct `night`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
 | `program.recorders` | recorders with no `retiredAt` |
 | `program.nightsRecorded` | distinct (`recorderId`, `nights[].date`) across all uploads, dated this calendar year (Pacific) |
-| `program.confirmedDetections` | `detections` where `reviewStatus = confirmed`, heard this calendar year (Pacific) |
+| `program.confirmedDetections` | `detections` where `reviewStatus = confirmed`, heard this calendar year (Pacific). BirdNET's alone, like `species[]` |
 
 What the write routes do to documents:
 
@@ -550,8 +579,8 @@ What the write routes do to documents:
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | Sets the audio file's `status` to `uploaded` with `uploadedAt` and `blobName`, then recounts `filesUploaded` and `bytesUploaded` from the card's audio files. When none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list, and `queue`. |
-| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`) as `{detections, total, species, window?}`. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (a `GetUpload` of each card on the page, `recorder.name`) and `night`. `species[]` counts every match in the window before the species filter. |
-| `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's, in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
+| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`, `model=birdnet\|perch`) as `{detections, total, species, window?}`. One model's detections at a time: BirdNET's unless `model=perch`, since the two models heard the same audio and a list of both would show most birds twice. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (a `GetUpload` of each card on the page, `recorder.name`) and `night`. `species[]` counts every match in the window before the species filter. |
+| `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's -- BirdNET's, or Perch's with `model=perch` -- in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
 | `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/flac`, or `audio/wav` for a clip cut before FLAC -- the stored name decides, not a constant. Answers range requests. 404 for a detection with no clip. |
 | `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
@@ -576,13 +605,14 @@ What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 
 | Step | Effect |
 |------|--------|
-| Before it starts | Checks BirdNET can run, and keeps checking until it can. Touches no document: cards stay in `processing`, and `queue` says what it is waiting for. |
+| Before it starts | Checks BirdNET can run -- and Perch too, when `BIRDSENSE_PERCH` is on -- and keeps checking until it can. Touches no document: cards stay in `processing`, and `queue` says what it is waiting for. |
 | First file on a card | Sets `analysis` (settings, `startedAt`). |
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
-| BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.flac`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. A file BirdNET can't read is `failed`. |
+| BirdNET answers | Merges each species' consecutive windows into one detection. `analyzer/clip.py` cuts a clip of each from the local copy and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.flac`. Upserts a `detections` document per merged detection, `unreviewed`, with its `clip`; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. With Perch on, the file's `perch` is set `queued`. A file BirdNET can't read is `failed`. |
 | BirdNET or `clip.py` fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
 | Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever documents it stored for it after the delete swept past. It checks the file is still there before storing clips and detections, so only a delete landing in the moment between that check and the writes can leave that file's clips in storage. |
-| After each file | Recounts `filesAnalyzed`, `filesFailed` and `detectionCount`. When nothing on the card is waiting, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |
+| Perch, with it on | After BirdNET has caught up on every card, one file queued for Perch, oldest card first, then back to BirdNET, so a new card never waits behind Perch. The same steps: `perch.status` `queued` → `analyzing`, Perch over the local copy, windows merged, clips cut, `detections` upserted with `model: perch`; then `perch` is `analyzed` with its `detectionCount`, and `analysis.perchModel` is set. A file Perch can't read, or that fails three times over, has `perch.status` `failed`; the file's own `status` stays `analyzed`, and the card doesn't need attention for it. |
+| After each file | Recounts `filesAnalyzed`, `filesFailed`, `detectionCount` and `perchDetectionCount`. When nothing on the card is waiting for BirdNET or Perch, sets `processedAt` and `analysis.finishedAt`, and `in_review`, or `needs_attention` if a file failed. |
 
 ## Local JSON file
 

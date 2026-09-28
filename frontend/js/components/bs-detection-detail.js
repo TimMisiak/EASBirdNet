@@ -27,7 +27,9 @@ import "./bs-spectrogram.js";
  *
  * The other species BirdNET heard during the clip, from the same file's
  * detections, are marked on the spectrogram beside this one and listed below
- * its facts, so a reviewer knows what else they're listening to.
+ * its facts, so a reviewer knows what else they're listening to. A detection
+ * Perch heard is the same page, alongside Perch's other detections instead:
+ * each model's are a sequence of their own.
  *
  * The page is rendered whole once the detection loads. A verdict redraws only
  * the review panel and the chip, so a clip that is playing keeps playing.
@@ -56,12 +58,12 @@ const SIBLINGS_LIMIT = 500;
  */
 let lastFile = { key: "", detections: [] };
 
-/** A file's detections, in the order heard. They are a convenience: [] will do. */
-async function fileDetections(reference, fileId) {
-  const key = `${reference}/${fileId}`;
+/** One model's detections in a file, in the order heard. They are a convenience: [] will do. */
+async function fileDetections(reference, fileId, model) {
+  const key = `${reference}/${fileId}/${model}`;
   if (lastFile.key === key) return lastFile.detections;
   const detections = await api
-    .fetchFileDetections(reference, fileId, SIBLINGS_LIMIT)
+    .fetchFileDetections(reference, fileId, SIBLINGS_LIMIT, model)
     .then((body) => body.detections, () => []);
   lastFile = { key, detections };
   return detections;
@@ -212,7 +214,7 @@ class DetectionDetail extends BaseElement {
         api.fetchDetection(reference, id),
         view ? list.place(view, reference, id).catch(() => null) : null,
       ]);
-      const siblings = await fileDetections(reference, file.id);
+      const siblings = await fileDetections(reference, file.id, detection.model);
       next = { status: "ready", upload, file, detection, siblings, place };
     } catch (error) {
       next = { status: "error", error };
@@ -357,7 +359,8 @@ class DetectionDetail extends BaseElement {
     const { upload, file, detection: d } = this.#state;
     const steps = this.#steps();
     const span = d.endSec - d.startSec;
-    const windows = Math.round(span / 3);
+    const model = list.modelOf(d.model);
+    const windows = Math.round(span / model.windowSec);
     const where = steps.scope === "list" ? "in this list" : "in this file";
 
     return `
@@ -379,7 +382,7 @@ class DetectionDetail extends BaseElement {
       </div>
       <p class="sub">
         ${escapeHTML(upload.stationName)} · ${escapeHTML(dateAtTime(d.detectedAt))} ·
-        ${Math.round(d.confidence * 100)}% confidence
+        ${Math.round(d.confidence * 100)}% confidence${model.id !== list.MODELS[0].id ? ` · heard by ${model.label}` : ""}
       </p>
 
       <div class="clip">
@@ -398,8 +401,17 @@ class DetectionDetail extends BaseElement {
             <dt>Heard</dt>
             <dd>
               ${clock(d.startSec)}–${clock(d.endSec)} into the recording
-              <small>${windows > 1 ? `${windows} consecutive 3-second windows, merged` : "One 3-second window"}</small>
+              <small>${
+                windows > 1
+                  ? `${windows} consecutive ${model.windowSec}-second windows, merged`
+                  : `One ${model.windowSec}-second window`
+              }</small>
             </dd>
+            ${
+              // Which model is only worth saying for Perch's, which a
+              // coordinator reaches from a card's page; the rest is BirdNET's.
+              model.id !== list.MODELS[0].id ? `<dt>Model</dt><dd>${model.label}</dd>` : ""
+            }
             <dt>Confidence</dt>
             <dd>
               ${Math.round(d.confidence * 100)}%
@@ -433,7 +445,7 @@ class DetectionDetail extends BaseElement {
     return `
       <section class="also">
         <h3>Other possible birds detected</h3>
-        <p class="quiet">BirdNET also heard these in the file during ${d.clip ? "this clip" : "this detection"}, each at its most confident.</p>
+        <p class="quiet">${list.modelOf(d.model).label} also heard these in the file during ${d.clip ? "this clip" : "this detection"}, each at its most confident.</p>
         <div class="table-scroll">
           <table>
             <thead>
@@ -484,7 +496,7 @@ class DetectionDetail extends BaseElement {
       <h3>Review</h3>
       <p class="verdict">${verdict ?? ""}</p>
       <div class="row">
-        <button class="btn btn--forest btn--small" data-action="review" data-status="confirmed"
+        <button class="btn btn--navy btn--small" data-action="review" data-status="confirmed"
                 aria-pressed="${d.reviewStatus === "confirmed"}" ${busy}>${label("confirmed", "Confirm", "Confirming…")}</button>
         <button class="btn btn--quiet btn--danger btn--small" data-action="review" data-status="rejected"
                 aria-pressed="${d.reviewStatus === "rejected"}" ${busy}>${label("rejected", "Discard", "Discarding…")}</button>
@@ -496,7 +508,11 @@ class DetectionDetail extends BaseElement {
       </div>
       ${this.#saveError ? `<p class="error" role="alert">Couldn't save that: ${escapeHTML(this.#saveError)}</p>` : ""}
       ${d.reviewStatus !== "unreviewed" && next ? `<a class="next" href="${escapeHTML(next)}">Next detection →</a>` : ""}
-      <p class="note">Only confirmed detections appear on the public page. Discarded ones are kept, to measure BirdNET against.</p>
+      <p class="note">${
+        d.model === "perch"
+          ? "Perch's detections are a second opinion: the public page counts BirdNET's, so confirming this one doesn't put it there. Discarded ones are kept, to measure Perch against."
+          : "Only confirmed detections appear on the public page. Discarded ones are kept, to measure BirdNET against."
+      }</p>
     `;
   }
 

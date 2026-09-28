@@ -59,6 +59,12 @@ variable "memory" {
   default     = "2Gi"
 }
 
+variable "perch_enabled" {
+  description = "Run Google's Perch v2 over every file after BirdNET, as a second opinion stored beside BirdNET's detections (BIRDSENSE_PERCH). Perch is several times BirdNET's time and memory, so turning it on needs memory = \"4Gi\" and cpu = 2.0, which infra/app.tf checks at plan time, and roughly doubles the app's compute bill. See DEPLOYMENT.md, *Perch*."
+  type        = bool
+  default     = false
+}
+
 variable "log_retention_days" {
   description = "Log Analytics retention."
   type        = number

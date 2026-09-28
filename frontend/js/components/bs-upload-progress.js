@@ -200,7 +200,7 @@ class UploadProgress extends BaseElement {
     return `
       ${STYLE}
       <div class="narrow">
-        <div class="eyebrow" style="color: var(--bs-amber-ink); margin-bottom: 0.875rem;">
+        <div class="eyebrow" style="color: var(--bs-accent-ink); margin-bottom: 0.875rem;">
           Interrupted — your progress is saved
         </div>
         <h1 style="margin-bottom: var(--bs-space-3);">

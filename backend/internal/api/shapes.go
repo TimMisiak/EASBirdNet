@@ -90,15 +90,20 @@ type Upload struct {
 	BytesUploaded int64   `json:"bytesUploaded"`
 	// FilesAnalyzed, FilesFailed and DetectionCount are BirdNET's progress
 	// through the card once it has been received.
-	FilesAnalyzed  int        `json:"filesAnalyzed"`
-	FilesFailed    int        `json:"filesFailed"`
-	DetectionCount int        `json:"detectionCount"`
-	Status         string     `json:"status"`
-	StatusDetail   string     `json:"statusDetail,omitempty"`
-	Analysis       *Analysis  `json:"analysis,omitempty"`
-	StartedAt      time.Time  `json:"startedAt"`
-	ReceivedAt     *time.Time `json:"receivedAt,omitempty"`
-	ProcessedAt    *time.Time `json:"processedAt,omitempty"`
+	FilesAnalyzed  int `json:"filesAnalyzed"`
+	FilesFailed    int `json:"filesFailed"`
+	DetectionCount int `json:"detectionCount"`
+
+	// PerchDetectionCount is what Perch heard on the card, when it ran as a
+	// second step; DetectionCount is BirdNET's alone.
+	PerchDetectionCount int `json:"perchDetectionCount,omitempty"`
+
+	Status       string     `json:"status"`
+	StatusDetail string     `json:"statusDetail,omitempty"`
+	Analysis     *Analysis  `json:"analysis,omitempty"`
+	StartedAt    time.Time  `json:"startedAt"`
+	ReceivedAt   *time.Time `json:"receivedAt,omitempty"`
+	ProcessedAt  *time.Time `json:"processedAt,omitempty"`
 	// AudioExpiresAt is when the card's original recordings are due to be
 	// removed, and AudioDeletedAt when they were. Only one of them is ever
 	// set, and neither is when retention is off. The card's detections and
@@ -114,6 +119,9 @@ type Analysis struct {
 	MinConfidence float64    `json:"minConfidence"`
 	StartedAt     time.Time  `json:"startedAt"`
 	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
+
+	// PerchModel is set once Perch has finished a file, when it is on.
+	PerchModel string `json:"perchModel,omitempty"`
 }
 
 // AudioFile is one file on a card as a coordinator sees it: where it is in
@@ -133,6 +141,17 @@ type AudioFile struct {
 	// detections and their clips are still there.
 	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
+	// Perch is the file's Perch step, when Perch was on for it.
+	Perch *PerchRun `json:"perch,omitempty"`
+}
+
+// PerchRun is how Perch's second opinion on a file went: db.PerchQueued,
+// db.PerchAnalyzing, db.PerchAnalyzed or db.PerchFailed, and what it heard.
+type PerchRun struct {
+	Status         string     `json:"status"`
+	StatusDetail   string     `json:"statusDetail,omitempty"`
+	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
+	DetectionCount int        `json:"detectionCount"`
 }
 
 // Detection is one thing BirdNET heard in a file: a species over a run of
@@ -150,6 +169,9 @@ type Detection struct {
 	Clip         *Clip   `json:"clip,omitempty"`
 	ReviewStatus string  `json:"reviewStatus"` // db.ReviewUnreviewed, db.ReviewConfirmed or db.ReviewRejected
 	Review       *Review `json:"review,omitempty"`
+
+	// Model is which model heard it: db.ModelBirdNET or db.ModelPerch.
+	Model string `json:"model"`
 }
 
 // ListedDetection is a detection in the list of every card's detections, with
@@ -247,7 +269,7 @@ func uploadOf(u db.Upload, keep retention.Policy) Upload {
 		FileCount: u.FileCount, FilesUploaded: u.FilesUploaded,
 		TotalBytes: u.TotalBytes, BytesUploaded: u.BytesUploaded,
 		FilesAnalyzed: u.FilesAnalyzed, FilesFailed: u.FilesFailed, DetectionCount: u.DetectionCount,
-		Status: u.Status, StatusDetail: u.StatusDetail, Analysis: analysisOf(u.Analysis),
+		PerchDetectionCount: u.PerchDetectionCount, Status: u.Status, StatusDetail: u.StatusDetail, Analysis: analysisOf(u.Analysis),
 		StartedAt: u.StartedAt, ReceivedAt: u.ReceivedAt, ProcessedAt: u.ProcessedAt,
 		AudioExpiresAt: keep.ExpiresAt(u), AudioDeletedAt: u.AudioDeletedAt, UpdatedAt: u.UpdatedAt,
 	}
@@ -257,21 +279,25 @@ func analysisOf(a *db.Analysis) *Analysis {
 	if a == nil {
 		return nil
 	}
-	return &Analysis{Model: a.Model, MinConfidence: a.MinConfidence, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
+	return &Analysis{Model: a.Model, PerchModel: a.PerchModel, MinConfidence: a.MinConfidence, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt}
 }
 
 func audioFileOf(f db.AudioFile) AudioFile {
-	return AudioFile{
+	out := AudioFile{
 		ID: f.ID, Path: f.Path, Night: f.Night, Bytes: f.SizeBytes,
 		Status: f.Status, StatusDetail: f.StatusDetail,
 		RecordedAt: f.RecordedAt, UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
 		AudioDeletedAt: f.AudioDeletedAt, DetectionCount: f.DetectionCount,
 	}
+	if p := f.Perch; p != nil {
+		out.Perch = &PerchRun{Status: p.Status, StatusDetail: p.StatusDetail, AnalyzedAt: p.AnalyzedAt, DetectionCount: p.DetectionCount}
+	}
+	return out
 }
 
 func detectionOf(d db.Detection) Detection {
 	out := Detection{
-		ID: d.ID, AudioFileID: d.AudioFileID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
+		ID: d.ID, Model: d.ModelOf(), AudioFileID: d.AudioFileID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
 		ScientificName: d.ScientificName, CommonName: d.CommonName,
 		Confidence: d.Confidence, ReviewStatus: d.ReviewStatus,
 	}

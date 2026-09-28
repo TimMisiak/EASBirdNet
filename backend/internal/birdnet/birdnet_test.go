@@ -102,6 +102,8 @@ func TestAnalyzeRejectsBadOptionsWithoutRunning(t *testing.T) {
 		{Workers: -1},
 		{Location: &Location{Latitude: 91}},
 		{Location: &Location{Latitude: 47, Longitude: -122, Week: 49}},
+		{Model: "perch-v3"},
+		{Model: ModelPerch, OverlapSec: 5},
 	} {
 		_, err := a.Analyze(context.Background(), []string{"a.wav"}, o)
 		if err == nil || errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "nonexistent") {
@@ -110,6 +112,29 @@ func TestAnalyzeRejectsBadOptionsWithoutRunning(t *testing.T) {
 	}
 	if res, err := a.Analyze(context.Background(), nil, Options{}); err != nil || len(res.Files) != 0 {
 		t.Errorf("no paths: %+v, %v; want an empty result without running", res, err)
+	}
+}
+
+// Perch is asked for by name, and its 5-second windows allow a longer overlap
+// than BirdNET's 3.
+func TestAnalyzeAsksForPerch(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	a := fakePython(t, `
+echo "$@" > '`+argsFile+`'
+while [ "$1" != "--" ]; do shift; done; shift
+printf '{"model":"Perch_v2","files":[{"path":"%s","detections":[]}]}' "$1"
+`)
+	res, err := a.Analyze(context.Background(), []string{"/cards/a.wav"}, Options{Model: ModelPerch, OverlapSec: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Model != "Perch_v2" || res.Options.Model != ModelPerch {
+		t.Errorf("result = %+v", res)
+	}
+	got, _ := os.ReadFile(argsFile)
+	want := "analyze.py --min-confidence 0.25 --sensitivity 1 --overlap 4 --top-k 5 --workers 1 --model perch -- /cards/a.wav"
+	if strings.TrimSpace(string(got)) != want {
+		t.Errorf("args:\n got  %s\n want %s", got, want)
 	}
 }
 
@@ -216,6 +241,46 @@ func TestAnalyzeOsprey(t *testing.T) {
 		})
 		if osprey < 0 {
 			t.Errorf("location %+v: no confident Osprey in %+v", loc, f.Detections)
+		}
+	}
+}
+
+// TestPerchOsprey runs the real Perch model over the same clip. It needs
+// analyzer/requirements-perch.txt installed as well, so it is skipped unless
+// BIRDSENSE_TEST_PERCH is set too; the model downloads on first use (~380 MB).
+func TestPerchOsprey(t *testing.T) {
+	python := os.Getenv("BIRDSENSE_BIRDNET_PYTHON")
+	if python == "" || os.Getenv("BIRDSENSE_TEST_PERCH") == "" {
+		t.Skip("BIRDSENSE_BIRDNET_PYTHON and BIRDSENSE_TEST_PERCH are not both set")
+	}
+	a := Analyzer{Python: python, Script: filepath.Join("..", "..", "..", "analyzer", "analyze.py")}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := a.CheckPerch(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	clip := filepath.Join("..", "..", "..", "test", "2026-09-09 Osprey.wav")
+	sep9, _ := time.Parse(time.DateOnly, "2026-09-09")
+	for _, loc := range []*Location{nil, {Latitude: 47.66, Longitude: -122.11, Week: Week(sep9)}} {
+		res, err := a.Analyze(ctx, []string{clip}, Options{Model: ModelPerch, Location: loc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Model != "Perch_v2" || len(res.Files) != 1 {
+			t.Fatalf("result = %+v", res)
+		}
+		// Perch's own labels are scientific names; the common name is
+		// BirdNET's. Its windows are 5 seconds, and at the default threshold
+		// the Osprey is all it reports: the softmax leaves nothing else near.
+		ds := res.Files[0].Detections
+		for _, d := range ds {
+			if d.ScientificName != "Pandion haliaetus" || d.CommonName != "Osprey" || d.EndSec-d.StartSec > 5 {
+				t.Errorf("location %+v: detection %+v, want only the Osprey in 5 s windows", loc, d)
+			}
+		}
+		if !slices.ContainsFunc(ds, func(d Detection) bool { return d.Confidence >= 0.8 }) {
+			t.Errorf("location %+v: no confident Osprey in %+v", loc, ds)
 		}
 	}
 }

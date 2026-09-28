@@ -41,6 +41,24 @@ export const STATUSES = [
   { id: "rejected", label: "Discarded" },
 ];
 
+/**
+ * The models a detection can come from, BirdNET first because it is what every
+ * card is analyzed with. Perch runs as a second step when the server has it
+ * on, and that is the server's business: this list is always BirdNET's (the
+ * API's default), and only a coordinator's card page shows Perch's. The
+ * detection page reads these to say which model heard what it shows.
+ * windowSec is the length of the windows each scores.
+ */
+export const MODELS = [
+  { id: "birdnet", label: "BirdNET", windowSec: 3 },
+  { id: "perch", label: "Perch", windowSec: 5 },
+];
+
+/** A model by id, BirdNET for anything it doesn't know. */
+export function modelOf(id) {
+  return MODELS.find((m) => m.id === id) ?? MODELS[0];
+}
+
 /** Minimum confidence choices, in percent; 0 is any. */
 export const CONFIDENCES = [0, 50, 70, 80, 90];
 

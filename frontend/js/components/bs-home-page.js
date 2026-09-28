@@ -74,51 +74,70 @@ class HomePage extends BaseElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        .hero { background: var(--bs-forest); color: var(--bs-on-forest); border-bottom: 1px solid var(--bs-forest-edge); }
+        /* The banner: a barred owl -- the bird the program listens for --
+           anchored right and faded into navy, with the text on the navy side
+           so it never sits over the owl. */
+        .hero {
+          position: relative;
+          overflow: hidden;
+          background: var(--bs-navy);
+          color: var(--bs-on-navy);
+        }
+        .hero::before {
+          content: "";
+          position: absolute;
+          inset: 0 0 0 auto;
+          width: 64%;
+          background: url("/images/barred-owl.jpg") 50% 22% / cover no-repeat;
+          -webkit-mask-image: linear-gradient(to right, transparent, #000 38%);
+          mask-image: linear-gradient(to right, transparent, #000 38%);
+        }
         .hero-inner {
           max-width: var(--bs-measure-wide);
           margin: 0 auto;
-          padding: var(--bs-space-2) var(--bs-space-6) var(--bs-space-8);
-          display: grid;
-          grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-          gap: 3.5rem;
-          align-items: center;
+          padding: 5.5rem var(--bs-space-6) 6rem;
         }
-        .hero .eyebrow { color: var(--bs-amber); margin-bottom: 1.125rem; }
+        /* Positioned so it paints above the photo layer. */
+        .hero-copy { position: relative; max-width: 34rem; }
+        .hero .eyebrow {
+          font-family: var(--bs-font);
+          font-weight: 700;
+          color: var(--bs-on-navy);
+          margin-bottom: 1.125rem;
+        }
         .hero h1 {
+          color: var(--bs-on-navy);
+          font-weight: 700;
           font-size: clamp(2.125rem, 1.4rem + 2.6vw, 3.375rem);
-          line-height: 1.08;
+          line-height: 1.1;
           margin-bottom: var(--bs-space-5);
-          letter-spacing: -0.015em;
         }
         .hero p {
-          font-size: 1.0625rem;
+          font-size: 1.125rem;
           line-height: 1.6;
           max-width: 46ch;
-          color: var(--bs-on-forest-body);
-          margin-bottom: 1.875rem;
+          margin: 0 0 2.25rem;
+          color: var(--bs-on-navy-body);
         }
-        .figures { display: flex; gap: 2.5rem; flex-wrap: wrap; }
-        .figure-value { font-family: var(--bs-font-display); font-size: 2.125rem; line-height: 1; }
-        .figure-label { font-size: 0.78125rem; color: var(--bs-on-forest-muted); margin-top: 0.375rem; }
-
-        /* Stand-in for the member photo the real page carries. */
-        figure {
+        .figures { display: flex; gap: 3rem; flex-wrap: wrap; }
+        .figure-value { font-family: var(--bs-font-display); font-weight: 700; font-size: 2.25rem; line-height: 1; }
+        .figure-label { font-size: 0.8125rem; color: var(--bs-on-navy-muted); margin-top: 0.375rem; }
+        /* CC BY requires the credit; it sits in the photo's corner, on its own
+           backing so it reads over bright leaves. */
+        .hero .credit {
+          position: absolute;
+          right: 0;
+          bottom: 0;
           margin: 0;
-          background: repeating-linear-gradient(135deg, #2c4a38 0 9px, #2f5039 9px 18px);
-          border: 1px solid #3e6b4f;
-          aspect-ratio: 4 / 3;
-          display: flex;
-          align-items: flex-end;
-          padding: 1.125rem;
+          max-width: none;
+          padding: 0.25rem 0.625rem;
+          background: var(--bs-navy-wash);
+          font-size: 0.6875rem;
+          line-height: 1.4;
+          color: var(--bs-on-navy-body);
         }
-        figcaption {
-          font-family: var(--bs-font-mono);
-          font-size: 0.71875rem;
-          color: #b8c4b4;
-          background: var(--bs-forest);
-          padding: 0.375rem 0.5625rem;
-        }
+        .credit a { color: inherit; }
+        .credit a:hover { color: var(--bs-on-navy); }
 
         section { max-width: var(--bs-measure-wide); margin: 0 auto; padding: 0 var(--bs-space-6); }
         #detections { padding-top: var(--bs-space-8); }
@@ -132,20 +151,29 @@ class HomePage extends BaseElement {
           gap: 1.75rem;
           margin-top: 2.25rem;
         }
-        .step { border-top: 2px solid var(--bs-amber); padding-top: var(--bs-space-4); }
-        .step .eyebrow { color: var(--bs-amber); margin-bottom: 0.625rem; }
+        .step { border-top: 3px solid var(--bs-accent); padding-top: var(--bs-space-4); }
+        .step .eyebrow { color: var(--bs-accent-ink); margin-bottom: 0.625rem; }
         .step h3 { margin-bottom: var(--bs-space-2); }
         .step p { font-size: 0.875rem; line-height: 1.6; color: var(--bs-text-body); }
 
         .loading { padding: var(--bs-space-6) 0; color: var(--bs-text-muted); }
 
+        /* Narrow, the owl moves above the text rather than behind it. */
         @media (max-width: 900px) {
-          .hero-inner { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); }
+          .hero::before {
+            position: static;
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+            mask-image: linear-gradient(to bottom, #000 70%, transparent);
+          }
+          .hero-inner { padding-top: var(--bs-space-5); }
+          .hero .credit { top: 0; bottom: auto; }
           .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 720px) {
-          .hero-inner { padding: 0 var(--bs-space-4) var(--bs-space-7); }
-          figure { display: none; }
+          .hero-inner { padding: var(--bs-space-5) var(--bs-space-4) var(--bs-space-8); }
           section { padding: 0 var(--bs-space-4); }
           #detections, #how { padding-top: var(--bs-space-7); }
           .steps { grid-template-columns: minmax(0, 1fr); }
@@ -156,7 +184,7 @@ class HomePage extends BaseElement {
 
       <div class="hero">
         <div class="hero-inner">
-          <div>
+          <div class="hero-copy">
             <div class="eyebrow">Acoustic monitoring · East King County</div>
             <h1>We leave recorders in the woods and listen for owls.</h1>
             <p>
@@ -170,9 +198,12 @@ class HomePage extends BaseElement {
               ${figure(program.confirmedDetections, "confirmed owl detections")}
             </div>
           </div>
-          <figure>
-            <figcaption>photo — barred owl at dusk, member submission</figcaption>
-          </figure>
+          <p class="credit">
+            Barred owl, Ravenna Park, Seattle. Photo:
+            <a href="https://commons.wikimedia.org/wiki/File:Barred_Owl_forest_canopy_Seattle_Washington_2026.jpg"
+               target="_blank" rel="noreferrer">Guywelch2000</a>,
+            <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>
+          </p>
         </div>
       </div>
 

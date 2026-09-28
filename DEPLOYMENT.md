@@ -215,7 +215,7 @@ environment forwards here.
 | identity | `UserAssigned`, the identity above | |
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
 | container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
-| cpu / memory | `1` / `2Gi` | The server runs BirdNET over received cards (`internal/analysis`): one Python process at a time, peaking near 300 MB, which is CPU-bound for hours per card. On this much CPU expect very roughly 2 minutes per hour of audio, so a ~336-file card takes most of a day; more CPU is faster. Moving analysis to a job would let the web app go back to `0.25` / `0.5Gi`; see *Open questions*. |
+| cpu / memory | `1` / `2Gi` | The server runs BirdNET over received cards (`internal/analysis`): one Python process at a time, peaking near 300 MB, which is CPU-bound for hours per card. On this much CPU expect very roughly 2 minutes per hour of audio, so a ~336-file card takes most of a day; more CPU is faster. With [Perch](#perch) on this has to be `2` / `4Gi`. Moving analysis to a job would let the web app go back to `0.25` / `0.5Gi`; see *Open questions*. |
 | min_replicas / max_replicas | `1` / `1` | **Analysis needs a replica that stays up**: it runs in the background with no HTTP traffic, and a scale-to-zero replica is stopped mid-card. Nothing is lost when that happens (the queue is in Cosmos and resumes at the next start), but it stops until someone visits. `0` is fine again once analysis is a job. **Uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)), and two replicas would also analyze the same file twice. |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | startup probe | HTTP GET `/api/v1/health` on `8080`; `initial_delay` 5, `timeout` 5, every 10 s, 10 failures | ~100 s to come up, which is room for a cold start and not for a broken configuration -- that one exits at startup instead, and restarts the container. |
@@ -241,6 +241,7 @@ normal rather than a sick replica.
 | `AZURE_CLIENT_ID` | `azurerm_user_assigned_identity.this.client_id` | Tells the SDK *which* managed identity to use. Required for a user-assigned identity. |
 | `AZURE_TOKEN_CREDENTIALS` | `ManagedIdentityCredential` | Stops `DefaultAzureCredential` trying developer credentials first in production. |
 | `BIRDSENSE_AUDIO_RETENTION_DAYS` | `var.audio_retention_days`, default `30` | How long a card's original recordings are kept once BirdNET has finished with them; `0` keeps them for good. Detections and their clips are never removed by it. See [Audio retention](#audio-retention). |
+| `BIRDSENSE_PERCH` | `on` when `var.perch_enabled`, else `off` (the default) | Runs Perch over every file after BirdNET, as a second list of detections. Needs the larger container; see [Perch](#perch). |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
@@ -880,6 +881,46 @@ five containers first (same partition keys), since the app won't. Run the
 emulator over HTTP, or trust its self-signed certificate, or the Go client will
 refuse the TLS handshake.
 
+## Perch
+
+**Perch is off unless `perch_enabled` turns it on.** With it on, the analysis
+queue runs Google's Perch v2 over every file BirdNET has finished with, as a
+step of its own, and stores what it heard beside BirdNET's detections, each
+marked with its model. It is an internal detail: volunteers never choose a
+model, and the Detections tab they share with coordinators is BirdNET's alone.
+Only a coordinator's card page shows it -- how far Perch has got with each
+file, and what it heard under BirdNET's. Nothing else changes: the public page counts BirdNET's confirmed detections
+only, since a bird both models heard would otherwise count twice, and Perch
+failing on a file leaves BirdNET's result on it and the card doesn't need
+attention for it (SCHEMA.md, `audioFiles.perch`).
+
+The image always carries it -- TensorFlow (`analyzer/requirements-perch.txt`,
+~1.3 GB) and the model (~400 MB) -- so the switch is the variable, not a
+rebuild. That adds about 1.7 GB to the image, which is slower pulls on a new
+revision and a little more registry storage.
+
+What it costs, measured on 10 minutes of audio with one worker:
+
+| | BirdNET | Perch |
+|---|---|---|
+| Time | 25 s | 73 s |
+| Peak memory (whole process tree) | ~300 MB | ~2.5 GB |
+
+So **turning it on needs `cpu = 2.0` and `memory = "4Gi"`** -- Perch alone is
+more than the default 2Gi replica, and it would be killed on every file.
+`infra/app.tf` refuses `perch_enabled` with less than 4Gi at plan time. The
+larger replica roughly doubles the app's compute bill, and a card takes about
+four times as long to finish, because it stays in `processing` until Perch has
+been over every file (and keeps its audio until then: retention only sweeps
+finished cards). BirdNET doesn't wait for it: the queue catches BirdNET up on
+every card before each Perch file, so a new card's detections still arrive
+first.
+
+If the image can't run Perch (a build without TensorFlow), a server with it on
+says so the way it does for BirdNET -- `queue` is `unavailable`, and cards wait
+in `processing` -- rather than quietly finishing cards without it. Turning it
+off again lets waiting cards finish without it.
+
 ## Cost
 
 Rough order of magnitude at five recorders. **The unit is a recorder-day, not a
@@ -970,7 +1011,7 @@ environment), `public_url` (empty, so the container app's own hostname),
 `custom_domain` (empty, so the app answers only on its own hostname),
 `oidc_microsoft_tenant` (`common`), `oidc_google_client_id` and `_secret`
 (empty, so no Google sign-in), `env`, `location`, `name_suffix`, `cpu`,
-`memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
+`memory`, `perch_enabled`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
 `budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
 second tfvars file with `env = "staging"`.
 

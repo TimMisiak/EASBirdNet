@@ -67,15 +67,15 @@ class UploadDone extends BaseElement {
         .tick {
           width: 34px; height: 34px;
           border-radius: 50%;
-          background: var(--bs-forest);
-          color: var(--bs-on-forest);
+          background: var(--bs-navy);
+          color: var(--bs-on-navy);
           display: inline-flex;
           align-items: center;
           justify-content: center;
           font-size: 1.0625rem;
           flex: none;
         }
-        .received .eyebrow { color: var(--bs-forest); letter-spacing: 0.18em; }
+        .received .eyebrow { color: var(--bs-navy); letter-spacing: 0.18em; }
         h1 { font-size: clamp(2rem, 1.4rem + 2vw, 2.5rem); margin-bottom: 0.875rem; }
         .intro { font-size: 1rem; line-height: 1.6; color: var(--bs-text-body); margin-bottom: var(--bs-space-6); max-width: 64ch; }
         .summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.625rem var(--bs-space-6); }
@@ -110,7 +110,7 @@ class UploadDone extends BaseElement {
         </dl>
       </div>
 
-      <div class="panel panel--parchment next">
+      <div class="panel panel--callout next">
         <h3>What happens next</h3>
         <p style="font-size: 0.90625rem; line-height: 1.65; color: var(--bs-text-soft);">
           BirdNET is running on your ${count(nights.length)} nights now — it usually finishes
@@ -120,7 +120,7 @@ class UploadDone extends BaseElement {
       </div>
 
       <div class="row">
-        <button class="btn btn--forest" data-action="home">See my uploads</button>
+        <button class="btn btn--navy" data-action="home">See my uploads</button>
         <button class="btn btn--quiet" data-action="again">Upload another card</button>
       </div>
     `;

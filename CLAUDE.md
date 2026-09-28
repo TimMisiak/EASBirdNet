@@ -25,11 +25,16 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
+│                       (requirements-perch.txt adds TensorFlow, for Perch)
 ├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
-│   ├── images/         Third-party logos (Google, Microsoft), official files
+│   ├── images/         Official files: Google/Microsoft sign-in logos, and
+│   │                   Eastside Audubon's logo and favicon (from
+│   │                   eastsideaudubon.org -- replace, don't edit)
+│   │                   barred-owl.jpg: the home and sign-in banner, CC BY
+│   │                   4.0 -- its credit on both pages must stay with it
 │   └── js/
 │       ├── main.js         Imports every component so they self-register
 │       ├── api.js          fetch wrapper for /api/v1
@@ -47,6 +52,9 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 ├── scripts/deploy.ps1  Build the image in ACR, apply the new tag (pwsh:
 │                    deploying runs from Windows and Linux; dev is Linux)
 ├── SCHEMA.md           Stored documents: containers, fields, queries
+├── THIRD_PARTY_NOTICES.md  Credits and licences (BirdNET's models are CC BY-NC-SA
+│                    4.0: non-commercial); shipped in the image
+├── LICENSES/           Full licence texts the notices refer to
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
 ├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
@@ -71,8 +79,9 @@ long-lived caching. Then add one build stage to the Dockerfile and bump the
 `max-age` in `internal/web`; don't reach for a framework at the same time.
 A few things are not served from this repo, and each degrades rather than
 breaks in a container with no outbound network:
-- The webfonts (Newsreader, IBM Plex Sans/Mono), linked from Google Fonts in
-  `index.html`. Every rule names a real fallback, so you get system fonts.
+- The mono webfont (IBM Plex Mono), linked from Google Fonts in `index.html`.
+  Text is Helvetica Neue/Arial, the main site's own stack, so it needs no
+  download; every rule names a real fallback.
 - Leaflet, for the recorders map. It comes from jsDelivr through the import map
   in `index.html` (pinned version and SRI hash); its CSS is linked inside
   `<bs-station-map>`'s shadow root, so bump both together. The component
@@ -149,8 +158,8 @@ GET    POST /api/v1/uploads               your cards; register a card and its fi
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
-GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time
-GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files
+GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one model's: ?model=perch)
+GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
 PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
@@ -474,12 +483,46 @@ spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in
 exchange each file's detections are stored as soon as it's done and only one
 file sits in temp storage at a time.
-Perch v2 is available in the same package but is TensorFlow-only (another
-~600 MB). Add it as a second model in `analyze.py` if BirdNET's accuracy isn't
-enough, not before.
 *Revisit when:* analysis moves to its own Container Apps job (see
 DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
 the job's image, and `Queue.Run` is what the job runs.
+
+**Perch is a second opinion, run as a step of its own.** With
+`BIRDSENSE_PERCH` on, Google's Perch v2 runs over every file after BirdNET,
+through the same `analyze.py` (`--model perch`) and the same merge, clip and
+upsert path in `Queue.run`, and its detections are stored beside BirdNET's with
+`model: "perch"`. It is a second opinion, not a replacement and not a merge:
+the two models' detections of one bird are two documents
+(`db.ModelDetectionID` adds the model to Perch's ids and leaves BirdNET's as
+they were), every list is one model's at a time (`?model=`, BirdNET's by
+default), and the public page counts BirdNET's alone, because a bird both
+heard would otherwise count twice. It is an internal detail, not a choice
+anyone makes: the Detections tab never asks for Perch's, and only a
+coordinator's card page (`<bs-admin-upload-detail>`) shows them, under
+BirdNET's. Three consequences:
+- **Its step is separate from the file's.** `audioFiles.perch` has its own
+  status, attempts and failure, so Perch failing on a file leaves BirdNET's
+  result and doesn't put the card in `needs_attention`. A file waiting for
+  Perch still holds its card in `processing`, which is what keeps retention off
+  its audio until Perch has read it.
+- **BirdNET never waits for it.** `drain` catches BirdNET up on every card, then
+  takes one Perch file, then looks again -- Perch is ~3x BirdNET's time, and a
+  new card's first opinion shouldn't queue behind an old card's second.
+- **Its scores are a softmax, not a sigmoid.** Perch's outputs are logits, and
+  a sigmoid over them puts nearly every top-five guess at 0.99+, so a threshold
+  would keep everything. A softmax over the window's classes put the test
+  Osprey at 0.33-0.91 and anything else at 0.05 or less, so the card's one
+  `minConfidence` means something for both. The two scales still aren't
+  comparable, which is one more reason the lists stay apart. Perch's labels are
+  scientific names only; common names are borrowed from BirdNET's labels, and
+  the geo model's species list is matched to Perch's by scientific name.
+It costs TensorFlow in the image (~1.3 GB, always installed, so it is a
+setting rather than a build) and ~2.5 GB of peak memory, which is why it is
+off by default and why Terraform refuses it on less than 4Gi (DEPLOYMENT.md,
+*Perch*).
+*Revisit when:* Perch's detections turn out to be worth publishing. Then the
+public page needs a rule for a bird both models heard -- one detection per
+species per window, say -- not a second count.
 
 **A stuck card says why.** Whether BirdNET can run at all is the queue's own
 business, not the server's: `Queue.Run` won't start until `Check` passes and
@@ -646,6 +689,13 @@ python3.12 -m venv .venv && .venv/bin/pip install -r analyzer/requirements.txt
 cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python go run ./cmd/analyze "../test/2026-09-09 Osprey.wav"
 ```
 
+Perch as well (`BIRDSENSE_PERCH=on`, or `-model perch` on `cmd/analyze`) needs
+TensorFlow on top, ~1.3 GB, and downloads its ~380 MB model on first use:
+
+```sh
+.venv/bin/pip install -r analyzer/requirements.txt -r analyzer/requirements-perch.txt
+```
+
 Container (compose sets `BIRDSENSE_DB=local` and `BIRDSENSE_STORAGE=local`, and
 keeps the database and the audio in two named volumes):
 
@@ -671,7 +721,9 @@ the test). Set it when changing `internal/storage` or the tusd version.
 `TestAnalyzeOsprey` runs the real model, and `TestCutOsprey` the real
 `clip.py`; both are skipped unless `BIRDSENSE_BIRDNET_PYTHON` names a Python
 with `analyzer/requirements.txt` installed. Set it when changing
-`internal/birdnet`, `analyze.py`, `clip.py`, or the pins.
+`internal/birdnet`, `analyze.py`, `clip.py`, or the pins. `TestPerchOsprey`
+runs the real Perch, and also needs `BIRDSENSE_TEST_PERCH` set and
+`requirements-perch.txt` installed.
 
 BirdNET in the image, on the test clip:
 
@@ -700,7 +752,9 @@ against a real card: documents, uploads and analysis all work there. The
 JSON-file backend and its tests still define the behaviour Cosmos must match.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
 and the analysis queue runs BirdNET over it in the server process, writing
-`unreviewed` detections, each with a clip. The coordinator's card page
+`unreviewed` detections, each with a clip -- and, with `BIRDSENSE_PERCH` on,
+Perch's detections after them, as a second list (see *Perch is a second
+opinion* above). The coordinator's card page
 (`/admin/uploads/{ref}`) shows each file's status, when its recording is due to
 be removed or was, and what was heard in it, and
 each detection has its own page with its clip, a spectrogram, and Confirm and
