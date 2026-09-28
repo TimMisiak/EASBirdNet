@@ -967,9 +967,10 @@ can't be changed in place.
   and memory than serving pages does. A Container Apps job is the natural next
   step: it would run the same queue over the same Cosmos documents, from the
   same image, and let the web app scale to zero again. That adds a job and the
-  same identity-based roles, and a way to start it (a schedule, or an event when
-  a card is received). The build downloads the models from Zenodo, so
-  `az acr build` needs outbound network.
+  same identity-based roles, and a way to start it. Designed in
+  [ANALYSIS.md](ANALYSIS.md): a manually started job the web app launches,
+  packing BirdNET and Perch onto each replica. The build downloads the models
+  from Zenodo, so `az acr build` needs outbound network.
 - **Abandoned partial uploads**: a card registered and never sent leaves blocks
   with no `audioFiles` document naming them, so neither retention nor a card
   delete finds them, and only the lifecycle rule's delete action eventually

@@ -8,6 +8,8 @@ Node runtime, and no separate deploy for the UI.
 What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
 runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md),
 and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
+Moving analysis out of the web app into a Container Apps job is designed in
+[ANALYSIS.md](ANALYSIS.md), not yet built.
 
 ```
 /
