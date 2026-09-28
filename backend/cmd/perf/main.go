@@ -141,7 +141,7 @@ func report(w io.Writer, d *data) {
 // isn't a core on another.
 func reportMachines(w io.Writer, d *data) {
 	type machine struct {
-		cpu             string
+		cpu, source     string
 		cores           float64
 		memory          int64
 		version         string
@@ -152,10 +152,14 @@ func reportMachines(w io.Writer, d *data) {
 	instances := map[string]map[string]bool{}
 	for _, r := range d.runs {
 		settings, _ := json.Marshal(r.Settings)
-		key := fmt.Sprintf("%s|%v|%d|%s|%s", r.CPUModel, r.LimitCores, r.LimitMemory, r.Version, settings)
+		source := orDash(r.Source)
+		if r.LimitsFrom != "" {
+			source += ", limits from " + r.LimitsFrom
+		}
+		key := fmt.Sprintf("%s|%v|%d|%s|%s|%s", r.CPUModel, r.LimitCores, r.LimitMemory, r.Version, settings, source)
 		m := byKey[key]
 		if m == nil {
-			m = &machine{cpu: r.CPUModel, cores: r.LimitCores, memory: r.LimitMemory, version: r.Version, settings: string(settings)}
+			m = &machine{cpu: r.CPUModel, source: source, cores: r.LimitCores, memory: r.LimitMemory, version: r.Version, settings: string(settings)}
 			byKey[key] = m
 			instances[key] = map[string]bool{}
 		}
@@ -163,11 +167,12 @@ func reportMachines(w io.Writer, d *data) {
 		instances[key][r.Instance] = true
 	}
 	fmt.Fprintln(w, "\nMeasured on")
-	tw := table(w, "CPU\tLIMIT\tIMAGE\tINSTANCES\tSETTINGS")
+	fmt.Fprintln(w, "  FIGURES: where the container's CPU and memory come from (cgroup2, cgroup1, or proc: the whole machine).")
+	tw := table(w, "CPU\tLIMIT\tFIGURES\tIMAGE\tINSTANCES\tSETTINGS")
 	keys := sortedKeys(byKey)
 	for _, k := range keys {
 		m := byKey[k]
-		fmt.Fprintf(tw, "%s\t%.2g vCPU / %s\t%s\t%d\t%s\n", orDash(m.cpu), m.cores, gb(m.memory), orDash(m.version), len(instances[k]), m.settings)
+		fmt.Fprintf(tw, "%s\t%.2g vCPU / %s\t%s\t%s\t%d\t%s\n", orDash(m.cpu), m.cores, gb(m.memory), m.source, orDash(m.version), len(instances[k]), m.settings)
 	}
 	tw.Flush()
 }

@@ -247,6 +247,7 @@ normal rather than a sick replica.
 | `BIRDSENSE_PERCH` | `on` when `var.perch_enabled`, else `off` (the default) | Runs Perch over every file after BirdNET, as a second list of detections. Needs the larger container; see [Perch](#perch). |
 | `BIRDSENSE_PERF` | *unset*, so on | Records what analysis costs the replica -- CPU, memory, time per phase -- under `perf/` in the audio container, for sizing the analysis replica. `off` stops it. See [ANALYSIS.md](ANALYSIS.md), *Performance data*. |
 | `BIRDSENSE_IMAGE_TAG` | `var.image_tag` | Only so the performance records name the image they measured. |
+| `BIRDSENSE_REPLICA_CPU`, `BIRDSENSE_REPLICA_MEMORY` | `var.cpu`, `var.memory` | The replica's size, for the performance records: a Container Apps replica can't read its own limits, only the machine under it. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
@@ -904,20 +905,25 @@ The image always carries it -- TensorFlow (`analyzer/requirements-perch.txt`,
 rebuild. That adds about 1.7 GB to the image, which is slower pulls on a new
 revision and a little more registry storage.
 
-What it costs, measured on 10 minutes of audio with one worker:
+What it costs, measured on a real card on the 2 vCPU / 4 GiB replica
+([ANALYSIS.md](ANALYSIS.md), *Measured*):
 
 | | BirdNET | Perch |
 |---|---|---|
-| Time | 25 s | 73 s |
-| Peak memory (whole process tree) | ~300 MB | ~2.5 GB |
+| CPU per hour of audio | ~107 s | ~1,810 s |
+| Speed on that replica | 31.5x real time | 3.8x real time, on both cores |
+| Peak memory (PSS, whole process tree) | ~260 MB | ~1.95 GB |
 
-So **turning it on needs `cpu = 2.0` and `memory = "4Gi"`** -- Perch alone is
-more than the default 2Gi replica, and it would be killed on every file.
-`infra/app.tf` refuses `perch_enabled` with less than 4Gi at plan time. The
-larger replica roughly doubles the app's compute bill, and a card takes about
-four times as long to finish, because it stays in `processing` until Perch has
-been over every file (and keeps its audio until then: retention only sweeps
-finished cards). BirdNET doesn't wait for it: the queue catches BirdNET up on
+So **turning it on needs `cpu = 2.0` and `memory = "4Gi"`** -- Perch with the
+server and BirdNET beside it is more than the default 2Gi replica, and it would
+be killed. `infra/app.tf` refuses `perch_enabled` with less than 4Gi at plan
+time. The larger replica roughly doubles the app's compute bill, and **Perch is
+~17x BirdNET's CPU**: a card that BirdNET finishes in about half a day takes
+Perch about four more, and it stays in `processing` until Perch has been over
+every file (and keeps its audio until then: retention only sweeps finished
+cards). At five recorders Perch alone keeps this replica ~85% busy, so it has
+little room for a backlog; moving analysis to a job (ANALYSIS.md) is the way
+out. BirdNET doesn't wait for it: the queue catches BirdNET up on
 every card before each Perch file, so a new card's detections still arrive
 first.
 

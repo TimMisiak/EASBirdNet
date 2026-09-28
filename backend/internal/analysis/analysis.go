@@ -20,9 +20,12 @@
 //
 // Because the state lives in the Store rather than in memory, a restart (a
 // deploy, a crash, a replica scaled in) loses nothing: the next Run picks up
-// the files still waiting, and a file that was mid-analysis is run again.
-// Detection ids are derived from what was heard, so running a file twice
-// overwrites its detections rather than duplicating them.
+// the files still waiting. A file is claimed before it is run (db.Claim: take,
+// hold, release), so more than one worker can share the queue: a worker that
+// is stopped lets go of its file, and one that dies holding it holds it only
+// until its lease lapses, which counts as an attempt on the file. Detection
+// ids are derived from what was heard, so running a file twice overwrites its
+// detections rather than duplicating them.
 //
 // Run won't start until BirdNET answers a Check, and keeps checking until it
 // does. What it is waiting for, or what a pass last failed on, is Status,
@@ -93,6 +96,15 @@ const (
 	checkDelay    = 30 * time.Second
 	maxCheckDelay = 10 * time.Minute
 	checkTimeout  = time.Minute
+	// leaseFor is how long a claim on a file holds unless it is renewed, and
+	// renewEvery how often a worker running the file renews it. A worker that
+	// dies holding a file keeps it from everyone for at most leaseFor; a
+	// worker that is stopped lets go of it at once (release).
+	leaseFor   = 5 * time.Minute
+	renewEvery = time.Minute
+	// releaseTimeout bounds letting go of a file on the way out, which has to
+	// happen after the context that ran it has ended.
+	releaseTimeout = 10 * time.Second
 )
 
 // What Status.State can be.
@@ -141,11 +153,13 @@ type Queue struct {
 	Perf *perf.Recorder
 
 	wake chan struct{}
-	// attempts counts failures per step and audio file id (step.attemptKey).
-	// It is only touched
-	// by Run's goroutine, and a restart forgetting it just allows a few more
-	// tries.
-	attempts map[string]int
+	// worker is what this queue's claims on files are made in the name of
+	// (db.Claim.ClaimedBy): the process, which is the replica in Azure.
+	worker string
+	// nextLapse is the soonest a claim someone else holds on a queued file
+	// will lapse, as the last drain found it: Run looks again then, since
+	// nothing else will wake it for a file a dead worker was holding.
+	nextLapse time.Time
 
 	// mu guards status, which Run writes and Status reads from whatever
 	// goroutine an HTTP handler is on.
@@ -156,6 +170,7 @@ type Queue struct {
 	now        func() time.Time
 	retryDelay time.Duration
 	checkDelay time.Duration
+	renewEvery time.Duration
 	// pause is sleep, so a test can see how long Run waited without waiting.
 	pause func(context.Context, time.Duration) bool
 }
@@ -164,9 +179,9 @@ type Queue struct {
 func New(store db.Store, files storage.Store, analyzer Analyzer, log *slog.Logger) *Queue {
 	q := &Queue{
 		store: store, files: files, analyzer: analyzer, log: log,
-		wake:     make(chan struct{}, 1),
-		attempts: map[string]int{},
-		now:      time.Now, retryDelay: retryDelay, checkDelay: checkDelay,
+		wake:   make(chan struct{}, 1),
+		worker: fmt.Sprintf("%s:%d", perf.Instance(), os.Getpid()),
+		now:    time.Now, retryDelay: retryDelay, checkDelay: checkDelay, renewEvery: renewEvery,
 		pause: sleep,
 	}
 	q.status = Status{State: StateStarting, Since: q.stamp(), CheckedAt: q.stamp()}
@@ -234,12 +249,30 @@ func (q *Queue) Run(ctx context.Context) {
 		}
 		delay = q.retryDelay
 		q.setStatus(StateReady, "")
-		select {
-		case <-ctx.Done():
+		if !q.idle(ctx) {
 			return
-		case <-q.wake:
 		}
 	}
+}
+
+// idle waits for Enqueue, or for the soonest claim on a queued file to lapse,
+// and reports false if ctx ended first.
+func (q *Queue) idle(ctx context.Context) bool {
+	var lapse <-chan time.Time
+	if !q.nextLapse.IsZero() {
+		// A second past it, so the claim has lapsed by the store's clock as
+		// well as this one.
+		t := time.NewTimer(max(q.nextLapse.Sub(q.now()), 0) + time.Second)
+		defer t.Stop()
+		lapse = t.C
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-q.wake:
+	case <-lapse:
+	}
+	return true
 }
 
 // waitReady blocks until BirdNET can run, checking again on a delay that grows
@@ -305,6 +338,7 @@ func (q *Queue) drain(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		q.nextLapse = time.Time{}
 		// First come, first analyzed.
 		slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
 		for _, card := range cards {
@@ -373,7 +407,7 @@ func (q *Queue) processCard(ctx context.Context, card db.Upload) error {
 				return err
 			}
 		}
-		if !queued(f) {
+		if !q.claimable(f, birdnetStep) {
 			continue
 		}
 		if card.Analysis == nil {
@@ -401,7 +435,7 @@ func (q *Queue) perchNext(ctx context.Context, card db.Upload) (bool, error) {
 		return false, err
 	}
 	for _, f := range files {
-		if !perchWaiting(f) || queued(f) {
+		if queued(f) || !q.claimable(f, perchStep) {
 			continue
 		}
 		if card.Analysis == nil {
@@ -417,13 +451,13 @@ func (q *Queue) perchNext(ctx context.Context, card db.Upload) (bool, error) {
 	return false, nil
 }
 
-// queued reports whether a file is waiting for BirdNET. A file found
-// "analyzing" was cut off by a restart, so it waits again.
+// queued reports whether a file is in BirdNET's queue: waiting for it, or
+// being run by someone (claimable says whether it can be taken).
 func queued(f db.AudioFile) bool {
 	return f.Status == db.AudioUploaded || f.Status == db.AudioAnalyzing
 }
 
-// perchWaiting reports whether a file is waiting for Perch, the same way.
+// perchWaiting reports whether a file is in Perch's queue, the same way.
 func perchWaiting(f db.AudioFile) bool {
 	return f.Perch != nil && (f.Perch.Status == db.PerchQueued || f.Perch.Status == db.PerchAnalyzing)
 }
@@ -447,6 +481,14 @@ func (q *Queue) startCard(ctx context.Context, id string) (db.Upload, error) {
 // as it was.
 type step struct {
 	model string // birdnet.ModelBirdNET or birdnet.ModelPerch
+	// waiting reports whether the file is in this step's queue, running or
+	// not; running, whether someone has it ("analyzing").
+	waiting, running func(f db.AudioFile) bool
+	// claim is where the step's claim is on the file. Only called on a file
+	// the step is waiting for.
+	claim func(f *db.AudioFile) *db.Claim
+	// begin marks a waiting file as being run.
+	begin func(f *db.AudioFile)
 	// requeue puts a file this step was cut off on back in its queue.
 	requeue func(f *db.AudioFile)
 	// failed records that this step can't be done on the file, and why.
@@ -454,32 +496,185 @@ type step struct {
 }
 
 var birdnetStep = step{
-	model: birdnet.ModelBirdNET,
+	model:   birdnet.ModelBirdNET,
+	waiting: queued,
+	running: func(f db.AudioFile) bool { return f.Status == db.AudioAnalyzing },
+	claim:   func(f *db.AudioFile) *db.Claim { return &f.Claim },
+	begin:   func(f *db.AudioFile) { f.Status, f.StatusDetail = db.AudioAnalyzing, "" },
 	requeue: func(f *db.AudioFile) {
 		if f.Status == db.AudioAnalyzing {
 			f.Status = db.AudioUploaded
 		}
+		f.ClaimedBy, f.LeaseUntil = "", nil
 	},
 	failed: func(f *db.AudioFile, why string, at time.Time) {
 		f.Status, f.StatusDetail, f.AnalyzedAt, f.DetectionCount = db.AudioFailed, why, &at, 0
+		f.ClaimedBy, f.LeaseUntil = "", nil
 	},
 }
 
 var perchStep = step{
-	model: birdnet.ModelPerch,
+	model:   birdnet.ModelPerch,
+	waiting: perchWaiting,
+	running: func(f db.AudioFile) bool { return f.Perch != nil && f.Perch.Status == db.PerchAnalyzing },
+	claim:   func(f *db.AudioFile) *db.Claim { return &f.Perch.Claim },
+	begin:   func(f *db.AudioFile) { f.Perch.Status, f.Perch.StatusDetail = db.PerchAnalyzing, "" },
 	requeue: func(f *db.AudioFile) {
 		if f.Perch != nil && f.Perch.Status == db.PerchAnalyzing {
 			f.Perch.Status = db.PerchQueued
 		}
+		if f.Perch != nil {
+			f.Perch.ClaimedBy, f.Perch.LeaseUntil = "", nil
+		}
 	},
 	failed: func(f *db.AudioFile, why string, at time.Time) {
-		f.Perch = &db.PerchRun{Status: db.PerchFailed, StatusDetail: why, AnalyzedAt: &at}
+		var attempts int
+		if f.Perch != nil {
+			attempts = f.Perch.Attempts
+		}
+		f.Perch = &db.PerchRun{Status: db.PerchFailed, StatusDetail: why, AnalyzedAt: &at, Claim: db.Claim{Attempts: attempts}}
 	},
 }
 
-// attemptKey is what a step's failures on a file are counted under.
-func (s step) attemptKey(f db.AudioFile) string {
-	return s.model + ":" + f.ID
+// claimable reports whether a step of a file is there to be taken: waiting
+// for it and not being run, or being run on a claim that has lapsed. It
+// notes when a claim still in force will lapse, for Run.
+func (q *Queue) claimable(f db.AudioFile, s step) bool {
+	if !s.waiting(f) {
+		return false
+	}
+	if !s.running(f) {
+		return true
+	}
+	c := s.claim(&f)
+	if c.LeaseUntil == nil || !q.now().Before(*c.LeaseUntil) {
+		return true
+	}
+	if q.nextLapse.IsZero() || c.LeaseUntil.Before(q.nextLapse) {
+		q.nextLapse = *c.LeaseUntil
+	}
+	return false
+}
+
+// take claims a step of a file for this worker, in one replace-if-unchanged
+// write, and reports whether it got it. It doesn't when the step is no longer
+// there to take -- someone else claimed it first, or it is done -- or when
+// the claim that had lapsed on it was the file's last attempt, which fails it.
+//
+// A lapsed claim is a worker that stopped without letting go: killed, out of
+// memory, or cut off from the store. That counts as an attempt, or a file
+// that takes its worker down with it would be taken up again for ever. A step
+// found running with no claim at all is from before claims, and was cut off
+// by a restart: it is taken again, as it always was.
+func (q *Queue) take(ctx context.Context, card db.Upload, f db.AudioFile, s step) (db.AudioFile, bool, error) {
+	lease := q.now().UTC().Add(leaseFor)
+	exhausted := false
+	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+		if !q.claimable(*f, s) {
+			return errSkip
+		}
+		c := s.claim(f)
+		if s.running(*f) && c.ClaimedBy != "" {
+			c.Attempts++
+			if c.Attempts >= maxAttempts {
+				exhausted = true
+				s.failed(f, fmt.Sprintf("analysis stopped part way through this file %d times: its worker was stopped or lost its claim", c.Attempts), q.stamp())
+				return nil
+			}
+		}
+		s.begin(f)
+		c = s.claim(f)
+		c.ClaimedBy, c.LeaseUntil = q.worker, &lease
+		return nil
+	})
+	switch {
+	case errors.Is(err, errSkip):
+		return f, false, nil
+	case err != nil:
+		return f, false, err
+	case exhausted:
+		q.log.Error("analysis: giving up on a file whose worker kept stopping", "upload", card.ID, "path", f.Path, "model", s.model)
+		return f, false, nil
+	}
+	return f, true, nil
+}
+
+// errLostClaim is a run cut short because the file's claim is no longer this
+// worker's.
+var errLostClaim = errors.New("analysis: lost the claim on the file")
+
+// hold renews this worker's claim on a step every renewEvery while it runs,
+// and returns a context for the run and a func that stops renewing. The
+// context ends with errLostClaim as its cause if the claim turns out to be
+// someone else's -- it lapsed, and they took it -- or can't be renewed twice
+// running, because by then it may lapse: two workers running one file would
+// write the same detections, but only one should be counting attempts on it.
+func (q *Queue) hold(ctx context.Context, f db.AudioFile, s step) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(q.renewEvery)
+		defer t.Stop()
+		failures := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			lease := q.now().UTC().Add(leaseFor)
+			_, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
+				if !s.running(*f) || s.claim(f).ClaimedBy != q.worker {
+					return errLostClaim
+				}
+				s.claim(f).LeaseUntil = &lease
+				return nil
+			})
+			switch {
+			case err == nil:
+				failures = 0
+			case errors.Is(err, db.ErrNotFound):
+				// The card is being deleted; the run finds that out itself.
+				return
+			case errors.Is(err, errLostClaim):
+				cancel(errLostClaim)
+				return
+			default:
+				failures++
+				q.log.Warn("analysis: renewing the claim on a file", "upload", f.UploadID, "path", f.Path, "model", s.model, "err", err)
+				if failures >= 2 {
+					cancel(errLostClaim)
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		<-stopped
+		cancel(nil)
+	}
+}
+
+// release lets go of a step this worker was running when it was stopped, so
+// the next start takes it up at once rather than waiting out the lease. It
+// isn't an attempt: nothing went wrong with the file.
+func (q *Queue) release(ctx context.Context, f db.AudioFile, s step) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	_, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
+		if !s.running(*f) || s.claim(f).ClaimedBy != q.worker {
+			return errSkip
+		}
+		s.requeue(f)
+		return nil
+	})
+	if err != nil && !errors.Is(err, errSkip) {
+		q.log.Warn("analysis: letting go of a file on the way out; it waits for its claim to lapse", "upload", f.UploadID, "path", f.Path, "model", s.model, "err", err)
+	}
 }
 
 // unreadable is what is wrong with a file itself, which no retry will change.
@@ -504,31 +699,25 @@ type result struct {
 // itself is recorded on the file, and an attempt that keeps failing runs out
 // of tries (retryOrFail) rather than repeating for good.
 func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
-	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
-		if !queued(*f) {
-			return errSkip
-		}
-		f.Status, f.StatusDetail = db.AudioAnalyzing, ""
-		return nil
-	})
-	switch {
-	case errors.Is(err, errSkip):
-		return nil
-	case err != nil:
+	f, ok, err := q.take(ctx, card, f, birdnetStep)
+	if err != nil || !ok {
 		return err
 	}
 	log := q.log.With("upload", card.ID, "path", f.Path)
 	log.Info("analysis: starting file")
 	began := time.Now()
 
-	res, err := q.run(ctx, card, f, birdnetStep)
+	held, stop := q.hold(ctx, f, birdnetStep)
+	res, err := q.run(held, card, f, birdnetStep)
+	stop()
 	if err != nil {
-		return q.settle(ctx, birdnetStep, f, err)
+		return q.settle(ctx, held, birdnetStep, f, err)
 	}
 	analyzed := q.stamp()
 	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
 		f.Status, f.StatusDetail = db.AudioAnalyzed, ""
 		f.AnalyzedAt, f.DetectionCount = &analyzed, res.detections
+		f.Claim = db.Claim{}
 		f.DurationSec, f.SampleRate = res.recording.DurationSec, res.recording.SampleRate
 		if f.RecordedAt == nil && res.startKnown {
 			t := res.start.UTC()
@@ -543,7 +732,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 		}
 		return nil
 	}); err != nil {
-		return q.settle(ctx, birdnetStep, f, fmt.Errorf("marking the file analyzed: %w", err))
+		return q.settle(ctx, held, birdnetStep, f, fmt.Errorf("marking the file analyzed: %w", err))
 	}
 	if res.model != "" && card.Analysis != nil && card.Analysis.Model == "" {
 		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
@@ -555,7 +744,6 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 			return err
 		}
 	}
-	delete(q.attempts, birdnetStep.attemptKey(f))
 	log.Info("analysis: finished file", "detections", res.detections, "dur", time.Since(began).Round(time.Second))
 	return nil
 }
@@ -564,33 +752,26 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 // heard beside BirdNET's detections. It returns an error the same way
 // analyzeFile does, and records what goes wrong on the file's Perch step.
 func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
-	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
-		if !perchWaiting(*f) {
-			return errSkip
-		}
-		f.Perch.Status, f.Perch.StatusDetail = db.PerchAnalyzing, ""
-		return nil
-	})
-	switch {
-	case errors.Is(err, errSkip):
-		return nil
-	case err != nil:
+	f, ok, err := q.take(ctx, card, f, perchStep)
+	if err != nil || !ok {
 		return err
 	}
 	log := q.log.With("upload", card.ID, "path", f.Path)
 	log.Info("analysis: starting Perch on file")
 	began := time.Now()
 
-	res, err := q.run(ctx, card, f, perchStep)
+	held, stop := q.hold(ctx, f, perchStep)
+	res, err := q.run(held, card, f, perchStep)
+	stop()
 	if err != nil {
-		return q.settle(ctx, perchStep, f, err)
+		return q.settle(ctx, held, perchStep, f, err)
 	}
 	analyzed := q.stamp()
 	if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
 		f.Perch = &db.PerchRun{Status: db.PerchAnalyzed, AnalyzedAt: &analyzed, DetectionCount: res.detections}
 		return nil
 	}); err != nil {
-		return q.settle(ctx, perchStep, f, fmt.Errorf("marking the file analyzed by Perch: %w", err))
+		return q.settle(ctx, held, perchStep, f, fmt.Errorf("marking the file analyzed by Perch: %w", err))
 	}
 	if res.model != "" && card.Analysis != nil && card.Analysis.PerchModel == "" {
 		if _, err := q.store.UpdateUpload(ctx, card.ID, func(u *db.Upload) error {
@@ -602,7 +783,6 @@ func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) e
 			return err
 		}
 	}
-	delete(q.attempts, perchStep.attemptKey(f))
 	log.Info("analysis: finished Perch on file", "detections", res.detections, "dur", time.Since(began).Round(time.Second))
 	return nil
 }
@@ -799,13 +979,21 @@ func (q *Queue) putFile(ctx context.Context, name, local string) error {
 // change, a store that keeps rejecting the write) re-runs the whole
 // multi-minute pass over a ~300 MB file for good, and every card behind it
 // waits.
-func (q *Queue) settle(ctx context.Context, s step, f db.AudioFile, err error) error {
+//
+// held is the context the step ran under (hold): a run cut short because the
+// claim went to someone else is left to them, and a run stopped because the
+// queue is stopping lets go of the file.
+func (q *Queue) settle(ctx, held context.Context, s step, f db.AudioFile, err error) error {
 	var bad unreadable
 	switch {
 	case errors.As(err, &bad):
 		return q.fail(ctx, s, f, string(bad))
 	case ctx.Err() != nil:
+		q.release(ctx, f, s)
 		return ctx.Err()
+	case errors.Is(context.Cause(held), errLostClaim):
+		q.log.Warn("analysis: lost the claim on a file part way through; leaving it to whoever has it", "upload", f.UploadID, "path", f.Path, "model", s.model)
+		return nil
 	case errors.Is(err, db.ErrNotFound):
 		return err
 	}
@@ -814,21 +1002,36 @@ func (q *Queue) settle(ctx context.Context, s step, f db.AudioFile, err error) e
 
 // retryOrFail puts a file back in the step's queue and pauses the queue,
 // unless the file has had its tries, in which case the step fails.
+// The count is on the file (db.Claim.Attempts), so it survives the worker.
 func (q *Queue) retryOrFail(ctx context.Context, s step, f db.AudioFile, cause error) error {
-	key := s.attemptKey(f)
-	q.attempts[key]++
-	if q.attempts[key] >= maxAttempts {
-		delete(q.attempts, key)
-		q.log.Error("analysis: giving up on a file", "upload", f.UploadID, "path", f.Path, "model", s.model, "err", cause)
-		return q.fail(ctx, s, f, "analysis failed on this file "+fmt.Sprint(maxAttempts)+" times: "+firstLine(cause.Error()))
-	}
-	if _, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
+	why := fmt.Sprintf("analysis failed on this file %d times: %s", maxAttempts, firstLine(cause.Error()))
+	at := q.stamp()
+	attempt, gaveUp := 0, false
+	_, err := q.store.UpdateAudioFile(ctx, f.UploadID, f.ID, func(f *db.AudioFile) error {
+		if !s.waiting(*f) {
+			return errSkip
+		}
+		c := s.claim(f)
+		c.Attempts++
+		attempt = c.Attempts
+		if attempt >= maxAttempts {
+			gaveUp = true
+			s.failed(f, why, at)
+			return nil
+		}
 		s.requeue(f)
 		return nil
-	}); err != nil {
+	})
+	switch {
+	case errors.Is(err, errSkip):
+		return nil
+	case err != nil:
 		return err
+	case gaveUp:
+		q.log.Error("analysis: giving up on a file", "upload", f.UploadID, "path", f.Path, "model", s.model, "err", cause)
+		return nil
 	}
-	return fmt.Errorf("%w on %s (%s, attempt %d of %d): %w", errRetry, f.Path, s.model, q.attempts[key], maxAttempts, cause)
+	return fmt.Errorf("%w on %s (%s, attempt %d of %d): %w", errRetry, f.Path, s.model, attempt, maxAttempts, cause)
 }
 
 // fail records that a step can't be done on a file, and why.

@@ -52,18 +52,60 @@ func TestReadContainer(t *testing.T) {
 		"memory.stat":    "anon 3221225472\nfile 1073741824\n",
 		"memory.events":  "low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n",
 	})
-	c := readContainer(dir)
-	if !c.ok || c.limitCores != 4 || c.usageUsec != 5000000 || c.throttledUsec != 250000 ||
+	c := readContainer(dir, t.TempDir())
+	if !c.ok || c.source != SourceCgroup2 || c.limitCores != 4 || c.usageUsec != 5000000 || c.throttledUsec != 250000 ||
 		c.limitMemory != 8<<30 || c.memCurrent != 4<<30 || c.memAnon != 3<<30 || c.memFile != 1<<30 || c.oomKills != 1 {
 		t.Errorf("container = %+v", c)
 	}
 
 	write(t, dir, map[string]string{"cpu.max": "max 100000\n", "memory.max": "max\n"})
-	if c := readContainer(dir); c.limitCores != 0 || c.limitMemory != 0 {
+	if c := readContainer(dir, t.TempDir()); c.limitCores != 0 || c.limitMemory != 0 {
 		t.Errorf("unlimited container = %+v; want no limits", c)
 	}
-	if c := readContainer(filepath.Join(dir, "absent")); c.ok {
-		t.Error("a missing cgroup read as present")
+	if c := readContainer(filepath.Join(dir, "absent"), filepath.Join(dir, "absent")); c.ok {
+		t.Error("nothing to read read as something")
+	}
+}
+
+func TestReadContainerCgroup1(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, map[string]string{
+		"cpu,cpuacct/cpuacct.usage":     "5000000000\n",
+		"cpu,cpuacct/cpu.cfs_quota_us":  "200000\n",
+		"cpu,cpuacct/cpu.cfs_period_us": "100000\n",
+		"cpu,cpuacct/cpu.stat":          "nr_periods 10\nnr_throttled 2\nthrottled_time 250000000\n",
+		"memory/memory.usage_in_bytes":  "4294967296\n",
+		"memory/memory.limit_in_bytes":  "9223372036854771712\n",
+		"memory/memory.stat":            "cache 1\nrss 2\ntotal_cache 1073741824\ntotal_rss 3221225472\n",
+		"memory/memory.oom_control":     "oom_kill_disable 0\nunder_oom 0\noom_kill 2\n",
+	})
+	c := readContainer(dir, t.TempDir())
+	if !c.ok || c.source != SourceCgroup1 || c.usageUsec != 5000000 || c.limitCores != 2 || c.throttledUsec != 250000 ||
+		c.limitMemory != 0 || c.memCurrent != 4<<30 || c.memAnon != 3<<30 || c.memFile != 1<<30 || c.oomKills != 2 {
+		t.Errorf("container = %+v; want cgroup v1 figures, no memory limit", c)
+	}
+}
+
+// With no cgroup at all, the machine stands in for the container.
+func TestReadContainerProc(t *testing.T) {
+	proc := t.TempDir()
+	write(t, proc, map[string]string{
+		// user nice system idle iowait irq softirq steal: 300 busy ticks.
+		"stat":    "cpu  100 10 150 9000 500 20 10 10 0 0\ncpu0 1 2 3\n",
+		"meminfo": "MemTotal:       6144000 kB\nMemFree:  100 kB\nMemAvailable:   4096000 kB\nCached:  1024000 kB\nAnonPages:  1500000 kB\n",
+	})
+	c := readContainer(filepath.Join(proc, "no-cgroup"), proc)
+	if !c.ok || c.source != SourceProc || c.usageUsec != 3000000 || c.memCurrent != (6144000-4096000)<<10 ||
+		c.memAnon != 1500000<<10 || c.memFile != 1024000<<10 || c.limitCores != 0 {
+		t.Errorf("container = %+v; want the machine from /proc", c)
+	}
+	var out bytes.Buffer
+	newRecorder(NewWriterSink(&out), Config{LimitCores: 2, LimitMemory: 4 << 30},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), filepath.Join(proc, "no-cgroup"), proc, time.Now)
+	var run Run
+	json.Unmarshal(out.Bytes(), &run)
+	if run.Source != SourceProc || run.LimitCores != 2 || run.LimitMemory != 4<<30 || run.LimitsFrom != "config" {
+		t.Errorf("run = %+v; want the configured limits, said so", run)
 	}
 }
 
@@ -108,7 +150,7 @@ func TestTrackerFollowsItsProcessGroup(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	var run Run
 	if err := json.Unmarshal([]byte(lines[0]), &run); err != nil || run.Type != TypeRun || run.Instance != "replica-1" ||
-		run.LimitCores != 2 || run.LimitMemory != 4<<30 || !run.Cgroup {
+		run.LimitCores != 2 || run.LimitMemory != 4<<30 || run.Source != SourceCgroup2 || run.LimitsFrom != "cgroup" {
 		t.Errorf("run = %+v, %v", run, err)
 	}
 	var s Sample

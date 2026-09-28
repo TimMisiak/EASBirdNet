@@ -105,7 +105,8 @@ func main() {
 		instance := perf.Instance()
 		queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
 			Instance: instance, Version: cfg.ImageTag,
-			Settings: map[string]any{"perch": cfg.Perch, "inProcess": true},
+			Settings:   map[string]any{"perch": cfg.Perch, "inProcess": true},
+			LimitCores: cfg.ReplicaCPU, LimitMemory: cfg.ReplicaMemory,
 		}, log)
 		log.Info("analysis performance records on", "instance", instance)
 		go func() {
@@ -279,6 +280,34 @@ type config struct {
 	// ImageTag is the image this is, when the deployment says
 	// (BIRDSENSE_IMAGE_TAG), so performance records name what they measured.
 	ImageTag string
+	// ReplicaCPU and ReplicaMemory are the replica's size as Terraform set it
+	// (BIRDSENSE_REPLICA_CPU, e.g. 2.0, and BIRDSENSE_REPLICA_MEMORY, e.g.
+	// 4Gi), for the performance records when the container's own limits
+	// can't be read. Zero when unset.
+	ReplicaCPU    float64
+	ReplicaMemory int64
+}
+
+// replicaSize reads the replica's configured size, in Container Apps' own
+// spelling. Either may be empty.
+func replicaSize(cpu, memory string) (float64, int64, error) {
+	var cores float64
+	var bytes int64
+	if cpu != "" {
+		n, err := strconv.ParseFloat(cpu, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, fmt.Errorf("BIRDSENSE_REPLICA_CPU must be a number of cores, not %q", cpu)
+		}
+		cores = n
+	}
+	if memory != "" {
+		n, err := strconv.ParseFloat(strings.TrimSuffix(memory, "Gi"), 64)
+		if err != nil || n <= 0 || !strings.HasSuffix(memory, "Gi") {
+			return 0, 0, fmt.Errorf(`BIRDSENSE_REPLICA_MEMORY must be like "4Gi", not %q`, memory)
+		}
+		bytes = int64(n * (1 << 30))
+	}
+	return cores, bytes, nil
 }
 
 // onOff reads a switch. A typo would quietly leave something off (or on), so
@@ -374,6 +403,9 @@ func configFromEnv() (config, error) {
 		return cfg, err
 	}
 	cfg.ImageTag = os.Getenv("BIRDSENSE_IMAGE_TAG")
+	if cfg.ReplicaCPU, cfg.ReplicaMemory, err = replicaSize(os.Getenv("BIRDSENSE_REPLICA_CPU"), os.Getenv("BIRDSENSE_REPLICA_MEMORY")); err != nil {
+		return cfg, err
+	}
 
 	if err := readAuth(&cfg); err != nil {
 		return cfg, err

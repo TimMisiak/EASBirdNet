@@ -43,6 +43,9 @@ type fakeBirdNET struct {
 	// cuts are the clips asked for, a slice per file; cutErr fails every cut.
 	cuts   [][]birdnet.Clip
 	cutErr error
+	// running, if set, is told when a run starts, and the run then waits for
+	// its context to end: a run that is still going when the test acts.
+	running chan struct{}
 }
 
 type call struct {
@@ -77,7 +80,12 @@ func (f *fakeBirdNET) checkCount() int {
 	return f.checks
 }
 
-func (f *fakeBirdNET) Analyze(_ context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error) {
+func (f *fakeBirdNET) Analyze(ctx context.Context, paths []string, opts birdnet.Options) (birdnet.Result, error) {
+	if f.running != nil {
+		f.running <- struct{}{}
+		<-ctx.Done()
+		return birdnet.Result{}, fmt.Errorf("birdnet: %w", ctx.Err())
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	res := birdnet.Result{Model: "BirdNET_GLOBAL_6K_V2.4", Options: opts}
@@ -572,8 +580,8 @@ func TestBirdNETFailingIsRetriedThenTheFileFails(t *testing.T) {
 		if err := f.queue.drain(t.Context()); !errors.Is(err, errRetry) {
 			t.Fatalf("attempt %d: err = %v, want a pause to retry", attempt, err)
 		}
-		if file := f.file(quietFile); file.Status != db.AudioUploaded {
-			t.Fatalf("attempt %d: file = %s, want it queued again", attempt, file.Status)
+		if file := f.file(quietFile); file.Status != db.AudioUploaded || file.Attempts != attempt || file.ClaimedBy != "" {
+			t.Fatalf("attempt %d: file = %s, %d attempts, claimed by %q; want it queued again, the attempt on it", attempt, file.Status, file.Attempts, file.ClaimedBy)
 		}
 	}
 	if err := f.queue.drain(t.Context()); err != nil {

@@ -539,3 +539,22 @@ func TestLoggerEmitsJSON(t *testing.T) {
 		t.Errorf("level = %q, err = %q, want the level and each attribute as their own fields", line.Level, line.Err)
 	}
 }
+
+// The replica's size comes in Container Apps' spelling, and a typo is an
+// error rather than a wrong figure in every performance record.
+func TestReplicaSize(t *testing.T) {
+	if cores, bytes, err := replicaSize("2", "4Gi"); err != nil || cores != 2 || bytes != 4<<30 {
+		t.Errorf("2, 4Gi = %v, %v, %v", cores, bytes, err)
+	}
+	if cores, bytes, err := replicaSize("0.5", "1.0Gi"); err != nil || cores != 0.5 || bytes != 1<<30 {
+		t.Errorf("0.5, 1.0Gi = %v, %v, %v", cores, bytes, err)
+	}
+	if cores, bytes, err := replicaSize("", ""); err != nil || cores != 0 || bytes != 0 {
+		t.Errorf("unset = %v, %v, %v", cores, bytes, err)
+	}
+	for _, bad := range [][2]string{{"two", ""}, {"", "4GB"}, {"", "4096"}, {"-1", ""}} {
+		if _, _, err := replicaSize(bad[0], bad[1]); err == nil {
+			t.Errorf("%q, %q was accepted", bad[0], bad[1])
+		}
+	}
+}

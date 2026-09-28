@@ -30,6 +30,11 @@ type Config struct {
 	Version string
 	// Settings are the analysis settings, recorded as they are.
 	Settings map[string]any
+	// LimitCores and LimitMemory are the replica's size as the deployment
+	// configured it, used when the container's own limits can't be read --
+	// in a sandbox VM, the CPUs the process sees are the VM's, not its quota.
+	LimitCores  float64
+	LimitMemory int64
 	// Interval and FlushEvery default to DefaultInterval and
 	// DefaultFlushEvery.
 	Interval, FlushEvery time.Duration
@@ -95,19 +100,32 @@ func newRecorder(sink Sink, cfg Config, log *slog.Logger, cgroup, proc string, n
 	if r.flushEvery <= 0 {
 		r.flushEvery = DefaultFlushEvery
 	}
-	c := readContainer(r.cgroupDir)
+	c := r.read()
 	r.prev, r.prevAt = c, now()
+	from := "cgroup"
 	r.limit.cores, r.limit.memory = c.limitCores, c.limitMemory
-	if r.limit.cores == 0 {
-		r.limit.cores = float64(runtime.NumCPU())
+	if r.limit.cores == 0 || r.limit.memory == 0 {
+		from = "config"
+		if r.limit.cores == 0 {
+			r.limit.cores = cfg.LimitCores
+		}
+		if r.limit.memory == 0 {
+			r.limit.memory = cfg.LimitMemory
+		}
 	}
-	if r.limit.memory == 0 {
-		r.limit.memory = hostMemory(r.procDir)
+	if r.limit.cores == 0 || r.limit.memory == 0 {
+		from = "host"
+		if r.limit.cores == 0 {
+			r.limit.cores = float64(runtime.NumCPU())
+		}
+		if r.limit.memory == 0 {
+			r.limit.memory = hostMemory(r.procDir)
+		}
 	}
 	run := Run{
 		Type: TypeRun, T: now().UTC(), Instance: cfg.Instance, Version: cfg.Version,
-		CPUModel: cpuModel(r.procDir), HostCPUs: runtime.NumCPU(), Cgroup: c.ok,
-		LimitCores: r.limit.cores, LimitMemory: r.limit.memory, Settings: cfg.Settings,
+		CPUModel: cpuModel(r.procDir), HostCPUs: runtime.NumCPU(), Source: c.source,
+		LimitCores: r.limit.cores, LimitMemory: r.limit.memory, LimitsFrom: from, Settings: cfg.Settings,
 	}
 	if err := sink.Header(run); err != nil {
 		log.Warn("perf: writing the run record", "err", err)
@@ -160,7 +178,7 @@ func (r *Recorder) sample() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	c := readContainer(r.cgroupDir)
+	c := r.read()
 	prev, prevAt := r.prev, r.prevAt
 	r.prev, r.prevAt = c, now
 	if len(r.tasks) == 0 {
@@ -194,6 +212,10 @@ func (r *Recorder) sample() {
 	if err := r.sink.Write(s); err != nil {
 		r.log.Warn("perf: writing a sample", "err", err)
 	}
+}
+
+func (r *Recorder) read() container {
+	return readContainer(r.cgroupDir, r.procDir)
 }
 
 // Begin starts measuring one model's pass over a file. Pass the Tracker to

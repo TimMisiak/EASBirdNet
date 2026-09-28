@@ -187,6 +187,30 @@ type PerchRun struct {
 	StatusDetail   string     `json:"statusDetail,omitempty"`
 	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
+	Claim
+}
+
+// Claim is who is running a step of a file and until when, and how often the
+// step has failed on it. BirdNET's step carries it on the AudioFile itself,
+// Perch's on its PerchRun; its fields sit beside the step's status in the
+// document, not in an object of their own.
+//
+// A worker takes a step by moving it to "analyzing" with its name and a lease
+// in one replace-if-unchanged write, and renews the lease while it runs, so
+// two workers never run one step and a worker that dies lets go of it when
+// its lease lapses (internal/analysis).
+type Claim struct {
+	// ClaimedBy names the worker holding the step: its process, e.g.
+	// "ca-birdsense-prod--0000010-c6bd4bb69-zdmkj:1". Empty when no one is.
+	ClaimedBy string `json:"claimedBy,omitempty"`
+	// LeaseUntil is when the claim lapses unless it is renewed. An
+	// "analyzing" step whose lease has passed is anyone's to take.
+	LeaseUntil *time.Time `json:"leaseUntil,omitempty"`
+	// Attempts counts the tries on the step that failed in a way worth
+	// another -- the model crashing, storing what it heard failing, or a
+	// worker dying with the step claimed. It is stored so that a fleet of
+	// short-lived workers can't retry one file for good.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // AudioDetailNotOnCard is the StatusDetail of a failed file that was on a
@@ -223,7 +247,9 @@ type AudioFile struct {
 	DetectionCount int        `json:"detectionCount"`
 	// Perch is the file's Perch step, absent when Perch wasn't turned on
 	// when BirdNET finished with the file.
-	Perch     *PerchRun `json:"perch,omitempty"`
+	Perch *PerchRun `json:"perch,omitempty"`
+	// Claim is BirdNET's step: who is running it, and its failed attempts.
+	Claim
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

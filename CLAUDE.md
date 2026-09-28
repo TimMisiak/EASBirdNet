@@ -475,12 +475,18 @@ at the highest confidence (`merge.go`), cuts a clip of each with `clip.py` (the
 run and 1 s either side, at most 30 s around its best window) into storage at
 `clips/{card}/{detection}.flac`, upserts the detections, marks the file
 `analyzed`, and recounts the card. The API only calls `Enqueue` to wake it when a card's last
-file lands. At startup it resumes whatever was left, including a file cut off
-mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
-A file BirdNET can't read fails at once; any other failure on a file -- a
-crashed run of either script, or storing its clips, its detections or its
-result -- is retried twice, 30 s apart and growing, and then fails the file, so
-nothing that keeps failing can wedge the queue. The last file moves the card to
+file lands. A file is *claimed* before it is run: `analyzing`, with the worker's
+name and a five-minute lease it renews every minute, in one
+replace-if-unchanged write, so more than one worker can share the queue without
+running a file twice -- the groundwork for moving analysis to a job
+(ANALYSIS.md; SCHEMA.md, *Claims*). A worker that is stopped lets go of its
+file; one that dies holding it holds it until the lease lapses. At startup it
+resumes whatever was left; detection ids are deterministic, so a re-run
+overwrites. A file BirdNET can't read fails at once; any other failure on a
+file -- a crashed run of either script, storing its clips, its detections or
+its result, or a worker dying with it claimed -- counts in the file's stored
+`attempts`, is retried 30 s later and growing, and the third fails the file,
+so nothing that keeps failing can wedge the queue. The last file moves the card to
 `in_review`, or `needs_attention` if any failed.
 One file per run, not a night per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
@@ -510,7 +516,7 @@ BirdNET's. Three consequences:
   Perch still holds its card in `processing`, which is what keeps retention off
   its audio until Perch has read it.
 - **BirdNET never waits for it.** `drain` catches BirdNET up on every card, then
-  takes one Perch file, then looks again -- Perch is ~3x BirdNET's time, and a
+  takes one Perch file, then looks again -- Perch is ~17x BirdNET's CPU, and a
   new card's first opinion shouldn't queue behind an old card's second.
 - **Its scores are a softmax, not a sigmoid.** Perch's outputs are logits, and
   a sigmoid over them puts nearly every top-five guess at 0.99+, so a threshold
@@ -521,9 +527,10 @@ BirdNET's. Three consequences:
   scientific names only; common names are borrowed from BirdNET's labels, and
   the geo model's species list is matched to Perch's by scientific name.
 It costs TensorFlow in the image (~1.3 GB, always installed, so it is a
-setting rather than a build) and ~2.5 GB of peak memory, which is why it is
-off by default and why Terraform refuses it on less than 4Gi (DEPLOYMENT.md,
-*Perch*).
+setting rather than a build), ~2 GB of peak memory, and -- measured on a real
+card -- ~17x BirdNET's CPU, which is why it is off by default and why
+Terraform refuses it on less than 4Gi (DEPLOYMENT.md, *Perch*; ANALYSIS.md,
+*Measured*).
 *Revisit when:* Perch's detections turn out to be worth publishing. Then the
 public page needs a rule for a bird both models heard -- one detection per
 species per window, say -- not a second count.

@@ -706,6 +706,9 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 			// the same length is the one already in storage, so it counts as
 			// received rather than being sent a second time.
 			old.Status, old.StatusDetail, old.Night = db.AudioUploaded, "", f.Night
+			// Queued afresh: whatever analysis made of it before, and
+			// however often that failed, is behind it.
+			old.Claim = db.Claim{}
 			writes = append(writes, old)
 			continue
 		}

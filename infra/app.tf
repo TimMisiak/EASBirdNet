@@ -148,6 +148,16 @@ resource "azurerm_container_app" "this" {
         name  = "BIRDSENSE_IMAGE_TAG"
         value = var.image_tag
       }
+      # The replica's size, for the same records: the process can't see its
+      # own limits in Container Apps, only the machine's.
+      env {
+        name  = "BIRDSENSE_REPLICA_CPU"
+        value = tostring(var.cpu)
+      }
+      env {
+        name  = "BIRDSENSE_REPLICA_MEMORY"
+        value = var.memory
+      }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
       env {
@@ -282,12 +292,13 @@ resource "azurerm_container_app" "this" {
     azurerm_cosmosdb_sql_container.this,
   ]
 
-  # Perch's process tree peaks near 2.5 GB on its own, so on the 2Gi replica
+  # Perch's process tree peaks near 2 GB on its own (1.95 GB measured on a
+  # real card), so beside the server and BirdNET on the 2Gi replica
   # the analysis would be killed on every file and retried until it failed.
   lifecycle {
     precondition {
       condition     = !var.perch_enabled || tonumber(trimsuffix(var.memory, "Gi")) >= 4
-      error_message = "perch_enabled needs memory of at least 4Gi (Perch peaks near 2.5 GB); Container Apps pairs 4Gi with cpu 2.0. Set memory = \"4Gi\" and cpu = 2.0, or leave Perch off."
+      error_message = "perch_enabled needs memory of at least 4Gi (Perch peaks near 2 GB); Container Apps pairs 4Gi with cpu 2.0. Set memory = \"4Gi\" and cpu = 2.0, or leave Perch off."
     }
   }
 }

@@ -39,13 +39,17 @@ type Run struct {
 	// HostCPUs is how many CPUs the process can be scheduled on, which in a
 	// container is usually the host's and not its limit.
 	HostCPUs int `json:"hostCpus"`
-	// Cgroup reports whether the container's own figures (cgroup v2) could be
-	// read. Without them a Sample carries only the tasks.
-	Cgroup bool `json:"cgroup"`
-	// LimitCores and LimitMemory are what the container may use: its cgroup
-	// limits, or the host's when it has none.
+	// Source is where the container's figures come from: SourceCgroup2,
+	// SourceCgroup1, SourceProc (the whole machine), or empty when none could
+	// be read, and a Sample carries only the tasks.
+	Source string `json:"source"`
+	// LimitCores and LimitMemory are what the container may use, and
+	// LimitsFrom says whose word that is: "cgroup", "config" (what the
+	// deployment says the replica is, Config.LimitCores), or "host" (every
+	// CPU and all the memory the process can see).
 	LimitCores  float64 `json:"limitCores,omitempty"`
 	LimitMemory int64   `json:"limitMemory,omitempty"`
+	LimitsFrom  string  `json:"limitsFrom,omitempty"`
 	// Settings are the analysis settings in force: which models run, how many
 	// workers and threads. Whatever the caller passes.
 	Settings map[string]any `json:"settings,omitempty"`

@@ -250,6 +250,9 @@ interruption produces the same ids instead of duplicates.
 | `audioDeletedAt?`| instant | When the recording itself was removed under [Audio retention](#audio-retention). `blobName` is cleared with it; `status` is unchanged, because it still says what BirdNET made of the file. |
 | `detectionCount` | integer | BirdNET's detections stored for this file (above threshold). |
 | `perch?`         | object  | The file's Perch step, when Perch was on as BirdNET finished it; see below. |
+| `claimedBy?`     | string  | BirdNET's step: the analysis worker running it -- its process, e.g. `ca-birdsense-prod--0000010-c6bd4bb69-zdmkj:1`. Set with `analyzing`, cleared when the step ends or the worker lets go. See *Claims* below. |
+| `leaseUntil?`    | instant | When that claim lapses unless the worker renews it (every minute, for five). |
+| `attempts?`      | integer | Failed tries at BirdNET's step: a run that crashed, a store that refused its result, or a worker that died holding it. The third fails the file. Reset when the step succeeds. |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
 
@@ -259,10 +262,11 @@ result as it was and the card doesn't need attention for it:
 
 | Field            | Type    | Notes |
 |------------------|---------|-------|
-| `status`         | string  | `queued` (BirdNET is done with the file; waiting for Perch) → `analyzing` → `analyzed`, or `failed`. A file found `analyzing` was cut off by a restart and is run again. |
+| `status`         | string  | `queued` (BirdNET is done with the file; waiting for Perch) → `analyzing` → `analyzed`, or `failed`. |
 | `statusDetail?`  | string  | Why it failed, the same way as the file's own. |
 | `analyzedAt?`    | instant | When Perch finished with it, or gave up on it. |
 | `detectionCount` | integer | Perch's detections stored for this file. |
+| `claimedBy?`, `leaseUntil?`, `attempts?` | | Perch's step's claim and failed tries, the same as the file's own are BirdNET's. |
 
 A file queued for Perch holds its card in `processing` (and so holds its audio:
 [Audio retention](#audio-retention) only sweeps finished cards). If Perch is
@@ -294,9 +298,22 @@ finishes without it.
 |------------|---------|
 | `pending`  | Registered from the card manifest; not in storage yet. |
 | `uploaded` | In file storage; not analyzed yet. On a `processing` card, this is the analysis queue: the file is waiting for BirdNET. |
-| `analyzing`| BirdNET is running over it. Found at startup, it was cut off by a restart, and is run again. |
+| `analyzing`| BirdNET is running over it, on `claimedBy`'s claim. |
 | `analyzed` | BirdNET has run over it (it may still have zero detections). |
-| `failed`   | Unreadable, or an analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when an attempt on the file failed three times over — the analyzer crashing, or storing a clip, the detections or the result failing — that and the first line of its error. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
+| `failed`   | Unreadable, or an analysis error; see `statusDetail`. BirdNET's own report for an unreadable file (`unreadable audio`), `the audio isn't in storage`, or, when an attempt on the file failed three times over — the analyzer crashing, or storing a clip, the detections or the result failing — that and the first line of its error; or, when its worker died holding it three times, `analysis stopped part way through this file 3 times`. Also a file that was not on the list when its card was registered again (`statusDetail`: `not on the card when it was registered again`); the document stays, with `blobName` still pointing at anything stored for it. |
+
+**Claims.** The files are the analysis queue, and more than one worker may
+work it, so a worker takes a step of a file -- BirdNET's, or Perch's -- by
+moving it to `analyzing` with its own name in `claimedBy` and `leaseUntil` five
+minutes on, in one replace-if-unchanged write: of two workers that try at once,
+one wins and the other moves on. It renews the lease every minute while it
+runs, and stops if the claim turns out to be someone else's. When the step
+ends, or the worker is stopped, it clears both. So an `analyzing` step with a
+lease in force is being run; one whose lease has passed was held by a worker
+that died, and is anyone's to take -- which counts as one of its `attempts`, or
+a file that kills its worker would be taken up for ever. An `analyzing` step
+with no `claimedBy` is from before claims, cut off by a restart, and is simply
+run again.
 
 ## `detections`
 
