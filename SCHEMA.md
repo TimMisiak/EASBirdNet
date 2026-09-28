@@ -253,6 +253,7 @@ interruption produces the same ids instead of duplicates.
 | `claimedBy?`     | string  | BirdNET's step: the analysis worker running it -- its process, e.g. `ca-birdsense-prod--0000010-c6bd4bb69-zdmkj:1`. Set with `analyzing`, cleared when the step ends or the worker lets go. See *Claims* below. |
 | `leaseUntil?`    | instant | When that claim lapses unless the worker renews it (every minute, for five). |
 | `attempts?`      | integer | Failed tries at BirdNET's step: a run that crashed, a store that refused its result, or a worker that died holding it. The third fails the file. Reset when the step succeeds. |
+| `retryAfter?`    | instant | After a failed try, when the step may be taken again: 30 s after the first, 60 s after the second. Other files go on meanwhile. Cleared when it is taken. |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
 
@@ -266,7 +267,7 @@ result as it was and the card doesn't need attention for it:
 | `statusDetail?`  | string  | Why it failed, the same way as the file's own. |
 | `analyzedAt?`    | instant | When Perch finished with it, or gave up on it. |
 | `detectionCount` | integer | Perch's detections stored for this file. |
-| `claimedBy?`, `leaseUntil?`, `attempts?` | | Perch's step's claim and failed tries, the same as the file's own are BirdNET's. |
+| `claimedBy?`, `leaseUntil?`, `attempts?`, `retryAfter?` | | Perch's step's claim and failed tries, the same as the file's own are BirdNET's. |
 
 A file queued for Perch holds its card in `processing` (and so holds its audio:
 [Audio retention](#audio-retention) only sweeps finished cards). If Perch is

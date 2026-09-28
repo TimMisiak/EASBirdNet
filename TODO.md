@@ -393,11 +393,10 @@ being rediscovered.
   same seam.
 - **`retention.Sweep` runs three cross-partition `ListUploads` calls**
   (`retention.go:113`) because `UploadFilter` has no multi-status field.
-- **`analysis.tally` replaces the upload document after every file**
-  (`analysis.go:442`) even when nothing changed — ~336 no-op writes per card.
-- **`analysis.drain` aborts the whole pass on the first card's error**
-  (`analysis.go:148-163`), so one card's store failure stalls every other
-  `processing` card for a cycle.
+- **`analysis.fill` stops its scan on the first card whose files can't be
+  listed**, so one card's store failure stalls every other `processing` card
+  for a cycle. (A file failing no longer does: it waits on its `retryAfter`
+  while the rest go on.)
 - **`Queue.Enqueue`'s `reference` parameter is unused** (`analysis.go:97`).
 
 ## Robustness, not urgent

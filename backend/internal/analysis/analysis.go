@@ -4,17 +4,19 @@
 //
 // The queue is the database. A card whose last file has landed is
 // "processing", and each of its files in "uploaded" status is waiting for
-// BirdNET. Queue.Run works through them one file at a time, oldest card first:
-// it copies the file out of storage, runs internal/birdnet over it, merges
+// BirdNET. Queue.Run works through them, as many at once as its Capacity
+// holds, oldest card first. For each, it copies the file out of storage, runs
+// internal/birdnet over it, merges
 // the consecutive windows in which one species was heard (merge.go), cuts a
 // clip of each detection into storage, writes the detections, and marks the
 // file analyzed.
 // With Perch on, a file BirdNET has analyzed is then queued for Perch, which
 // goes through the same steps and stores its detections beside BirdNET's,
 // each marked with the model that heard it. It is a step of its own
-// (db.AudioFile.Perch), taken one file at a time after BirdNET has caught up,
-// so a card waiting for BirdNET never waits behind Perch, and Perch failing on
-// a file leaves BirdNET's result on it as it was.
+// (db.AudioFile.Perch), and a free slot goes to a BirdNET file before a Perch
+// one, so a card waiting for BirdNET never waits behind Perch; Perch runs
+// beside BirdNET where its memory fits (fill). Perch failing on a file leaves
+// BirdNET's result on it as it was.
 // When no file on a card is left for either, the card moves on to in_review,
 // or to needs_attention if BirdNET couldn't read some of it.
 //
@@ -156,10 +158,19 @@ type Queue struct {
 	// worker is what this queue's claims on files are made in the name of
 	// (db.Claim.ClaimedBy): the process, which is the replica in Azure.
 	worker string
-	// nextLapse is the soonest a claim someone else holds on a queued file
-	// will lapse, as the last drain found it: Run looks again then, since
-	// nothing else will wake it for a file a dead worker was holding.
-	nextLapse time.Time
+	// Capacity is how much the queue runs at once, and Costs what each
+	// model's task is expected to take (DefaultCosts where a model has none).
+	// Set them before Run.
+	Capacity Capacity
+	Costs    map[string]Cost
+
+	// nextWake is the soonest a waiting file becomes claimable -- its
+	// retryAfter passes, or someone else's claim on it lapses -- as the last
+	// scan found it. Run looks again then, since nothing else will wake it.
+	// Only the goroutine running drain touches it.
+	nextWake time.Time
+	// tallyMu serializes recounting cards, which finishing tasks do at once.
+	tallyMu sync.Mutex
 
 	// mu guards status, which Run writes and Status reads from whatever
 	// goroutine an HTTP handler is on.
@@ -179,9 +190,10 @@ type Queue struct {
 func New(store db.Store, files storage.Store, analyzer Analyzer, log *slog.Logger) *Queue {
 	q := &Queue{
 		store: store, files: files, analyzer: analyzer, log: log,
-		wake:   make(chan struct{}, 1),
-		worker: fmt.Sprintf("%s:%d", perf.Instance(), os.Getpid()),
-		now:    time.Now, retryDelay: retryDelay, checkDelay: checkDelay, renewEvery: renewEvery,
+		wake:     make(chan struct{}, 1),
+		Capacity: Capacity{Cores: 1, MaxTasks: 1},
+		worker:   fmt.Sprintf("%s:%d", perf.Instance(), os.Getpid()),
+		now:      time.Now, retryDelay: retryDelay, checkDelay: checkDelay, renewEvery: renewEvery,
 		pause: sleep,
 	}
 	q.status = Status{State: StateStarting, Since: q.stamp(), CheckedAt: q.stamp()}
@@ -238,7 +250,14 @@ func (q *Queue) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err != nil {
+		switch {
+		case errors.Is(err, errRetry):
+			// Files that will be tried again at their retryAfter, which
+			// idle waits for; everything else went on meanwhile.
+			q.setStatus(StateFailing, err.Error())
+			q.log.Warn("analysis: files will be tried again", "err", err)
+			delay = q.retryDelay
+		case err != nil:
 			q.setStatus(StateFailing, err.Error())
 			q.log.Error("analysis: pausing after a failure", "err", err, "retry_in", delay)
 			if !q.pause(ctx, delay) {
@@ -246,23 +265,24 @@ func (q *Queue) Run(ctx context.Context) {
 			}
 			delay = min(2*delay, maxRetryDelay)
 			continue
+		default:
+			delay = q.retryDelay
+			q.setStatus(StateReady, "")
 		}
-		delay = q.retryDelay
-		q.setStatus(StateReady, "")
 		if !q.idle(ctx) {
 			return
 		}
 	}
 }
 
-// idle waits for Enqueue, or for the soonest claim on a queued file to lapse,
-// and reports false if ctx ended first.
+// idle waits for Enqueue, or for the soonest waiting file to become
+// claimable, and reports false if ctx ended first.
 func (q *Queue) idle(ctx context.Context) bool {
 	var lapse <-chan time.Time
-	if !q.nextLapse.IsZero() {
-		// A second past it, so the claim has lapsed by the store's clock as
-		// well as this one.
-		t := time.NewTimer(max(q.nextLapse.Sub(q.now()), 0) + time.Second)
+	if !q.nextWake.IsZero() {
+		// A second past it, so it has passed by the store's clock as well as
+		// this one.
+		t := time.NewTimer(max(q.nextWake.Sub(q.now()), 0) + time.Second)
 		defer t.Stop()
 		lapse = t.C
 	}
@@ -314,55 +334,244 @@ func (q *Queue) waitReady(ctx context.Context) bool {
 	}
 }
 
-// errRetry is an attempt on a file that failed and is worth trying again after
-// a pause.
+// errRetry is an attempt on a file that failed and is worth trying again. The
+// file waits until its retryAfter; the queue goes on with everything else.
 var errRetry = errors.New("analysis: attempt failed")
 
-// drain analyzes every queued file on every processing card, and finishes each
-// card as its last file is done. It returns early on a failure Run should
-// pause for.
-//
-// BirdNET comes first, on every card, and Perch (when it is on) takes one file
-// at a time after that, going back to BirdNET between each: Perch is several
-// times slower, so a card that arrives while a long one is getting its second
-// opinion still gets its first one straight away.
+// Capacity is what the queue may run at once. The zero Capacity runs one task
+// at a time with no memory budget, which is what New gives.
+type Capacity struct {
+	// Cores is how much CPU the tasks may keep busy together. A task takes a
+	// core per thread (Perch) or per worker (BirdNET). It is a target, not a
+	// limit: running over it only slows every task down.
+	Cores float64
+	// Memory is what the tasks may hold together, in bytes: the replica's
+	// memory less what the server itself needs. It is a limit: a task starts
+	// only if its model's Cost.Memory fits beside the running ones, because
+	// running over it gets the replica killed with every file on it. 0 is no
+	// budget. A task that fits nowhere still runs when nothing else is.
+	Memory int64
+	// MaxTasks caps the tasks running at once; less than 1 is 1.
+	MaxTasks int
+}
+
+// Cost is what one task of a model is expected to take.
+type Cost struct {
+	// Memory is the task's peak, with a margin: measured, the peak PSS of the
+	// model's whole process tree (ANALYSIS.md, *Measured*).
+	Memory int64
+	// Threads is how many threads a Perch task's TensorFlow runs on; 0 gives
+	// it the cores free when it starts, at least one. BirdNET's interpreter is
+	// single-threaded, so a BirdNET task takes one core whatever this says.
+	Threads int
+}
+
+// DefaultCosts are the measured peaks, with a margin: BirdNET ~260 MB and
+// Perch ~1.95 GB of PSS on a real card.
+var DefaultCosts = map[string]Cost{
+	birdnet.ModelBirdNET: {Memory: 350 << 20},
+	birdnet.ModelPerch:   {Memory: 2300 << 20},
+}
+
+// steps are the models that run over every file, first to last. The order is
+// the priority: a slot goes to the first step with a file waiting, so a new
+// card's BirdNET never waits behind an old card's Perch.
+func (q *Queue) steps() []step {
+	if q.Perch {
+		return []step{birdnetStep, perchStep}
+	}
+	return []step{birdnetStep}
+}
+
+func (q *Queue) cost(model string) Cost {
+	if c, ok := q.Costs[model]; ok {
+		return c
+	}
+	return DefaultCosts[model]
+}
+
+// A task is one step over one file, run in a goroutine of its own.
+type task struct {
+	card    db.Upload
+	file    db.AudioFile
+	step    step
+	threads int
+	cores   float64
+	memory  int64
+}
+
+type taskKey struct{ file, model string }
+
+func (t *task) key() taskKey { return taskKey{t.file.ID, t.step.model} }
+
+type outcome struct {
+	task *task
+	err  error
+}
+
+// drain runs every claimable step of every processing card, as many at once
+// as Capacity allows, and finishes each card when nothing is left on it. It
+// returns once nothing is running and nothing more can start: nil, or the
+// retries it met (errRetry), or the first other failure -- the store, most
+// likely -- which stops it starting anything new, and which Run pauses for.
 func (q *Queue) drain(ctx context.Context) error {
+	running := map[taskKey]*task{}
+	results := make(chan outcome)
+	var retries []error
+	var stop error
+	scan := true
 	for {
-		// Wake-ups that arrive while draining are covered by this pass, as
-		// long as the card list is read after them.
+		if scan && stop == nil && ctx.Err() == nil {
+			scan = false
+			// Wake-ups that arrive now are covered by this scan, as long as
+			// the cards are read after them.
+			select {
+			case <-q.wake:
+			default:
+			}
+			if err := q.fill(ctx, running, results); err != nil {
+				stop = err
+			}
+		}
+		if len(running) == 0 {
+			if stop != nil {
+				return stop
+			}
+			return errors.Join(retries...)
+		}
 		select {
+		case o := <-results:
+			delete(running, o.task.key())
+			switch err := q.gone(ctx, o.task.card, o.err); {
+			case err == nil:
+			case errors.Is(err, errRetry):
+				retries = append(retries, err)
+			case stop == nil:
+				stop = err
+			}
+			scan = true
 		case <-q.wake:
-		default:
-		}
-		cards, err := q.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusProcessing})
-		if err != nil {
-			return err
-		}
-		q.nextLapse = time.Time{}
-		// First come, first analyzed.
-		slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
-		for _, card := range cards {
-			if err := q.gone(ctx, card, q.processCard(ctx, card)); err != nil {
-				return err
+			scan = true
+		case <-ctx.Done():
+			// The running tasks see it too, and let go of their files.
+			for len(running) > 0 {
+				o := <-results
+				delete(running, o.task.key())
 			}
-		}
-		if !q.Perch {
-			return nil
-		}
-		ran := false
-		for _, card := range cards {
-			ran, err = q.perchNext(ctx, card)
-			if err := q.gone(ctx, card, err); err != nil {
-				return err
-			}
-			if ran {
-				break
-			}
-		}
-		if !ran {
-			return nil
+			return ctx.Err()
 		}
 	}
+}
+
+// fill looks at every processing card and starts what fits beside the running
+// tasks: the first step's files before the next step's, oldest card first. A
+// card with nothing waiting and nothing running is tallied, which finishes it
+// if its last file was done before a restart got to finishing it. It notes
+// the soonest a waiting file becomes claimable (nextWake), for Run.
+func (q *Queue) fill(ctx context.Context, running map[taskKey]*task, results chan<- outcome) error {
+	cards, err := q.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusProcessing})
+	if err != nil {
+		return err
+	}
+	// First come, first analyzed.
+	slices.SortStableFunc(cards, func(a, b db.Upload) int { return receivedAt(a).Compare(receivedAt(b)) })
+	q.nextWake = time.Time{}
+	steps := q.steps()
+	type candidate struct {
+		card int
+		file db.AudioFile
+		step step
+	}
+	byStep := make([][]candidate, len(steps))
+	for i, card := range cards {
+		files, err := q.store.ListAudioFiles(ctx, card.ID)
+		if err := q.gone(ctx, card, err); err != nil {
+			return err
+		}
+		busy := false
+		for _, f := range files {
+			if !q.Perch && perchWaiting(f) {
+				// Queued for Perch while it was on, and it is off now. The
+				// file never got its second opinion, so it says none.
+				if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
+					if perchWaiting(*f) {
+						f.Perch = nil
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				f.Perch = nil
+			}
+			for j, s := range steps {
+				if running[taskKey{f.ID, s.model}] != nil {
+					busy = true
+					continue
+				}
+				ok, wake := q.claimable(f, s)
+				if ok {
+					byStep[j] = append(byStep[j], candidate{i, f, s})
+					busy = true
+				} else if !wake.IsZero() && (q.nextWake.IsZero() || wake.Before(q.nextWake)) {
+					q.nextWake = wake
+				}
+			}
+		}
+		if !busy {
+			if err := q.gone(ctx, card, q.tally(ctx, card.ID)); err != nil {
+				return err
+			}
+		}
+	}
+
+	most := max(q.Capacity.MaxTasks, 1)
+	for _, candidates := range byStep {
+		for _, c := range candidates {
+			if len(running) >= most {
+				return nil
+			}
+			var memory int64
+			var cores float64
+			for _, t := range running {
+				memory, cores = memory+t.memory, cores+t.cores
+			}
+			cost := q.cost(c.step.model)
+			if q.Capacity.Memory > 0 && memory+cost.Memory > q.Capacity.Memory && len(running) > 0 {
+				continue
+			}
+			t := &task{file: c.file, step: c.step, memory: cost.Memory, cores: 1}
+			if c.step.model == birdnet.ModelPerch {
+				t.threads = cost.Threads
+				if t.threads == 0 {
+					t.threads = max(1, int(q.Capacity.Cores-cores))
+				}
+				t.cores = float64(t.threads)
+			}
+			if cards[c.card].Analysis == nil {
+				if cards[c.card], err = q.startCard(ctx, cards[c.card].ID); err != nil {
+					return q.gone(ctx, cards[c.card], err)
+				}
+			}
+			t.card = cards[c.card]
+			running[t.key()] = t
+			go func() { results <- outcome{t, q.runTask(ctx, t)} }()
+		}
+	}
+	return nil
+}
+
+// runTask runs one step over one file, and recounts its card.
+func (q *Queue) runTask(ctx context.Context, t *task) error {
+	var err error
+	if t.step.model == birdnet.ModelPerch {
+		err = q.perchFile(ctx, t.card, t.file, t.threads)
+	} else {
+		err = q.analyzeFile(ctx, t.card, t.file)
+	}
+	if err != nil {
+		return err
+	}
+	return q.tally(ctx, t.card.ID)
 }
 
 // gone passes on what processing a card returned, unless it is the card
@@ -385,70 +594,6 @@ func receivedAt(u db.Upload) time.Time {
 		return *u.ReceivedAt
 	}
 	return u.UpdatedAt
-}
-
-// processCard runs BirdNET over each of a card's queued files, and finishes
-// the card if that leaves nothing waiting.
-func (q *Queue) processCard(ctx context.Context, card db.Upload) error {
-	files, err := q.store.ListAudioFiles(ctx, card.ID)
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		if !q.Perch && perchWaiting(f) {
-			// Queued for Perch while it was on, and it is off now. The file
-			// never got its second opinion, so it says none.
-			if _, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
-				if perchWaiting(*f) {
-					f.Perch = nil
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		if !q.claimable(f, birdnetStep) {
-			continue
-		}
-		if card.Analysis == nil {
-			if card, err = q.startCard(ctx, card.ID); err != nil {
-				return err
-			}
-		}
-		if err := q.analyzeFile(ctx, card, f); err != nil {
-			return err
-		}
-		if err := q.tally(ctx, card.ID); err != nil {
-			return err
-		}
-	}
-	// A card with nothing left queued is finished, including one whose last
-	// file was done before a restart got to finishing the card.
-	return q.tally(ctx, card.ID)
-}
-
-// perchNext runs Perch over the first of a card's files waiting for it, and
-// reports whether there was one.
-func (q *Queue) perchNext(ctx context.Context, card db.Upload) (bool, error) {
-	files, err := q.store.ListAudioFiles(ctx, card.ID)
-	if err != nil {
-		return false, err
-	}
-	for _, f := range files {
-		if queued(f) || !q.claimable(f, perchStep) {
-			continue
-		}
-		if card.Analysis == nil {
-			if card, err = q.startCard(ctx, card.ID); err != nil {
-				return false, err
-			}
-		}
-		if err := q.perchFile(ctx, card, f); err != nil {
-			return true, err
-		}
-		return true, q.tally(ctx, card.ID)
-	}
-	return false, nil
 }
 
 // queued reports whether a file is in BirdNET's queue: waiting for it, or
@@ -509,7 +654,7 @@ var birdnetStep = step{
 	},
 	failed: func(f *db.AudioFile, why string, at time.Time) {
 		f.Status, f.StatusDetail, f.AnalyzedAt, f.DetectionCount = db.AudioFailed, why, &at, 0
-		f.ClaimedBy, f.LeaseUntil = "", nil
+		f.ClaimedBy, f.LeaseUntil, f.RetryAfter = "", nil, nil
 	},
 }
 
@@ -537,23 +682,25 @@ var perchStep = step{
 }
 
 // claimable reports whether a step of a file is there to be taken: waiting
-// for it and not being run, or being run on a claim that has lapsed. It
-// notes when a claim still in force will lapse, for Run.
-func (q *Queue) claimable(f db.AudioFile, s step) bool {
+// for it, not being run, and past any retryAfter; or being run on a claim
+// that has lapsed. When it is waiting but not yet claimable, wake is when it
+// will be.
+func (q *Queue) claimable(f db.AudioFile, s step) (ok bool, wake time.Time) {
 	if !s.waiting(f) {
-		return false
-	}
-	if !s.running(f) {
-		return true
+		return false, time.Time{}
 	}
 	c := s.claim(&f)
-	if c.LeaseUntil == nil || !q.now().Before(*c.LeaseUntil) {
-		return true
+	now := q.now()
+	if !s.running(f) {
+		if c.RetryAfter != nil && now.Before(*c.RetryAfter) {
+			return false, *c.RetryAfter
+		}
+		return true, time.Time{}
 	}
-	if q.nextLapse.IsZero() || c.LeaseUntil.Before(q.nextLapse) {
-		q.nextLapse = *c.LeaseUntil
+	if c.LeaseUntil == nil || !now.Before(*c.LeaseUntil) {
+		return true, time.Time{}
 	}
-	return false
+	return false, *c.LeaseUntil
 }
 
 // take claims a step of a file for this worker, in one replace-if-unchanged
@@ -570,7 +717,7 @@ func (q *Queue) take(ctx context.Context, card db.Upload, f db.AudioFile, s step
 	lease := q.now().UTC().Add(leaseFor)
 	exhausted := false
 	f, err := q.store.UpdateAudioFile(ctx, card.ID, f.ID, func(f *db.AudioFile) error {
-		if !q.claimable(*f, s) {
+		if ok, _ := q.claimable(*f, s); !ok {
 			return errSkip
 		}
 		c := s.claim(f)
@@ -584,7 +731,7 @@ func (q *Queue) take(ctx context.Context, card db.Upload, f db.AudioFile, s step
 		}
 		s.begin(f)
 		c = s.claim(f)
-		c.ClaimedBy, c.LeaseUntil = q.worker, &lease
+		c.ClaimedBy, c.LeaseUntil, c.RetryAfter = q.worker, &lease, nil
 		return nil
 	})
 	switch {
@@ -708,7 +855,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 	began := time.Now()
 
 	held, stop := q.hold(ctx, f, birdnetStep)
-	res, err := q.run(held, card, f, birdnetStep)
+	res, err := q.run(held, card, f, birdnetStep, 0)
 	stop()
 	if err != nil {
 		return q.settle(ctx, held, birdnetStep, f, err)
@@ -751,7 +898,7 @@ func (q *Queue) analyzeFile(ctx context.Context, card db.Upload, f db.AudioFile)
 // perchFile runs Perch over one file BirdNET has analyzed, and stores what it
 // heard beside BirdNET's detections. It returns an error the same way
 // analyzeFile does, and records what goes wrong on the file's Perch step.
-func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) error {
+func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile, threads int) error {
 	f, ok, err := q.take(ctx, card, f, perchStep)
 	if err != nil || !ok {
 		return err
@@ -761,7 +908,7 @@ func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) e
 	began := time.Now()
 
 	held, stop := q.hold(ctx, f, perchStep)
-	res, err := q.run(held, card, f, perchStep)
+	res, err := q.run(held, card, f, perchStep, threads)
 	stop()
 	if err != nil {
 		return q.settle(ctx, held, perchStep, f, err)
@@ -793,13 +940,20 @@ func (q *Queue) perchFile(ctx context.Context, card db.Upload, f db.AudioFile) e
 //
 // What is wrong with the file itself comes back as unreadable; settle sorts
 // that from everything else.
-func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step) (res result, err error) {
+//
+// threads is Perch's TensorFlow threads (birdnet.Options.Threads); 0 for
+// BirdNET, or for TensorFlow's own default.
+func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step, threads int) (res result, err error) {
 	task := q.Perf.Begin(s.model)
 	var size int64
 	if task != nil {
 		ctx = birdnet.WithObserver(ctx, task)
 		wait := q.waited(f, s)
-		defer func() { task.End(q.taskRecord(card, f, wait, size, res, err)) }()
+		defer func() {
+			rec := q.taskRecord(card, f, wait, size, res, err)
+			rec.Threads = threads
+			task.End(rec)
+		}()
 	}
 	task.Phase("download")
 	local, cleanup, err := q.fetch(ctx, f)
@@ -818,7 +972,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step)
 
 	night, _ := time.ParseInLocation(time.DateOnly, f.Night, pacific)
 	opts := settings
-	opts.Model = s.model
+	opts.Model, opts.Threads = s.model, threads
 	if lat, lon := card.Recorder.Latitude, card.Recorder.Longitude; lat != 0 || lon != 0 {
 		opts.Location = &birdnet.Location{Latitude: lat, Longitude: lon, Week: birdnet.Week(night)}
 	}
@@ -1020,6 +1174,11 @@ func (q *Queue) retryOrFail(ctx context.Context, s step, f db.AudioFile, cause e
 			return nil
 		}
 		s.requeue(f)
+		// 30 s after the first failure, 60 s after the second: long enough
+		// for a blip to pass, and it spaces this file's tries without holding
+		// up anyone else's.
+		after := q.now().UTC().Add(min(q.retryDelay<<(attempt-1), maxRetryDelay))
+		s.claim(f).RetryAfter = &after
 		return nil
 	})
 	switch {
@@ -1051,6 +1210,8 @@ func (q *Queue) fail(ctx context.Context, s step, f db.AudioFile, why string) er
 // need a coordinator's attention -- BirdNET's result is still there -- so it
 // is only shown on the file.
 func (q *Queue) tally(ctx context.Context, id string) error {
+	q.tallyMu.Lock()
+	defer q.tallyMu.Unlock()
 	files, err := q.store.ListAudioFiles(ctx, id)
 	if err != nil {
 		return err
@@ -1081,10 +1242,17 @@ func (q *Queue) tally(ctx context.Context, id string) error {
 		if u.Status != db.StatusProcessing {
 			return nil
 		}
+		finishing := waiting == 0 && analyzed+failed > 0
+		if !finishing && u.FilesAnalyzed == analyzed && u.FilesFailed == failed &&
+			u.DetectionCount == detections && u.PerchDetectionCount == perchDetections {
+			// Nothing to write: a card is looked at on every scan, and
+			// replacing it unchanged is a write for nothing.
+			return errSkip
+		}
 		u.FilesAnalyzed, u.FilesFailed, u.DetectionCount = analyzed, failed, detections
 		u.PerchDetectionCount = perchDetections
 		// A card with no files on record has nothing to finish on.
-		if waiting > 0 || analyzed+failed == 0 {
+		if !finishing {
 			return nil
 		}
 		u.ProcessedAt = &finished
@@ -1097,6 +1265,9 @@ func (q *Queue) tally(ctx context.Context, id string) error {
 		}
 		return nil
 	})
+	if errors.Is(err, errSkip) {
+		return nil
+	}
 	return err
 }
 

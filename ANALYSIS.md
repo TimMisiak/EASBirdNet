@@ -229,35 +229,60 @@ concurrently instead of in a loop.
 
 ### Packing
 
-The scheduler keeps a per-model estimate `{memory, threads}`, with defaults
-from M0's measurements and overrides in environment variables so tuning is a
-Terraform variable, not a rebuild:
+Built in M2 (`internal/analysis`: `drain`, `fill`, `Capacity`, `Cost`), and
+running in today's in-process queue already. The queue is given a
+**capacity** -- cores, a memory budget, a most tasks at once -- and a
+**cost** per model, and `drain` keeps as many tasks running as fit:
+
+- **Capacity** comes from the replica's limits (`perf.Limits`: the cgroup's,
+  else `BIRDSENSE_REPLICA_CPU`/`_MEMORY`, else the host's): memory less a
+  headroom for the server, and a task per core. Where only the host is known
+  -- a development machine -- it is two tasks on two cores, so running the
+  server doesn't take a laptop over.
+- **Costs** are the measured peaks with a margin (`analysis.DefaultCosts`).
+- All of it can be overridden without a rebuild, as `BIRDSENSE_ANALYSIS_*`,
+  which Terraform sets from the `analysis_tuning` map variable:
 
 ```
-BIRDSENSE_ANALYSIS_MEM_HEADROOM    default 1 GiB   kept free for Go, clips, page cache
-BIRDSENSE_ANALYSIS_BIRDNET_MEM     default 0.35 GB peak per task (measured 0.26), with margin
-BIRDSENSE_ANALYSIS_BIRDNET_WORKERS default 1       LiteRT is single-threaded; see *The benchmark*
-BIRDSENSE_ANALYSIS_PERCH_MEM       default 2.3 GB  measured 1.95, with margin
-BIRDSENSE_ANALYSIS_PERCH_THREADS   default 1       raised if M0 shows it scales
-BIRDSENSE_ANALYSIS_MAX_TASKS       default = cores
+MAX_TASKS       default: a task per core (two on a bare host)
+MEM_HEADROOM    default 1Gi     kept for the server, tusd's buffers, clips
+BIRDNET_MEM     default 350Mi   measured ~260 MB PSS
+PERCH_MEM       default 2300Mi  measured ~1.95 GB PSS
+PERCH_THREADS   default 0       the cores free when the task starts, at least 1
 ```
 
-When a slot opens:
+On every change -- a task finishing, a card arriving -- `fill` scans the
+processing cards and starts, in order:
 
-1. Take the oldest claimable BirdNET file, if its memory fits.
-2. Otherwise the oldest claimable Perch file, if it fits -- preferring one
-   whose audio this replica already holds.
-3. Give a Perch task `min(threads setting, free cores)` threads, at least 1.
-   Threads are fixed when the process starts, so this is where a replica that
-   has run out of BirdNET work hands its spare cores to Perch. (BirdNET's
-   interpreter is single-threaded, so a BirdNET task only ever takes more
-   cores as more workers, each costing its own model's memory.)
+1. The oldest cards' claimable BirdNET files, while there are slots and each
+   one's memory fits beside the running tasks.
+2. Then their Perch files, the same way. So no Perch file starts while a
+   BirdNET file is waiting for a slot, but Perch does start beside the BirdNET
+   still running when its memory fits.
+3. A Perch task gets `PERCH_THREADS` threads, or with 0 the cores the running
+   tasks leave free, at least one. Threads are fixed when the process starts,
+   so this is where a replica that has run out of BirdNET work hands all its
+   cores to Perch. BirdNET's interpreter is single-threaded, so a BirdNET task
+   counts as one core.
+4. Memory is a limit, cores and slots a target: a task that doesn't fit
+   waits, except that a task bigger than the whole budget still runs when
+   nothing else is, rather than never.
 
-**Sharing a download.** Today each step copies the file out of storage into
-its own temp directory. On a packed replica, a file's BirdNET and Perch steps
-are often both queued; the worker keeps a small local cache (reference-counted,
-removed when neither step still needs it) so one download serves both. The
-temp directory is swept at startup (TODO.md already notes orphaned ones).
+Checked for real on a 2 vCPU / 4 GiB budget (3 GiB after headroom) with six
+copies of the Osprey clip and Perch on: two BirdNET files at a time, the first
+Perch file started beside the last BirdNET one on 1 thread, and the rest --
+which don't fit two to a replica -- one at a time on both cores.
+
+**A file that fails** waits for its own `retryAfter` (30 s, then 60 s) while
+everything else goes on; only a failure no file is to blame for (the store
+unreachable) pauses the queue, on a delay that grows while it lasts.
+
+**Not built: sharing a download between the two models.** Perch runs on a
+file only after its BirdNET step, and BirdNET goes first across every card, so
+sharing would mean holding each file on disk until Perch got to it -- a whole
+card, for hours. Downloads are ~2% of a task's time (*Measured*), so it isn't
+worth it; if the two steps ever run back to back on one file, it becomes
+cheap.
 
 ### Claims and leases
 
@@ -289,11 +314,10 @@ carries a `db.Claim`, whose fields sit beside the step's status:
 - The in-process queue claims the same way, as the only claimant, so there is
   one code path. When the only queued files are held by someone else, `Run`
   looks again when the soonest lease lapses; nothing else would wake it.
-- **Still to come (M2): `retryAfter`.** `maxAttempts` counts per stored
-  `attempts`, but the 30-second retry spacing is still `Run`'s pause after a
-  failed pass, which is right for one worker and wrong for several -- one
-  replica pausing shouldn't be what spaces another's retries. M2 makes it a
-  "not claimable before" on the step.
+- **`retryAfter`** (M2) is the step's "not claimable before" after a
+  failure: 30 s after the first, 60 s after the second. It spaces one file's
+  tries without pausing anything else, which matters once several replicas
+  share the queue. `Run` wakes for the soonest one.
 
 ### Where the queue's status lives
 
@@ -491,8 +515,9 @@ one card in the JSON backend.
 
 **M2 -- The packing scheduler.** Memory budget from the replica's limits
 (cgroups, else `BIRDSENSE_REPLICA_*`), per-model estimates from M0,
-BirdNET-first, thread handoff, the shared download cache, and `retryAfter` in
-place of `Run`'s pause as what spaces a file's retries.
+BirdNET-first, thread handoff, and `retryAfter` in place of `Run`'s pause as
+what spaces a file's retries. (The shared download cache was dropped; see
+*Packing*.)
 In-process, so it can run in the current web app with Perch on and be measured
 there.
 
@@ -530,6 +555,6 @@ profile or Batch.
 |---|---|---|
 | M0 Measure | done 2026-09-28, but for the benchmark | First real card measured (*Measured*). Production had no readable cgroup, so the container figures now fall back to cgroup v1 and `/proc`, and Terraform passes the replica's size in. Still to run: `cmd/analyze -bench -model perch -threads 1,2,4` on a real card file. |
 | M1 Claims and leases | done 2026-09-28 | `db.Claim` on both steps; `take`/`hold`/`release` in `internal/analysis`; tests for two workers sharing a card, a lapsed claim, a lost claim, and stopping (race detector clean). `retryAfter` moved to M2. Not yet run against Cosmos. |
-| M2 Packing scheduler | not started | |
+| M2 Packing scheduler | done 2026-09-28 | In-process: `drain`/`fill` pack BirdNET and Perch by memory and slots, BirdNET first, Perch threads from free cores, `retryAfter` per file. Tests with a fake analyzer (race detector clean), and a real run of both models in a dev server. Tunable through `analysis_tuning`. Next: M3, the job. |
 | M3 The job | not started | |
 | M4 Tune | not started | |

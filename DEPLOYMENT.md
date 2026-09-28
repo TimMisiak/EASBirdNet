@@ -247,7 +247,8 @@ normal rather than a sick replica.
 | `BIRDSENSE_PERCH` | `on` when `var.perch_enabled`, else `off` (the default) | Runs Perch over every file after BirdNET, as a second list of detections. Needs the larger container; see [Perch](#perch). |
 | `BIRDSENSE_PERF` | *unset*, so on | Records what analysis costs the replica -- CPU, memory, time per phase -- under `perf/` in the audio container, for sizing the analysis replica. `off` stops it. See [ANALYSIS.md](ANALYSIS.md), *Performance data*. |
 | `BIRDSENSE_IMAGE_TAG` | `var.image_tag` | Only so the performance records name the image they measured. |
-| `BIRDSENSE_REPLICA_CPU`, `BIRDSENSE_REPLICA_MEMORY` | `var.cpu`, `var.memory` | The replica's size, for the performance records: a Container Apps replica can't read its own limits, only the machine under it. |
+| `BIRDSENSE_REPLICA_CPU`, `BIRDSENSE_REPLICA_MEMORY` | `var.cpu`, `var.memory` | The replica's size: a Container Apps replica can't read its own limits, only the machine under it. The analysis queue sizes how much it runs at once from it, and the performance records report it. |
+| `BIRDSENSE_ANALYSIS_*` | one per key of `var.analysis_tuning`, *unset* by default | Overrides for how much analysis runs at once and what each model is expected to take: `MAX_TASKS`, `MEM_HEADROOM`, `BIRDNET_MEM`, `PERCH_MEM`, `PERCH_THREADS`. Unset, a task per core and each model's measured memory. See [ANALYSIS.md](ANALYSIS.md), *Packing*. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
 | `BIRDSENSE_PUBLIC_URL` | `var.public_url`, or the container app's own `https://<fqdn>` when that is empty | Where browsers reach Birdsense. The redirect URI is built from it, so it must match one registered with the provider. Not taken from the request's `Host` header, which a caller chooses. |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
@@ -1023,7 +1024,7 @@ environment), `public_url` (empty, so the container app's own hostname),
 `custom_domain` (empty, so the app answers only on its own hostname),
 `oidc_microsoft_tenant` (`common`), `oidc_google_client_id` and `_secret`
 (empty, so no Google sign-in), `env`, `location`, `name_suffix`, `cpu`,
-`memory`, `perch_enabled`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
+`memory`, `perch_enabled`, `analysis_tuning`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
 `budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
 second tfvars file with `env = "staging"`.
 

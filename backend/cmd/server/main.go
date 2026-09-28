@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/mail"
 	"os"
@@ -97,6 +98,11 @@ func main() {
 	// way -- an unanalyzable card waits in processing rather than being lost.
 	queue := analysis.New(store, files, cfg.Analyzer, log)
 	queue.Perch = cfg.Perch
+	cores, memory, limitsFrom := perf.Limits(cfg.ReplicaCPU, cfg.ReplicaMemory)
+	queue.Capacity = analysisCapacity(cfg.Analysis, cores, memory, limitsFrom)
+	queue.Costs = analysisCosts(cfg.Analysis)
+	log.Info("analysis capacity", "cores", queue.Capacity.Cores, "memory_mb", queue.Capacity.Memory>>20,
+		"max_tasks", queue.Capacity.MaxTasks, "limits_from", limitsFrom)
 	// What each file's analysis costs, written beside the audio. It stops
 	// after the queue, so the last task's record is flushed.
 	perfCtx, stopPerf := context.WithCancel(context.Background())
@@ -105,7 +111,8 @@ func main() {
 		instance := perf.Instance()
 		queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
 			Instance: instance, Version: cfg.ImageTag,
-			Settings:   map[string]any{"perch": cfg.Perch, "inProcess": true},
+			Settings: map[string]any{"perch": cfg.Perch, "inProcess": true,
+				"capacity": queue.Capacity, "costs": queue.Costs},
 			LimitCores: cfg.ReplicaCPU, LimitMemory: cfg.ReplicaMemory,
 		}, log)
 		log.Info("analysis performance records on", "instance", instance)
@@ -286,6 +293,97 @@ type config struct {
 	// can't be read. Zero when unset.
 	ReplicaCPU    float64
 	ReplicaMemory int64
+	// Analysis tunes how much the analysis queue runs at once; zero fields
+	// take the defaults analysisCapacity and analysisCosts describe.
+	Analysis analysisTuning
+}
+
+// analysisTuning is the BIRDSENSE_ANALYSIS_* settings: how many tasks at
+// once, how much memory to leave the server, and what each model's task is
+// expected to take (ANALYSIS.md, *Packing*).
+type analysisTuning struct {
+	MaxTasks     int   // BIRDSENSE_ANALYSIS_MAX_TASKS
+	Headroom     int64 // BIRDSENSE_ANALYSIS_MEM_HEADROOM, default 1Gi
+	BirdNETMem   int64 // BIRDSENSE_ANALYSIS_BIRDNET_MEM
+	PerchMem     int64 // BIRDSENSE_ANALYSIS_PERCH_MEM
+	PerchThreads int   // BIRDSENSE_ANALYSIS_PERCH_THREADS; 0 is the cores free when it starts
+}
+
+func readAnalysisTuning() (analysisTuning, error) {
+	t := analysisTuning{Headroom: 1 << 30}
+	for _, n := range []struct {
+		name string
+		to   *int
+	}{{"BIRDSENSE_ANALYSIS_MAX_TASKS", &t.MaxTasks}, {"BIRDSENSE_ANALYSIS_PERCH_THREADS", &t.PerchThreads}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			i, err := strconv.Atoi(v)
+			if err != nil || i < 0 {
+				return t, fmt.Errorf("%s must be a whole number, not %q", n.name, v)
+			}
+			*n.to = i
+		}
+	}
+	for _, n := range []struct {
+		name string
+		to   *int64
+	}{{"BIRDSENSE_ANALYSIS_MEM_HEADROOM", &t.Headroom}, {"BIRDSENSE_ANALYSIS_BIRDNET_MEM", &t.BirdNETMem}, {"BIRDSENSE_ANALYSIS_PERCH_MEM", &t.PerchMem}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			b, err := parseSize(v)
+			if err != nil {
+				return t, fmt.Errorf("%s: %w", n.name, err)
+			}
+			*n.to = b
+		}
+	}
+	return t, nil
+}
+
+// parseSize reads a size as Container Apps writes one: "350Mi", "2.3Gi".
+func parseSize(v string) (int64, error) {
+	for suffix, unit := range map[string]float64{"Mi": 1 << 20, "Gi": 1 << 30} {
+		if n, ok := strings.CutSuffix(v, suffix); ok {
+			f, err := strconv.ParseFloat(n, 64)
+			if err != nil || f < 0 {
+				break
+			}
+			return int64(f * unit), nil
+		}
+	}
+	return 0, fmt.Errorf(`a size must be like "350Mi" or "2.3Gi", not %q`, v)
+}
+
+// analysisCapacity is what the queue may run at once on a replica of this
+// size: its memory less the headroom, and a task per core. Limits read from
+// the whole host -- a development machine, where nothing says what the
+// server's share is -- run two tasks at most, on two cores, so running the
+// server doesn't take a laptop over; BIRDSENSE_REPLICA_CPU and _MEMORY or
+// BIRDSENSE_ANALYSIS_MAX_TASKS say otherwise.
+func analysisCapacity(t analysisTuning, cores float64, memory int64, from string) analysis.Capacity {
+	if from == "host" {
+		cores = min(cores, 2)
+	}
+	c := analysis.Capacity{Cores: cores, Memory: max(memory-t.Headroom, 1), MaxTasks: t.MaxTasks}
+	if c.MaxTasks == 0 {
+		c.MaxTasks = max(1, int(cores))
+	}
+	return c
+}
+
+// analysisCosts is DefaultCosts with the settings' overrides.
+func analysisCosts(t analysisTuning) map[string]analysis.Cost {
+	costs := maps.Clone(analysis.DefaultCosts)
+	if t.BirdNETMem > 0 {
+		c := costs[birdnet.ModelBirdNET]
+		c.Memory = t.BirdNETMem
+		costs[birdnet.ModelBirdNET] = c
+	}
+	p := costs[birdnet.ModelPerch]
+	if t.PerchMem > 0 {
+		p.Memory = t.PerchMem
+	}
+	p.Threads = t.PerchThreads
+	costs[birdnet.ModelPerch] = p
+	return costs
 }
 
 // replicaSize reads the replica's configured size, in Container Apps' own
@@ -404,6 +502,9 @@ func configFromEnv() (config, error) {
 	}
 	cfg.ImageTag = os.Getenv("BIRDSENSE_IMAGE_TAG")
 	if cfg.ReplicaCPU, cfg.ReplicaMemory, err = replicaSize(os.Getenv("BIRDSENSE_REPLICA_CPU"), os.Getenv("BIRDSENSE_REPLICA_MEMORY")); err != nil {
+		return cfg, err
+	}
+	if cfg.Analysis, err = readAnalysisTuning(); err != nil {
 		return cfg, err
 	}
 

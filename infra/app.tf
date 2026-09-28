@@ -158,6 +158,16 @@ resource "azurerm_container_app" "this" {
         name  = "BIRDSENSE_REPLICA_MEMORY"
         value = var.memory
       }
+      # How much analysis runs at once, and what each model is expected to
+      # take: BIRDSENSE_ANALYSIS_* by its suffix (ANALYSIS.md, *Packing*).
+      # Empty, the server's defaults apply.
+      dynamic "env" {
+        for_each = var.analysis_tuning
+        content {
+          name  = "BIRDSENSE_ANALYSIS_${upper(env.key)}"
+          value = env.value
+        }
+      }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
       env {

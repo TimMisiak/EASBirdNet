@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
@@ -34,6 +35,20 @@ func (f *fixture) runs() []string {
 		out = append(out, birdnetOr(c.opts.Model)+" "+c.audio)
 	}
 	return out
+}
+
+// birdnetOnly runs BirdNET's step over files and recounts the card, as a
+// scheduler would have with Perch's step still to come.
+func (f *fixture) birdnetOnly(paths ...string) {
+	f.t.Helper()
+	for _, p := range paths {
+		if err := f.queue.analyzeFile(f.t.Context(), f.upload(), f.file(p)); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	if err := f.queue.tally(f.t.Context(), ref); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func birdnetOr(model string) string {
@@ -122,9 +137,7 @@ func TestACardWaitsInProcessingForPerch(t *testing.T) {
 	f.bird.answer = owls
 	f.card(db.StatusProcessing, owlFile)
 
-	if err := f.queue.processCard(t.Context(), f.upload()); err != nil {
-		t.Fatal(err)
-	}
+	f.birdnetOnly(owlFile)
 	if u := f.upload(); u.Status != db.StatusProcessing || u.FilesAnalyzed != 1 {
 		t.Errorf("after BirdNET alone, card = %s with %d analyzed; want processing", u.Status, u.FilesAnalyzed)
 	}
@@ -186,6 +199,7 @@ func TestPerchFailingIsRetriedThenLeavesBirdNETsResult(t *testing.T) {
 	f.card(db.StatusProcessing, owlFile)
 
 	for attempt := 1; attempt < maxAttempts; attempt++ {
+		f.later(time.Minute)
 		if err := f.queue.drain(t.Context()); !errors.Is(err, errRetry) || !strings.Contains(err.Error(), "perch") {
 			t.Fatalf("attempt %d: err = %v, want a pause to retry Perch", attempt, err)
 		}
@@ -193,6 +207,7 @@ func TestPerchFailingIsRetriedThenLeavesBirdNETsResult(t *testing.T) {
 			t.Fatalf("attempt %d: Perch step = %+v, want it queued again", attempt, p)
 		}
 	}
+	f.later(time.Minute)
 	if err := f.queue.drain(t.Context()); err != nil {
 		t.Fatalf("last attempt: %v", err)
 	}
@@ -237,9 +252,7 @@ func TestTurningPerchOffLetsAWaitingCardFinish(t *testing.T) {
 	f.queue.Perch = true
 	f.bird.answer = owls
 	f.card(db.StatusProcessing, owlFile)
-	if err := f.queue.processCard(t.Context(), f.upload()); err != nil {
-		t.Fatal(err)
-	}
+	f.birdnetOnly(owlFile)
 
 	f.queue.Perch = false
 	if err := f.queue.drain(t.Context()); err != nil {

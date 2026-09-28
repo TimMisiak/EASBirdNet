@@ -211,6 +211,10 @@ type Claim struct {
 	// worker dying with the step claimed. It is stored so that a fleet of
 	// short-lived workers can't retry one file for good.
 	Attempts int `json:"attempts,omitempty"`
+	// RetryAfter is when a step that failed and is waiting to be tried again
+	// may be taken: 30 s after its first failure, 60 s after its second. It
+	// spaces one file's tries without holding up any other file.
+	RetryAfter *time.Time `json:"retryAfter,omitempty"`
 }
 
 // AudioDetailNotOnCard is the StatusDetail of a failed file that was on a

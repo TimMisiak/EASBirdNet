@@ -65,6 +65,17 @@ variable "perch_enabled" {
   default     = false
 }
 
+variable "analysis_tuning" {
+  description = "Overrides for how much analysis runs at once, as BIRDSENSE_ANALYSIS_<KEY> settings, e.g. { max_tasks = \"2\", perch_mem = \"2.3Gi\", perch_threads = \"1\", mem_headroom = \"1Gi\", birdnet_mem = \"350Mi\" }. Empty uses the server's defaults: a task per core, and the measured memory of each model. See ANALYSIS.md, *Packing*."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.analysis_tuning) : contains(["max_tasks", "mem_headroom", "birdnet_mem", "perch_mem", "perch_threads"], k)])
+    error_message = "analysis_tuning keys must be max_tasks, mem_headroom, birdnet_mem, perch_mem or perch_threads."
+  }
+}
+
 variable "log_retention_days" {
   description = "Log Analytics retention."
   type        = number

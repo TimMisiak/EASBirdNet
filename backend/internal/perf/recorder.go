@@ -102,26 +102,8 @@ func newRecorder(sink Sink, cfg Config, log *slog.Logger, cgroup, proc string, n
 	}
 	c := r.read()
 	r.prev, r.prevAt = c, now()
-	from := "cgroup"
-	r.limit.cores, r.limit.memory = c.limitCores, c.limitMemory
-	if r.limit.cores == 0 || r.limit.memory == 0 {
-		from = "config"
-		if r.limit.cores == 0 {
-			r.limit.cores = cfg.LimitCores
-		}
-		if r.limit.memory == 0 {
-			r.limit.memory = cfg.LimitMemory
-		}
-	}
-	if r.limit.cores == 0 || r.limit.memory == 0 {
-		from = "host"
-		if r.limit.cores == 0 {
-			r.limit.cores = float64(runtime.NumCPU())
-		}
-		if r.limit.memory == 0 {
-			r.limit.memory = hostMemory(r.procDir)
-		}
-	}
+	var from string
+	r.limit.cores, r.limit.memory, from = resolve(c, cfg.LimitCores, cfg.LimitMemory, r.procDir)
 	run := Run{
 		Type: TypeRun, T: now().UTC(), Instance: cfg.Instance, Version: cfg.Version,
 		CPUModel: cpuModel(r.procDir), HostCPUs: runtime.NumCPU(), Source: c.source,
@@ -212,6 +194,38 @@ func (r *Recorder) sample() {
 	if err := r.sink.Write(s); err != nil {
 		r.log.Warn("perf: writing a sample", "err", err)
 	}
+}
+
+// Limits are what this process may use: its container's own limits where it
+// can read them, else the replica size the deployment configured (cores and
+// memory, either 0 for unknown), else every CPU and all the memory the
+// machine has. from says which: "cgroup", "config" or "host". The analysis
+// queue budgets from these, and the performance records report them.
+func Limits(cores float64, memory int64) (float64, int64, string) {
+	return resolve(readContainer(cgroupDir, "/proc"), cores, memory, "/proc")
+}
+
+func resolve(c container, cfgCores float64, cfgMemory int64, procDir string) (cores float64, memory int64, from string) {
+	cores, memory, from = c.limitCores, c.limitMemory, "cgroup"
+	if cores == 0 || memory == 0 {
+		from = "config"
+		if cores == 0 {
+			cores = cfgCores
+		}
+		if memory == 0 {
+			memory = cfgMemory
+		}
+	}
+	if cores == 0 || memory == 0 {
+		from = "host"
+		if cores == 0 {
+			cores = float64(runtime.NumCPU())
+		}
+		if memory == 0 {
+			memory = hostMemory(procDir)
+		}
+	}
+	return cores, memory, from
 }
 
 func (r *Recorder) read() container {

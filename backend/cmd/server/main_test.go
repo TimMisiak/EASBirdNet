@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -556,5 +557,53 @@ func TestReplicaSize(t *testing.T) {
 		if _, _, err := replicaSize(bad[0], bad[1]); err == nil {
 			t.Errorf("%q, %q was accepted", bad[0], bad[1])
 		}
+	}
+}
+
+// A replica runs a task per core in its memory less the headroom; a machine
+// that only knows the host runs two, so a laptop isn't taken over.
+func TestAnalysisCapacity(t *testing.T) {
+	tune := analysisTuning{Headroom: 1 << 30}
+	if c := analysisCapacity(tune, 2, 4<<30, "config"); c.Cores != 2 || c.MaxTasks != 2 || c.Memory != 3<<30 {
+		t.Errorf("2 vCPU / 4Gi replica = %+v", c)
+	}
+	if c := analysisCapacity(tune, 32, 64<<30, "host"); c.Cores != 2 || c.MaxTasks != 2 {
+		t.Errorf("a 32-core host = %+v, want two tasks on two cores", c)
+	}
+	if c := analysisCapacity(tune, 0.5, 1<<30, "cgroup"); c.MaxTasks != 1 || c.Memory != 1 {
+		t.Errorf("a replica smaller than the headroom = %+v, want one task at a time", c)
+	}
+	tune.MaxTasks = 3
+	if c := analysisCapacity(tune, 2, 8<<30, "config"); c.MaxTasks != 3 {
+		t.Errorf("MaxTasks set = %+v, want 3", c)
+	}
+}
+
+func TestAnalysisTuning(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	t.Setenv("BIRDSENSE_ANALYSIS_PERCH_MEM", "2.5Gi")
+	t.Setenv("BIRDSENSE_ANALYSIS_BIRDNET_MEM", "300Mi")
+	t.Setenv("BIRDSENSE_ANALYSIS_PERCH_THREADS", "2")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	costs := analysisCosts(cfg.Analysis)
+	if p := costs[birdnet.ModelPerch]; p.Memory != 5<<29 || p.Threads != 2 {
+		t.Errorf("perch = %+v", p)
+	}
+	if b := costs[birdnet.ModelBirdNET]; b.Memory != 300<<20 {
+		t.Errorf("birdnet = %+v", b)
+	}
+	if cfg.Analysis.Headroom != 1<<30 {
+		t.Errorf("headroom = %d, want the 1Gi default", cfg.Analysis.Headroom)
+	}
+	for name, bad := range map[string]string{"BIRDSENSE_ANALYSIS_PERCH_MEM": "2.5GB", "BIRDSENSE_ANALYSIS_MAX_TASKS": "-1"} {
+		t.Setenv(name, bad)
+		if _, err := configFromEnv(); err == nil {
+			t.Errorf("%s=%s was accepted", name, bad)
+		}
+		t.Setenv(name, "")
 	}
 }

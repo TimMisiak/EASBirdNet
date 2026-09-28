@@ -468,7 +468,11 @@ LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 **The analysis queue is the database.** `internal/analysis` runs in the server
 process. A card in `processing` with files in `uploaded` status is queued work;
 there is no separate queue to keep in step with the documents, and nothing in
-memory to lose. `Queue.Run` takes one file at a time, oldest card first: it
+memory to lose. `Queue.Run` runs as many files at once as the replica holds
+-- its limits less a gigabyte for the server, each model's measured memory,
+a task per core; `Queue.Capacity` and `Costs`, set from `BIRDSENSE_REPLICA_*`
+and `BIRDSENSE_ANALYSIS_*` (ANALYSIS.md, *Packing*) -- BirdNET's files before
+Perch's, oldest card first. For each file it
 copies the file out of `internal/storage` to a temp file (keeping its
 extension, which birdnet picks a decoder by), runs BirdNET with the recorder's
 position and week, merges each species' consecutive windows into one detection
@@ -486,8 +490,10 @@ resumes whatever was left; detection ids are deterministic, so a re-run
 overwrites. A file BirdNET can't read fails at once; any other failure on a
 file -- a crashed run of either script, storing its clips, its detections or
 its result, or a worker dying with it claimed -- counts in the file's stored
-`attempts`, is retried 30 s later and growing, and the third fails the file,
-so nothing that keeps failing can wedge the queue. The last file moves the card to
+`attempts` and waits for its `retryAfter` (30 s, then 60 s) while every other
+file goes on, and the third fails the file, so nothing that keeps failing can
+wedge the queue. Only a failure no one file is to blame for -- the store
+unreachable -- pauses the queue, on a delay that grows while it lasts. The last file moves the card to
 `in_review`, or `needs_attention` if any failed.
 One file per run, not a night per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
@@ -516,9 +522,10 @@ BirdNET's. Three consequences:
   result and doesn't put the card in `needs_attention`. A file waiting for
   Perch still holds its card in `processing`, which is what keeps retention off
   its audio until Perch has read it.
-- **BirdNET never waits for it.** `drain` catches BirdNET up on every card, then
-  takes one Perch file, then looks again -- Perch is ~17x BirdNET's CPU, and a
-  new card's first opinion shouldn't queue behind an old card's second.
+- **BirdNET never waits for it.** A free slot goes to a BirdNET file on any
+  card before a Perch file -- Perch is ~17x BirdNET's CPU, and a new card's
+  first opinion shouldn't queue behind an old card's second. Perch runs beside
+  BirdNET where its ~2 GB fits, on the cores BirdNET leaves free.
 - **Its scores are a softmax, not a sigmoid.** Perch's outputs are logits, and
   a sigmoid over them puts nearly every top-five guess at 0.99+, so a threshold
   would keep everything. A softmax over the window's classes put the test

@@ -91,12 +91,12 @@ func TestALapsedClaimIsTakenAndCounts(t *testing.T) {
 	if u := f.upload(); u.Status != db.StatusProcessing {
 		t.Errorf("card = %s, want processing while a file is held", u.Status)
 	}
-	if want := testNow.Add(time.Minute); !f.queue.nextLapse.Equal(want) {
-		t.Errorf("next lapse = %v, want %v, so Run looks again then", f.queue.nextLapse, want)
+	if want := testNow.Add(time.Minute); !f.queue.nextWake.Equal(want) {
+		t.Errorf("next lapse = %v, want %v, so Run looks again then", f.queue.nextWake, want)
 	}
 
 	// The lease runs out.
-	f.queue.now = func() time.Time { return testNow.Add(2 * time.Minute) }
+	f.later(2 * time.Minute)
 	if err := f.queue.drain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
