@@ -30,9 +30,10 @@ func main() {
 	var lat, lon, date string
 	flag.StringVar(&a.Python, "python", envOr("BIRDSENSE_BIRDNET_PYTHON", "python3"), "Python with the birdnet package (env BIRDSENSE_BIRDNET_PYTHON)")
 	flag.StringVar(&a.Script, "script", envOr("BIRDSENSE_BIRDNET_SCRIPT", "../analyzer/analyze.py"), "path to analyze.py (env BIRDSENSE_BIRDNET_SCRIPT)")
+	flag.StringVar(&opts.Model, "model", birdnet.ModelBirdNET, "birdnet, or perch (needs analyzer/requirements-perch.txt)")
 	flag.Float64Var(&opts.MinConfidence, "min-confidence", birdnet.DefaultMinConfidence, "drop detections below this, 0-1")
-	flag.Float64Var(&opts.Sensitivity, "sensitivity", birdnet.DefaultSensitivity, "0.5-1.5, higher reports more")
-	flag.Float64Var(&opts.OverlapSec, "overlap", 0, "seconds consecutive 3 s windows overlap")
+	flag.Float64Var(&opts.Sensitivity, "sensitivity", birdnet.DefaultSensitivity, "0.5-1.5, higher reports more (BirdNET only)")
+	flag.Float64Var(&opts.OverlapSec, "overlap", 0, "seconds consecutive windows overlap (3 s windows for BirdNET, 5 s for Perch)")
 	flag.IntVar(&opts.TopK, "top-k", birdnet.DefaultTopK, "most species per window")
 	flag.IntVar(&opts.Workers, "workers", birdnet.DefaultWorkers, "inference processes")
 	flag.StringVar(&lat, "lat", "", "latitude, to keep only species expected there")

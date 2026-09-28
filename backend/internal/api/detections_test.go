@@ -261,3 +261,67 @@ func TestTooManyDetectionsIsAskedAgain(t *testing.T) {
 		t.Errorf("a card too big to list = %d %s, want 400 pointing at one file", rec.Code, rec.Body)
 	}
 }
+
+// Perch's detections are a second list, not more rows in BirdNET's: each list
+// is one model's, BirdNET's unless the request asks for Perch's, and the
+// public page counts BirdNET's alone.
+func TestPerchDetectionsAreListedApart(t *testing.T) {
+	mux, store := newTestMux(t)
+	ctx := t.Context()
+	const ref = "OWL-20260913-SR05"
+	before, _, err := overview(ctx, store, testNow, 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perch := db.Detection{
+		Model: db.ModelPerch, AudioFileID: "af_perch", DetectedAt: testNow.Add(-24 * time.Hour), Night: "2026-09-12", StartSec: 5, EndSec: 10,
+		ScientificName: "Megascops kennicottii", CommonName: "Western Screech-Owl", Confidence: 0.6, ReviewStatus: db.ReviewConfirmed,
+	}
+	if err := store.UpsertDetections(ctx, ref, []db.Detection{perch}); err != nil {
+		t.Fatal(err)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	get := func(path string) (int, detectionsBody) {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, path, "", admin)
+		if rec.Code != http.StatusOK {
+			return rec.Code, detectionsBody{}
+		}
+		return rec.Code, decodeInto[detectionsBody](t, rec)
+	}
+	models := func(b detectionsBody) string {
+		var out []string
+		for _, d := range b.Detections {
+			out = append(out, d.Model+" "+d.CommonName)
+		}
+		return strings.Join(out, ", ")
+	}
+
+	const since = "since=2026-01-01T00:00:00Z"
+	if _, b := get("/api/v1/detections?" + since); b.Total != 6 || strings.Contains(models(b), "perch") {
+		t.Errorf("every detection = %d: %s; want seedProgram's six, all BirdNET's", b.Total, models(b))
+	}
+	if _, b := get("/api/v1/detections?model=perch&" + since); b.Total != 1 || models(b) != "perch Western Screech-Owl" {
+		t.Errorf("Perch's = %d: %s; want its one", b.Total, models(b))
+	}
+	if _, b := get("/api/v1/detections/" + ref); b.Total != 5 || strings.Contains(models(b), "perch") {
+		t.Errorf("the card's = %d: %s; want its five BirdNET detections", b.Total, models(b))
+	}
+	if _, b := get("/api/v1/detections/" + ref + "?model=perch"); b.Total != 1 {
+		t.Errorf("the card's Perch detections = %d, want 1", b.Total)
+	}
+	for _, path := range []string{"/api/v1/detections?model=both&" + since, "/api/v1/detections/" + ref + "?model=Perch"} {
+		if code, _ := get(path); code != http.StatusBadRequest {
+			t.Errorf("GET %s = %d, want 400", path, code)
+		}
+	}
+
+	after, _, err := overview(ctx, store, testNow, 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ConfirmedDetections != before.ConfirmedDetections {
+		t.Errorf("confirmed on the public page went %d -> %d; Perch's shouldn't count", before.ConfirmedDetections, after.ConfirmedDetections)
+	}
+}

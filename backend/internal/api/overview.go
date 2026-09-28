@@ -36,7 +36,9 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 	if windowStart.Before(since) {
 		since = windowStart
 	}
-	confirmed, err := store.ListDetections(ctx, db.DetectionFilter{ReviewStatus: db.ReviewConfirmed, Since: since})
+	// BirdNET's alone. Perch is a second opinion on the same audio, so a bird
+	// both heard and a reviewer confirmed twice would be counted twice.
+	confirmed, err := store.ListDetections(ctx, db.DetectionFilter{ReviewStatus: db.ReviewConfirmed, Since: since, Model: db.ModelBirdNET})
 	if err != nil {
 		return ProgramStats{}, nil, err
 	}

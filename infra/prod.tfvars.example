@@ -35,6 +35,10 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 # cpu    = 1.0
 # memory = "2Gi"
 
+# Perch as a second model after BirdNET (DEPLOYMENT.md, Perch). It needs the
+# next size up, cpu 2.0 with 4Gi, which terraform plan checks.
+# perch_enabled = false
+
 # How long a card's original recordings are kept after the card is received,
 # and when the storage lifecycle rule sweeps whatever is left under
 # audio/uploads/. The first is the policy and most of the storage bill; the

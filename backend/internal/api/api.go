@@ -917,7 +917,8 @@ func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
 }
 
 // listCardDetections is what BirdNET heard on a card, or with ?file= in one of
-// its files, in the order it was heard, a page at a time: limit and offset
+// its files, in the order it was heard -- or, with ?model=perch, what Perch
+// heard -- a page at a time: limit and offset
 // read the same way as on the list of every detection, and total is how many
 // there are in all. A whole card is tens of thousands of detections, which is
 // a response nothing wants in one piece even though the query is a single
@@ -930,7 +931,12 @@ func (h *handlers) listCardDetections(w http.ResponseWriter, r *http.Request, _ 
 		h.problem(w, http.StatusBadRequest, problem)
 		return
 	}
-	filter := db.DetectionFilter{UploadID: ref}
+	model, problem := parseModel(r.URL.Query())
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
+	filter := db.DetectionFilter{UploadID: ref, Model: model}
 	missing := "no such card"
 	var err error
 	if id := r.URL.Query().Get("file"); id != "" {

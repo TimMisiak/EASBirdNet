@@ -154,6 +154,7 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 //	sort           heard (the default), species or confidence
 //	order          asc or desc; heard and confidence default to desc, species to asc
 //	limit, offset  the page; limit defaults to 50 and is at most 500
+//	model          birdnet (the default) or perch: which model's detections
 //
 // A request with no since is answered for the defaultDetectionsDays before
 // until, or before now; q.windowed says that happened. now is the clock.
@@ -165,6 +166,9 @@ func parseDetectionQuery(r *http.Request, now time.Time) (detectionQuery, string
 		return q, problem
 	}
 	q.limit, q.offset = limit, offset
+	if q.filter.Model, problem = parseModel(v); problem != "" {
+		return q, problem
+	}
 
 	for _, t := range []struct {
 		name string
@@ -236,6 +240,21 @@ func parsePage(v url.Values) (limit, offset int, problem string) {
 		offset = n
 	}
 	return limit, offset, ""
+}
+
+// parseModel reads which model's detections a list was asked for. It is one
+// model at a time, BirdNET's unless the request says otherwise: Perch is a
+// second opinion on the same audio, so the two lists overlap, and a list of
+// both would show most birds twice.
+func parseModel(v url.Values) (model, problem string) {
+	switch m := v.Get("model"); m {
+	case "", db.ModelBirdNET:
+		return db.ModelBirdNET, ""
+	case db.ModelPerch:
+		return m, ""
+	default:
+		return "", fmt.Sprintf("model must be %s or %s", db.ModelBirdNET, db.ModelPerch)
+	}
 }
 
 // sortListed orders detections by what the list is sorted on. Ties go to the

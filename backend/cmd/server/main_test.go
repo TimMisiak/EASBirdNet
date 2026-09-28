@@ -253,6 +253,23 @@ func TestConfigFromEnvRetention(t *testing.T) {
 	}
 }
 
+// Perch is off unless it is turned on, and a value that is neither on nor off
+// is a startup error rather than a guess.
+func TestConfigFromEnvPerch(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	for v, want := range map[string]bool{"": false, "off": false, "0": false, "on": true, "TRUE": true, "1": true} {
+		t.Setenv("BIRDSENSE_PERCH", v)
+		if cfg, err := configFromEnv(); err != nil || cfg.Perch != want {
+			t.Errorf("BIRDSENSE_PERCH=%q: perch = %v, %v; want %v", v, cfg.Perch, err, want)
+		}
+	}
+	t.Setenv("BIRDSENSE_PERCH", "yes please")
+	if _, err := configFromEnv(); err == nil {
+		t.Error("BIRDSENSE_PERCH=yes please was accepted")
+	}
+}
+
 // Nothing the production startup path does -- bootstrapping the roster, then
 // wiring the API -- may put a placeholder person into the database.
 func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {

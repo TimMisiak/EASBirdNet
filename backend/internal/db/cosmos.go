@@ -325,6 +325,14 @@ func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]
 	if f.MinConfidence > 0 {
 		w.add("c.confidence >= @minConfidence", "@minConfidence", f.MinConfidence)
 	}
+	switch f.Model {
+	case "":
+	case ModelBirdNET:
+		// Detections stored before Perch carry no model, and are BirdNET's.
+		w.add("(NOT IS_DEFINED(c.model) OR c.model = @model)", "@model", f.Model)
+	default:
+		w.add("c.model = @model", "@model", f.Model)
+	}
 	found, err := scanDocs[Detection](ctx, s.detections, f.UploadID, MaxDetectionScan, "SELECT * FROM c"+w.sql(), w.params...)
 	if err != nil {
 		return nil, err

@@ -29,6 +29,24 @@ Citation, as the BirdNET team asks:
 > learning solution for avian diversity monitoring. *Ecological Informatics*,
 > 61, 101236. <https://doi.org/10.1016/j.ecoinf.2021.101236>
 
+## Perch
+
+When the server runs Perch as a second step (`BIRDSENSE_PERCH`), it uses
+**Perch 2.0**, Google's bird vocalization classifier, developed by Google
+DeepMind and published on
+[Kaggle Models](https://www.kaggle.com/models/google/bird-vocalization-classifier)
+(the `perch_v2_cpu` variation).
+
+- **The Perch v2 model** (downloaded into the image at build time by the
+  `birdnet` package, which fetches its own copy of that release; see
+  `Dockerfile`) is licensed under the
+  [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). The full
+  licence text is in [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt). The
+  model is used as published, without modification. Its labels are scientific
+  names; the common names Birdsense shows beside them are BirdNET's.
+- **TensorFlow** (`analyzer/requirements-perch.txt`), which Perch runs on, is
+  also licensed under the Apache License 2.0.
+
 ## Banner photo
 
 `frontend/images/barred-owl.jpg`: "Barred Owl forest canopy Seattle Washington

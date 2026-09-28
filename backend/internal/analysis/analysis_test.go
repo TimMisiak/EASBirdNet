@@ -35,6 +35,11 @@ type fakeBirdNET struct {
 	// available every time.
 	check  func(n int) error
 	checks int
+	// perchErr answers CheckPerch once Check passes; nil is Perch available.
+	perchErr    error
+	perchChecks int
+	// perchAnswer, if set, answers for Perch's runs instead of answer.
+	perchAnswer func(audio string) (birdnet.File, error)
 	// cuts are the clips asked for, a slice per file; cutErr fails every cut.
 	cuts   [][]birdnet.Clip
 	cutErr error
@@ -56,6 +61,16 @@ func (f *fakeBirdNET) Check(context.Context) error {
 	return check(n)
 }
 
+func (f *fakeBirdNET) CheckPerch(ctx context.Context) error {
+	if err := f.Check(ctx); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.perchChecks++
+	return f.perchErr
+}
+
 func (f *fakeBirdNET) checkCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -66,13 +81,20 @@ func (f *fakeBirdNET) Analyze(_ context.Context, paths []string, opts birdnet.Op
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	res := birdnet.Result{Model: "BirdNET_GLOBAL_6K_V2.4", Options: opts}
+	answer := f.answer
+	if opts.Model == birdnet.ModelPerch {
+		res.Model = "Perch_v2"
+		if f.perchAnswer != nil {
+			answer = f.perchAnswer
+		}
+	}
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return birdnet.Result{}, err
 		}
 		f.calls = append(f.calls, call{path: p, audio: string(b), opts: opts})
-		file, err := f.answer(string(b))
+		file, err := answer(string(b))
 		if err != nil {
 			return birdnet.Result{}, err
 		}

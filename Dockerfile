@@ -20,6 +20,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/birdsense ./cmd/se
 # BirdNET runs from the `birdnet` Python package on LiteRT (no TensorFlow).
 # Its wheels are built for glibc, which is why the runtime is Debian, not
 # Alpine. Keep this Python version in step with analyzer/requirements.txt.
+# Perch, the optional second model (BIRDSENSE_PERCH), only runs on TensorFlow,
+# which requirements-perch.txt adds. It is always installed, so turning Perch
+# on is a setting rather than a different image -- at ~1.3 GB of TensorFlow
+# and ~400 MB of model on top of everything else (DEPLOYMENT.md).
 FROM python:3.12-slim-bookworm AS birdnet
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -29,14 +33,17 @@ ENV PIP_NO_CACHE_DIR=1 \
 RUN python -m venv /opt/birdnet/venv
 COPY analyzer/requirements.txt /opt/birdnet/requirements.txt
 RUN /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt
+COPY analyzer/requirements-perch.txt /opt/birdnet/requirements-perch.txt
+RUN /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt -r /opt/birdnet/requirements-perch.txt
 
 # Download the models into the image (acoustic, plus geo for location
-# filtering) so analysis never reaches the network. This layer depends only on
-# requirements.txt, so editing analyze.py doesn't fetch them again. The loads
-# must match the ones in analyze.py.
+# filtering, plus Perch) so analysis never reaches the network. This layer
+# depends only on the requirements files, so editing analyze.py doesn't fetch
+# them again. The loads must match the ones in analyze.py.
 RUN /opt/birdnet/venv/bin/python -c 'import birdnet; \
 birdnet.load("acoustic", "2.4", "tf", library="litert"); \
-birdnet.load("geo", "2.4", "tf", library="litert")'
+birdnet.load("geo", "2.4", "tf", library="litert"); \
+birdnet.load_perch_v2()'
 
 
 FROM python:3.12-slim-bookworm
@@ -58,7 +65,7 @@ COPY --from=build /out/birdsense /out/birdsense-analyze /app/
 COPY analyzer/analyze.py analyzer/clip.py /app/analyzer/
 # The frontend has no build step, so the source files are the shipped files.
 COPY frontend/ /app/frontend/
-# The image carries the BirdNET models, so it carries their licence too.
+# The image carries the BirdNET and Perch models, so it carries their licences too.
 COPY THIRD_PARTY_NOTICES.md /app/
 COPY LICENSES/ /app/LICENSES/
 

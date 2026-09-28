@@ -128,6 +128,12 @@ resource "azurerm_container_app" "this" {
         name  = "BIRDSENSE_AUDIO_RETENTION_DAYS"
         value = tostring(var.audio_retention_days)
       }
+      # Perch as a second model after BirdNET. The image always carries it;
+      # this is the switch (DEPLOYMENT.md, *Perch*).
+      env {
+        name  = "BIRDSENSE_PERCH"
+        value = var.perch_enabled ? "on" : "off"
+      }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
       env {
@@ -245,4 +251,13 @@ resource "azurerm_container_app" "this" {
     azurerm_cosmosdb_sql_role_assignment.app,
     azurerm_cosmosdb_sql_container.this,
   ]
+
+  # Perch's process tree peaks near 2.5 GB on its own, so on the 2Gi replica
+  # the analysis would be killed on every file and retried until it failed.
+  lifecycle {
+    precondition {
+      condition     = !var.perch_enabled || tonumber(trimsuffix(var.memory, "Gi")) >= 4
+      error_message = "perch_enabled needs memory of at least 4Gi (Perch peaks near 2.5 GB); Container Apps pairs 4Gi with cpu 2.0. Set memory = \"4Gi\" and cpu = 2.0, or leave Perch off."
+    }
+  }
 }

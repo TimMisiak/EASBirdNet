@@ -130,6 +130,9 @@ type DetectionFilter struct {
 	Until time.Time
 	// MinConfidence keeps detections at or above it.
 	MinConfidence float64
+	// Model keeps one model's detections, ModelBirdNET or ModelPerch
+	// (Detection.ModelOf, so BirdNET's include those stored before Perch).
+	Model string
 }
 
 // Backends.
@@ -190,7 +193,8 @@ func (f DetectionFilter) match(d Detection) bool {
 		(f.ReviewStatus == "" || d.ReviewStatus == f.ReviewStatus) &&
 		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since)) &&
 		(f.Until.IsZero() || d.DetectedAt.Before(f.Until)) &&
-		d.Confidence >= f.MinConfidence
+		d.Confidence >= f.MinConfidence &&
+		(f.Model == "" || d.ModelOf() == f.Model)
 }
 
 func sortUsers(us []User) {
@@ -280,7 +284,7 @@ func prepareDetection(uploadID string, d *Detection, t time.Time) error {
 	}
 	d.UploadID = uploadID
 	if d.ID == "" {
-		d.ID = DetectionID(d.AudioFileID, int64(d.StartSec*1000), d.ScientificName)
+		d.ID = ModelDetectionID(d.Model, d.AudioFileID, int64(d.StartSec*1000), d.ScientificName)
 	}
 	if d.ReviewStatus == "" {
 		d.ReviewStatus = ReviewUnreviewed
