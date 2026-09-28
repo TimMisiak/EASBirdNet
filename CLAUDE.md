@@ -18,6 +18,7 @@ Moving analysis out of the web app into a Container Apps job is designed in
 │   ├── cmd/server/     main(): config, routing, graceful shutdown
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
 │   ├── cmd/perf/       CLI: summarizes internal/perf's records for sizing analysis
+│   ├── cmd/perchcover/ CLI: what running Perch only around BirdNET's detections saves and misses
 │   └── internal/
 │       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
 │       ├── api/        JSON handlers under /api/v1/

@@ -106,9 +106,23 @@ every second of every file. The largest saving available is running it over
 less: only the stretches where BirdNET heard something (with a margin), or
 only BirdNET's low-confidence ones. How much that saves depends on how much
 of a night BirdNET's detections cover -- ~4,000 detections a recorder-day, but
-merged and overlapping -- which the stored detections can answer before
-anything is built. This is a product decision as much as a cost one: a
-second opinion only over what BirdNET heard can't find what BirdNET missed.
+merged and overlapping -- and what Perch hears outside those stretches.
+`cmd/perchcover` measures both on real card files, locally: it runs both
+models over them, then reports the share of the audio Perch would still hear
+running only around BirdNET's detections (all of them, birds only, or only
+low-confidence birds; with 0, 2 and 5 s of margin, on Perch's 5 s windows),
+and the share of Perch's detections -- and which species -- that would fall
+outside it:
+
+```sh
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/perchcover -lat LAT -lon LON -date YYYY-MM-DD -out cover.json FILES...
+go run ./cmd/perchcover -in cover.json -v     # report again, without re-running
+```
+
+This is a product decision as much as a cost one: a second opinion only over
+what BirdNET heard can't find what BirdNET missed, and the report's "cost"
+columns are exactly that.
 
 ## Where the Consumption plan boxes us in
 
