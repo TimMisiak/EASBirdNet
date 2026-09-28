@@ -217,9 +217,9 @@ environment forwards here.
 | revision_mode | `Single` | |
 | identity | `UserAssigned`, the identity above | |
 | registry | server `crbirdsenseprod.azurecr.io`, identity = the identity above | Pulls with AcrPull, no password. |
-| container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | Built from the repo's `Dockerfile`, unchanged. |
-| cpu / memory | `1` / `2Gi` | The server runs BirdNET over received cards (`internal/analysis`): one Python process at a time, peaking near 300 MB, which is CPU-bound for hours per card. On this much CPU expect very roughly 2 minutes per hour of audio, so a ~336-file card takes most of a day; more CPU is faster. With [Perch](#perch) on this has to be `2` / `4Gi`. Moving analysis to a job would let the web app go back to `0.25` / `0.5Gi`; see *Open questions*. |
-| min_replicas / max_replicas | `1` / `1` | **Analysis needs a replica that stays up**: it runs in the background with no HTTP traffic, and a scale-to-zero replica is stopped mid-card. Nothing is lost when that happens (the queue is in Cosmos and resumes at the next start), but it stops until someone visits. `0` is fine again once analysis is a job. **Uploads need exactly one**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)), and two replicas would also analyze the same file twice. |
+| container image | `crbirdsenseprod.azurecr.io/birdsense:<git sha>` | The Dockerfile's `web` target: the server and the frontend on Alpine, no Python. With `analysis_job_enabled` off, `birdsense-analyzer:<git sha>` instead, which can analyze. |
+| cpu / memory | `0.5` / `1Gi` | Sized for serving pages and uploads: analysis runs in the job below (12b). DEPLOYMENT.md used to size this for BirdNET -- `1`/`2Gi`, or `2`/`4Gi` with Perch -- and that is still what it needs with `analysis_job_enabled` off, which `app.tf` checks for Perch at plan time. Upload speed at 0.5 vCPU is unmeasured; raise it if a real card uploads slowly. |
+| min_replicas / max_replicas | `1` / `1` | **Min 1 because work runs with no HTTP traffic**: the retention sweep, and the backstop that starts analysis workers for work left waiting (or, with the job off, the analysis queue itself). A scale-to-zero replica stops all of that until someone visits. **Max 1 for uploads**: tusd locks an upload in the memory of the replica serving it (see [Blob storage for uploads](#blob-storage-for-uploads)). |
 | ingress | external `true`, target_port `8080`, transport `auto`, allow_insecure_connections `false`, traffic 100% to latest revision | |
 | startup probe | HTTP GET `/api/v1/health` on `8080`; `initial_delay` 5, `timeout` 5, every 10 s, 10 failures | ~100 s to come up, which is room for a cold start and not for a broken configuration -- that one exits at startup instead, and restarts the container. |
 | liveness probe | HTTP GET `/api/v1/health` on `8080`; `initial_delay` 10, `timeout` 5, every 30 s, 10 failures | `/api/v1/health` answers 200 whatever the dependencies are doing, so only a process that has stopped answering at all restarts this container -- and only after five unbroken minutes of it. Restarting never fixes Cosmos, and this replica is the one analyzing a card. The same endpoint the Dockerfile `HEALTHCHECK` uses. |
@@ -247,6 +247,8 @@ normal rather than a sick replica.
 | `BIRDSENSE_PERCH` | `on` when `var.perch_enabled`, else `off` (the default) | Runs Perch over every file after BirdNET, as a second list of detections. Needs the larger container; see [Perch](#perch). |
 | `BIRDSENSE_PERF` | *unset*, so on | Records what analysis costs the replica -- CPU, memory, time per phase -- under `perf/` in the audio container, for sizing the analysis replica. `off` stops it. See [ANALYSIS.md](ANALYSIS.md), *Performance data*. |
 | `BIRDSENSE_IMAGE_TAG` | `var.image_tag` | Only so the performance records name the image they measured. |
+| `BIRDSENSE_ANALYSIS_JOB` | the job's resource id, when `var.analysis_job_enabled` | The web app starts the job's workers instead of analyzing in its own process. Unset, it analyzes by itself. |
+| `BIRDSENSE_ANALYSIS_JOB_WORKERS` | `var.analysis_max_workers`, default `10` | Most workers at once. |
 | `BIRDSENSE_REPLICA_CPU`, `BIRDSENSE_REPLICA_MEMORY` | `var.cpu`, `var.memory` | The replica's size: a Container Apps replica can't read its own limits, only the machine under it. The analysis queue sizes how much it runs at once from it, and the performance records report it. |
 | `BIRDSENSE_ANALYSIS_*` | one per key of `var.analysis_tuning`, *unset* by default | Overrides for how much analysis runs at once and what each model is expected to take: `MAX_TASKS`, `MEM_HEADROOM`, `BIRDNET_MEM`, `PERCH_MEM`, `PERCH_THREADS`. Unset, a task per core and each model's measured memory. See [ANALYSIS.md](ANALYSIS.md), *Packing*. |
 | `BIRDSENSE_BOOTSTRAP_ADMIN` | `var.bootstrap_admin`, e.g. `Your Name <you@eastsideaudubon.org>` | **Required on the first deploy.** The first admin; see [First deploy](#first-deploy). |
@@ -267,6 +269,36 @@ Never set `BIRDSENSE_COSMOS_KEY` in Azure. It exists only for the emulator.
 one is `infra/domain.tf` plus two DNS records, a certificate and a change of
 `public_url`, in that order. [Custom domain](#custom-domain) is the whole of
 it.
+
+### 12b. Analysis job — `azurerm_container_app_job`, and the role that starts it
+
+The workers analysis runs in ([ANALYSIS.md](ANALYSIS.md); CLAUDE.md, *Analysis
+runs as a job*). The web app starts one execution per worker it wants, through
+Azure Resource Manager, and each worker exits once it has had nothing to claim
+for two minutes, so the job is billed only while cards are being analyzed.
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| name | `caj-birdsense-prod` | |
+| trigger | manual; `parallelism` 1, `replica_completion_count` 1 | One replica per execution, so the web app decides how many run by how many it starts. |
+| replica_timeout_in_seconds | `var.analysis_replica_timeout_seconds`, 14400 | Bounds a very long queue only. A worker stopped by it lets go of its files, and the web app starts another. |
+| replica_retry_limit | `0` | A failed worker isn't retried as the same execution; the web app's backstop starts a new one if the work still waits. |
+| identity, registry | the app's identity | It needs the same data roles (Cosmos, the blob container, AcrPull). |
+| container image | `crbirdsenseprod.azurecr.io/birdsense-analyzer:<git sha>`, `command` `/app/birdsense`, `args` `worker` | The Dockerfile's `analyzer` target, at the app's tag. |
+| cpu / memory | `var.analysis_cpu` / `var.analysis_memory`, `2` / `4Gi` | What one worker packs BirdNET and Perch into (ANALYSIS.md, *Packing*). With Perch on, at least 4Gi, which `job.tf` checks at plan time; `4`/`8Gi` packs more per replica for the same price per core. |
+| env | the app's database, storage, identity, `BIRDSENSE_PERCH`, `BIRDSENSE_IMAGE_TAG`, `analysis_tuning`, and `BIRDSENSE_REPLICA_CPU`/`_MEMORY` set to the worker's size | No sign-in settings: a worker serves nothing. |
+
+**The role.** `azurerm_role_definition.job_starter`, a custom role scoped to
+the resource group with exactly `Microsoft.App/jobs/read`,
+`Microsoft.App/jobs/start/action` and `Microsoft.App/jobs/executions/read`,
+assigned to the app's identity on the job alone. Creating a role definition
+needs `Microsoft.Authorization/roleDefinitions/write`, which Owner and User
+Access Administrator have; a deployer with only Contributor can't apply this.
+
+**Watching it.** `az containerapp job execution list --name caj-birdsense-prod
+-g rg-birdsense-prod -o table` lists recent executions and how they ended. A
+worker whose models can't run exits 1 after logging the line the
+*BirdNET unavailable* alert matches, which now reads the job's logs too.
 
 ### 13. Action group — `azurerm_monitor_action_group`
 
@@ -974,15 +1006,11 @@ can't be changed in place.
   which means they are in the Terraform state file. Key Vault with the app's
   managed identity reading them would keep them out of state, and would give
   the client secret a rotation story before its expiry arrives.
-- **BirdNET processing**: analysis runs in the container app today
-  (`internal/analysis`), which is why it needs `min_replicas = 1` and more CPU
-  and memory than serving pages does. A Container Apps job is the natural next
-  step: it would run the same queue over the same Cosmos documents, from the
-  same image, and let the web app scale to zero again. That adds a job and the
-  same identity-based roles, and a way to start it. Designed in
-  [ANALYSIS.md](ANALYSIS.md): a manually started job the web app launches,
-  packing BirdNET and Perch onto each replica. The build downloads the models
-  from Zenodo, so `az acr build` needs outbound network.
+- **Analysis on Batch**: analysis runs as a Container Apps job (12b). Batch on
+  spot VMs would be several times cheaper per core-hour; whether that is worth
+  a second compute platform is ANALYSIS.md's open question, and the worker
+  would run there unchanged. The build downloads the models from Zenodo, so
+  `az acr build` needs outbound network.
 - **Abandoned partial uploads**: a card registered and never sent leaves blocks
   with no `audioFiles` document naming them, so neither retention nor a card
   delete finds them, and only the lifecycle rule's delete action eventually
@@ -1010,6 +1038,7 @@ from this file to that one.
 | 10 | Log Analytics workspace | `azurerm_log_analytics_workspace` | `app.tf` |
 | 11 | Container Apps environment | `azurerm_container_app_environment` | `app.tf` |
 | 12 | Container app (env vars incl. `BIRDSENSE_BOOTSTRAP_ADMIN` and `BIRDSENSE_AUDIO_RETENTION_DAYS`, three probes with every value set, exactly one replica, `depends_on` the role assignments) | `azurerm_container_app` | `app.tf` |
+| 12b | Analysis job, one worker per execution, and the custom role that lets the app's identity start it | `azurerm_container_app_job`, `azurerm_role_definition`, `azurerm_role_assignment` | `job.tf` |
 | 13 | Action group, mailing `alert_emails` | `azurerm_monitor_action_group` | `monitor.tf` |
 | 14 | Five alert rules: replica restarts, 5xx, BirdNET unavailable, service health, resource health | `azurerm_monitor_metric_alert` ×2, `azurerm_monitor_scheduled_query_rules_alert_v2`, `azurerm_monitor_activity_log_alert` ×2 | `monitor.tf` |
 | 15 | Monthly cost budget on the resource group | `azurerm_consumption_budget_resource_group` | `monitor.tf` |
@@ -1024,7 +1053,9 @@ environment), `public_url` (empty, so the container app's own hostname),
 `custom_domain` (empty, so the app answers only on its own hostname),
 `oidc_microsoft_tenant` (`common`), `oidc_google_client_id` and `_secret`
 (empty, so no Google sign-in), `env`, `location`, `name_suffix`, `cpu`,
-`memory`, `perch_enabled`, `analysis_tuning`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
+`memory`, `perch_enabled`, `analysis_job_enabled`, `analysis_cpu`,
+`analysis_memory`, `analysis_max_workers`, `analysis_replica_timeout_seconds`,
+`analysis_tuning`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
 `budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
 second tfvars file with `env = "staging"`.
 

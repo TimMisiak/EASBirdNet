@@ -20,6 +20,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/azjob"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
@@ -43,6 +44,9 @@ func newLogger(w io.Writer) *slog.Logger {
 
 func main() {
 	log := newLogger(os.Stdout)
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		os.Exit(runWorker(log))
+	}
 
 	cfg, err := configFromEnv()
 	if err != nil {
@@ -96,40 +100,44 @@ func main() {
 	// reports what it is waiting for through the admin API, and needs no
 	// restart once the environment is right. So the server starts it either
 	// way -- an unanalyzable card waits in processing rather than being lost.
-	queue := analysis.New(store, files, cfg.Analyzer, log)
-	queue.Perch = cfg.Perch
-	cores, memory, limitsFrom := perf.Limits(cfg.ReplicaCPU, cfg.ReplicaMemory)
-	queue.Capacity = analysisCapacity(cfg.Analysis, cores, memory, limitsFrom)
-	queue.Costs = analysisCosts(cfg.Analysis)
-	log.Info("analysis capacity", "cores", queue.Capacity.Cores, "memory_mb", queue.Capacity.Memory>>20,
-		"max_tasks", queue.Capacity.MaxTasks, "limits_from", limitsFrom)
+	queue := newQueue(cfg, store, files, log)
 	// What each file's analysis costs, written beside the audio. It stops
 	// after the queue, so the last task's record is flushed.
 	perfCtx, stopPerf := context.WithCancel(context.Background())
 	perfDone := make(chan struct{})
-	if cfg.Perf {
-		instance := perf.Instance()
-		queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
-			Instance: instance, Version: cfg.ImageTag,
-			Settings: map[string]any{"perch": cfg.Perch, "inProcess": true,
-				"capacity": queue.Capacity, "costs": queue.Costs},
-			LimitCores: cfg.ReplicaCPU, LimitMemory: cfg.ReplicaMemory,
-		}, log)
-		log.Info("analysis performance records on", "instance", instance)
+	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
+	analysisDone := make(chan struct{})
+	// The API's view of analysis: this process's own queue, or, when analysis
+	// runs as a job, the dispatcher that starts its workers.
+	var analysisAPI api.Queue = queue
+	if cfg.AnalysisJob == "" {
+		startPerf(perfCtx, perfDone, cfg, queue, files, log, map[string]any{"inProcess": true})
+		log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
 		go func() {
-			defer close(perfDone)
-			queue.Perf.Run(perfCtx)
+			defer close(analysisDone)
+			queue.Run(analysisCtx)
 		}()
 	} else {
 		close(perfDone)
+		job, err := azjob.New(cfg.AnalysisJob)
+		if err != nil {
+			log.Error("the analysis job", "err", err)
+			os.Exit(1)
+		}
+		d := analysis.NewDispatcher(queue, job, files, log)
+		if cfg.AnalysisWorkers > 0 {
+			d.MaxWorkers = cfg.AnalysisWorkers
+		}
+		if cfg.AnalysisStepsPerWorker > 0 {
+			d.StepsPerWorker = cfg.AnalysisStepsPerWorker
+		}
+		analysisAPI = d
+		log.Info("analysis runs as a job", "job", cfg.AnalysisJob, "max_workers", d.MaxWorkers, "steps_per_worker", d.StepsPerWorker)
+		go func() {
+			defer close(analysisDone)
+			d.Run(analysisCtx)
+		}()
 	}
-	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
-	analysisDone := make(chan struct{})
-	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
-	go func() {
-		defer close(analysisDone)
-		queue.Run(analysisCtx)
-	}()
 
 	// Audio retention: the originals of a card BirdNET has finished with go
 	// after their window, and its detections and clips stay. Unlike analysis
@@ -172,7 +180,7 @@ func main() {
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: requestLogger(log, web.SecurityHeaders(
-			newMux(cfg, store, files, queue, auth, log),
+			newMux(cfg, store, files, analysisAPI, auth, log),
 			// Dev is http://localhost, where HSTS is ignored anyway.
 			web.SecurityOptions{StaticDir: cfg.StaticDir, HTTPS: !cfg.Dev, Log: log},
 		)),
@@ -296,6 +304,46 @@ type config struct {
 	// Analysis tunes how much the analysis queue runs at once; zero fields
 	// take the defaults analysisCapacity and analysisCosts describe.
 	Analysis analysisTuning
+	// AnalysisJob, when set, is the resource id of the Container Apps job
+	// analysis runs as (BIRDSENSE_ANALYSIS_JOB): the web app then starts its
+	// workers instead of analyzing in this process (ANALYSIS.md, *The job*).
+	// AnalysisWorkers caps the workers at once and AnalysisStepsPerWorker is
+	// how much waiting work starts one more; 0 takes the dispatcher's defaults.
+	AnalysisJob            string
+	AnalysisWorkers        int
+	AnalysisStepsPerWorker int
+}
+
+// newQueue is the analysis queue as configured, sized to this replica.
+func newQueue(cfg config, store db.Store, files storage.Store, log *slog.Logger) *analysis.Queue {
+	queue := analysis.New(store, files, cfg.Analyzer, log)
+	queue.Perch = cfg.Perch
+	cores, memory, limitsFrom := perf.Limits(cfg.ReplicaCPU, cfg.ReplicaMemory)
+	queue.Capacity = analysisCapacity(cfg.Analysis, cores, memory, limitsFrom)
+	queue.Costs = analysisCosts(cfg.Analysis)
+	log.Info("analysis capacity", "cores", queue.Capacity.Cores, "memory_mb", queue.Capacity.Memory>>20,
+		"max_tasks", queue.Capacity.MaxTasks, "limits_from", limitsFrom)
+	return queue
+}
+
+// startPerf records what the queue's analysis costs, if that is on, until ctx
+// ends; done is closed once the last record is flushed.
+func startPerf(ctx context.Context, done chan struct{}, cfg config, queue *analysis.Queue, files storage.Store, log *slog.Logger, settings map[string]any) {
+	if !cfg.Perf {
+		close(done)
+		return
+	}
+	instance := perf.Instance()
+	settings["perch"], settings["capacity"], settings["costs"] = cfg.Perch, queue.Capacity, queue.Costs
+	queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
+		Instance: instance, Version: cfg.ImageTag, Settings: settings,
+		LimitCores: cfg.ReplicaCPU, LimitMemory: cfg.ReplicaMemory,
+	}, log)
+	log.Info("analysis performance records on", "instance", instance)
+	go func() {
+		defer close(done)
+		queue.Perf.Run(ctx)
+	}()
 }
 
 // analysisTuning is the BIRDSENSE_ANALYSIS_* settings: how many tasks at
@@ -428,6 +476,12 @@ func onOff(name string, fallback bool) (bool, error) {
 // File storage follows the database unless BIRDSENSE_STORAGE says otherwise:
 // a directory in dev mode, Azure Blob Storage everywhere else.
 func configFromEnv() (config, error) {
+	return readConfig(false)
+}
+
+// readConfig reads the environment for the web app, or for an analysis
+// worker, which serves nothing and so needs no sign-in settings.
+func readConfig(worker bool) (config, error) {
 	cfg := config{
 		Addr: envOr("BIRDSENSE_ADDR", ":8080"),
 		// Relative to backend/, which is where `go run ./cmd/server` is run
@@ -506,6 +560,22 @@ func configFromEnv() (config, error) {
 	}
 	if cfg.Analysis, err = readAnalysisTuning(); err != nil {
 		return cfg, err
+	}
+	cfg.AnalysisJob = strings.TrimSpace(os.Getenv("BIRDSENSE_ANALYSIS_JOB"))
+	for _, n := range []struct {
+		name string
+		to   *int
+	}{{"BIRDSENSE_ANALYSIS_JOB_WORKERS", &cfg.AnalysisWorkers}, {"BIRDSENSE_ANALYSIS_STEPS_PER_WORKER", &cfg.AnalysisStepsPerWorker}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			i, err := strconv.Atoi(v)
+			if err != nil || i < 1 {
+				return cfg, fmt.Errorf("%s must be a positive whole number, not %q", n.name, v)
+			}
+			*n.to = i
+		}
+	}
+	if worker {
+		return cfg, nil
 	}
 
 	if err := readAuth(&cfg); err != nil {

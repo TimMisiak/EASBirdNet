@@ -4,8 +4,9 @@ Moving BirdNET and Perch out of the web container into a Container Apps job
 that packs both models onto each replica, and recording enough about every run
 to size that replica from measurements rather than guesses.
 
-M0 (measuring) is built and has run on a real card; the rest isn't built
-yet. The **Status** table at the end is where to resume; update it as
+M0 to M3 are built -- measuring, claims, packing, and the job -- and M0 to M2
+have run on real cards; M3 awaits its first deploy (*To verify on the first
+deploy of M3*). The **Status** table at the end is where to resume; update it as
 milestones land. Where this and the code disagree, the code is what runs --
 fix whichever is wrong.
 
@@ -167,39 +168,46 @@ These are Azure's rules, not ours (verify against current docs before M3):
 
 ### The two images
 
-`Dockerfile` gets two targets from the same stages:
+Built in M3. `Dockerfile` has two targets from the same stages:
 
-- **web** -- the server binary and `frontend/` on Alpine. No Python, no models;
-  back to tens of MB, so new revisions pull fast.
-- **analyzer** -- a new `cmd/worker` binary, the venv with BirdNET and
-  TensorFlow, the models. The ~2 GB image `birdsense` is today.
+- **web** -- the server binary and `frontend/` on Alpine. No Python, no
+  models, tens of MB, so new revisions pull fast.
+- **analyzer** -- the same binary with the venv, BirdNET, TensorFlow and the
+  models: the ~2 GB image that used to be the only one. The worker is not a
+  second program but `birdsense worker` (`cmd/server/worker.go`), so it reads
+  the same configuration the same way. It is the last stage, so compose and a
+  plain `docker build` still get the everything-image.
 
-`scripts/deploy.ps1` builds both at the same git sha, and Terraform applies
-both tags together, so a web app and a worker never disagree about a document
-shape. ROLLBACK.md gains a line: roll both back together.
+`scripts/deploy.ps1` builds both at the same git sha (`birdsense` and
+`birdsense-analyzer`), and Terraform applies both together, so a web app and
+a worker never disagree about a document shape. ROLLBACK.md, *Where analysis
+runs, across the job*, covers rolling back to a tag from before the split.
 
 ### Starting the job
 
-The job's trigger is **manual**. The web app starts executions through the ARM
-API (`Microsoft.App/jobs/start/action`) with its managed identity, in two
-places:
+Built in M3 (`analysis.Dispatcher`, `internal/azjob`, `infra/job.tf`). The
+job's trigger is **manual**, and each execution is **one worker** (parallelism
+1): Container Apps can't change an execution's parallelism when it is
+started, so the web app sizes the work by how many executions it starts. It
+does so through the ARM API with its managed identity, which a custom role
+allows to start the job, read it and list its executions -- nothing else --
+in two places:
 
-1. **When a card's last file lands**, where `Enqueue` is called today.
-2. **As a backstop**, on a ticker in the web app (every ~5 minutes): if any card
-   is in `processing` with claimable work and no execution is running, start
-   one. This covers a failed start, a replica that died, and cards that were
-   waiting when the job was deployed.
+1. **When a card's last file lands**, where `Enqueue` was always called.
+2. **As a backstop**, every five minutes. This covers a start that failed, a
+   worker that died, work waiting on a `retryAfter` longer than a worker's
+   idle time, and cards that were waiting when the job was deployed.
 
-That is why the web app keeps `min_replicas = 1`: the backstop and the retention
-sweep both live in it. At 0.25 vCPU / 0.5 GiB and mostly idle that is a few
-dollars a month. (DEPLOYMENT.md notes 0.25 vCPU may limit upload speed; measure
-a real card upload before settling on 0.25 vs 0.5.)
+Each time, it counts the steps still to do on processing cards (`Pending`)
+and wants one worker per 25 of them (`BIRDSENSE_ANALYSIS_STEPS_PER_WORKER`),
+up to `analysis_max_workers`, less those running. The job's execution list can
+lag a start, so starts from the last three minutes are counted on top: that
+errs towards too few workers for a few minutes, which the backstop makes up,
+rather than too many. A failure to count or start workers is what the
+coordinator's screens show, over anything a worker said.
 
-An execution's replica count is chosen when it is started, capped by the
-`analysis_max_replicas` variable: roughly the queued vCPU-hours divided by
-the hours a card should take, so one late file doesn't start ten replicas. A
-second start while one is running is fine -- the claims keep them from
-duplicating work -- but the web app avoids it to keep the replica count honest.
+The web app keeps `min_replicas = 1` for the backstop and the retention sweep,
+at 0.5 vCPU / 1 GiB. (0.25 vCPU might do; measure a real card upload first.)
 
 **Why not an event or schedule trigger?** An event trigger needs a queue for
 KEDA to watch, and the queue here is Cosmos. A schedule trigger would pull the
@@ -208,19 +216,24 @@ a process that is always up anyway costs neither.
 
 ### One replica's life
 
-1. **Check.** Run `Check` (and `CheckPerch` if Perch is on). If the models
-   can't run, write that to the status document (below), and exit non-zero --
-   the job's failed-execution alert fires, rather than one warning in a log.
+Built in M3 (`Queue.RunUntilIdle`, `cmd/server/worker.go`):
+
+1. **Check.** Run `Check` (and `CheckPerch` if Perch is on) once. If the
+   models can't run, publish that (below), log the line the *BirdNET
+   unavailable* alert matches, and **exit 1** -- a failed execution -- rather
+   than hold a replica checking for good.
 2. **Read its limits**: the container's own (cgroup v2 or v1) where it can see
    them, and otherwise the size Terraform passes in (`BIRDSENSE_REPLICA_CPU`,
-   `BIRDSENSE_REPLICA_MEMORY`) -- which is what production has, since a
-   Container Apps replica can't see its own (*Where the Consumption plan boxes
-   us in*). `internal/perf` already resolves them this way, and says which it
-   used (`limitsFrom`). Environment variables can lower them.
-3. **Loop:** while the memory budget has room for the cheapest queued task,
-   claim one and start it. When a task finishes, loop. When nothing is
-   claimable and nothing is running, **exit 0** after a short grace period (~2
-   minutes, for the next file of a card still landing).
+   `BIRDSENSE_REPLICA_MEMORY`, the job's `analysis_cpu`/`analysis_memory`) --
+   which is what production has, since a Container Apps replica can't see its
+   own (*Where the Consumption plan boxes us in*).
+3. **Drain** as *Packing* describes, again and again. When nothing has been
+   claimable for `BIRDSENSE_ANALYSIS_IDLE` (two minutes), **exit 0**. A file
+   whose `retryAfter` falls inside that is waited for; one held by another
+   worker, or waiting longer, is left to the backstop. A pass that fails as a
+   whole five times in a row (the store unreachable) exits 1.
+4. **Stopped** -- the replica timeout, or an execution stopped by hand -- it
+   lets go of the files it holds and exits.
 
 A task is one model over one file: download (or reuse, below), analyze, merge,
 cut clips, upsert detections, mark the step done, recount the card. That is
@@ -321,21 +334,28 @@ carries a `db.Claim`, whose fields sit beside the step's status:
 
 ### Where the queue's status lives
 
-`Queue.Status` is in-process state today, served on `/health` and the admin
-card routes. With the work in another process it becomes a document the
-workers write (CLAUDE.md already says so under *A stuck card says why*): one
-`analysisStatus` document with the last check result, the running execution
-and its replicas, and the last failure. The web app reads it where it calls
-`Queue.Status()` now. It lives in an existing container rather than a new one;
-which one is SCHEMA.md's call when M3 lands.
+Built in M3. `Queue.Status` is in-process state, so a worker publishes it --
+on every change -- to `status/analysis.json` in file storage
+(`analysis.PublishStatus`), and the web app reads it back every 30 seconds
+(`ReadStatus`) and serves it where it served `Queue.Status()`: `/health` and
+the coordinator's card routes. A blob rather than a Cosmos document, because
+it is operational state rather than data, and it needs no container, schema
+or role. With several workers the last to report wins, which is the most
+recent thing that happened. Before any worker has reported, the state is
+`idle`, which the card screens show nothing for.
 
 ### Dev and compose
 
-`BIRDSENSE_ANALYSIS=inprocess|job` picks the launcher. It defaults to
-`inprocess` with `BIRDSENSE_DB=local`, where the server runs the same worker
-loop in a goroutine, packed against the same cgroup limits (or the host's) --
-so dev exercises the scheduler and the claims, and needs no job. Compose keeps
-one container with the analyzer image. Outside dev it defaults to `job`.
+`BIRDSENSE_ANALYSIS_JOB` -- the job's resource id -- is what switches the web
+app to starting workers. Unset, which is development, compose, and
+`analysis_job_enabled = false`, the server runs the queue in its own process
+exactly as before: packed, claiming, the same code a worker runs. Compose
+builds the analyzer image, so it can. `birdsense worker` runs one worker
+against whatever the environment names, which is how to try one locally:
+
+```sh
+cd backend && BIRDSENSE_DB=local BIRDSENSE_ANALYSIS_IDLE=10s go run ./cmd/server worker
+```
 
 ## Performance data
 
@@ -521,33 +541,47 @@ what spaces a file's retries. (The shared download cache was dropped; see
 In-process, so it can run in the current web app with Perch on and be measured
 there.
 
-**M3 -- The job.** `cmd/worker`, the two Dockerfile targets, `deploy.ps1`
-building both, the `analysisStatus` document, the web app's starter and
-backstop, Terraform (job, roles including `jobs/start/action` for the web
-identity, `analysis_cpu`, `analysis_memory`, `analysis_max_replicas`, the
-`BIRDSENSE_ANALYSIS_*` knobs), a failed-execution alert, the web app back to
-0.25–0.5 vCPU, and DEPLOYMENT.md, CLAUDE.md and ROLLBACK.md updated.
+**M3 -- The job.** `birdsense worker`, the two Dockerfile targets,
+`deploy.ps1` building both, the published status, the web app's dispatcher
+and backstop, Terraform (the job, a custom role for the web identity,
+`analysis_job_enabled`, `analysis_cpu`, `analysis_memory`,
+`analysis_max_workers`, `analysis_replica_timeout_seconds`), the *BirdNET
+unavailable* alert reading the job's logs, the web app down to 0.5 vCPU /
+1 GiB, and DEPLOYMENT.md, CLAUDE.md and ROLLBACK.md updated. No separate
+failed-execution alert: the one way a worker fails that no one would
+otherwise notice is its models not running, which that alert already
+catches; add one if executions turn out to fail other ways.
 
 **M4 -- Tune.** A month of real cards, then the table in *What the numbers
 decide*: settle the per-model estimates and threads, the replica count, and
 whether Consumption 4/8 is the right shape or it is time for a Dedicated
 profile or Batch.
 
-## To verify before M3
+## To verify on the first deploy of M3
 
-- Consumption replica limits (4 vCPU / 8 GiB, fixed 2:1) and the ephemeral
-  storage a 4-vCPU replica gets -- a few concurrent hour-long files plus their
-  clips have to fit.
-- Job limits: maximum replica timeout, the parallelism cap, whether a manual
-  start can override parallelism per execution, and the environment's
-  Consumption core quota.
-- How long the 2 GB analyzer image takes to pull on a cold Consumption
-  replica.
-- The built-in role, or the custom one, that grants the web identity
-  `Microsoft.App/jobs/start/action` and nothing more.
-- Whether Container Apps jobs expose per-replica CPU/memory metrics in Azure
-  Monitor. If they do, they are a cross-check on the sampler, not a
-  replacement: they can't say which model used what.
+Things that can only be checked in Azure. Each has a place it would show:
+
+- **The images build in ACR** (`--target web` and `--target analyzer`); no
+  Docker here to try them. `deploy.ps1` stops if either fails.
+- **The role is enough.** The web app's log says `analysis: started workers`
+  when a card lands; a 403 instead shows on the coordinator's card screens as
+  "counting the running analysis workers" or "starting an analysis worker".
+  `Microsoft.App/jobs/executions/read` is the action least sure to be spelled
+  right. Creating the role needs Owner or User Access Administrator.
+- **The start call.** `POST …/start` with an empty `{}` body at API version
+  `2024-03-01`; `az containerapp job execution list` should show one
+  execution per start.
+- **A worker's limits and packing.** Its first performance records should say
+  `limitsFrom: config` at `analysis_cpu`/`analysis_memory`; read them with
+  `cmd/perf` as before.
+- **Cold starts.** How long the ~2 GB analyzer image takes to pull on a fresh
+  replica: the gap between an execution starting and its first `analysis:
+  task` log line.
+- **Ephemeral storage** on a 2- or 4-vCPU replica: a few concurrent files
+  and their clips have to fit.
+- **Job limits:** the longest replica timeout allowed, and the environment's
+  Consumption core quota -- `analysis_max_workers` × `analysis_cpu` cores
+  have to fit in it.
 
 ## Status
 
@@ -556,5 +590,5 @@ profile or Batch.
 | M0 Measure | done 2026-09-28, but for the benchmark | First real card measured (*Measured*). Production had no readable cgroup, so the container figures now fall back to cgroup v1 and `/proc`, and Terraform passes the replica's size in. Still to run: `cmd/analyze -bench -model perch -threads 1,2,4` on a real card file. |
 | M1 Claims and leases | done 2026-09-28 | `db.Claim` on both steps; `take`/`hold`/`release` in `internal/analysis`; tests for two workers sharing a card, a lapsed claim, a lost claim, and stopping (race detector clean). `retryAfter` moved to M2. Not yet run against Cosmos. |
 | M2 Packing scheduler | done 2026-09-28 | In-process: `drain`/`fill` pack BirdNET and Perch by memory and slots, BirdNET first, Perch threads from free cores, `retryAfter` per file. Tests with a fake analyzer (race detector clean), and a real run of both models in a dev server. Tunable through `analysis_tuning`. Next: M3, the job. |
-| M3 The job | not started | |
+| M3 The job | code landed 2026-09-28; not yet deployed | `birdsense worker`, `analysis.Dispatcher`, `internal/azjob`, the `web`/`analyzer` images, `infra/job.tf` with its custom role; the web app down to 0.5 vCPU / 1 GiB. A real worker ran a card with both models in a dev environment and exited when idle; `azjob` is tested against a fake ARM server; `terraform validate` passes. Not yet run in Azure: the first deploy is the test of the role, the start call and the images (*To verify*). |
 | M4 Tune | not started | |

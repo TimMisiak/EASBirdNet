@@ -140,6 +140,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "birdnet_unavailable" 
     query                   = <<-KQL
       ContainerAppConsoleLogs_CL
       | where ContainerAppName_s == "${local.app_name}"
+          or column_ifexists("ContainerJobName_s", "") == "${azurerm_container_app_job.analysis.name}"
       | extend line = parse_json(Log_s)
       | where tostring(line.msg) startswith "BirdNET isn't available"
     KQL

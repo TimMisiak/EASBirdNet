@@ -281,6 +281,16 @@ try {
         if ($running -and $running -eq $tag) {
             Write-Host "deploy: warning -- $tag is already the applied tag; this creates no new revision" -ForegroundColor Yellow
         }
+        # A tag from before analysis ran as a job has one image, which is the
+        # whole app. Copy it to the analyzer's name so the apply can go
+        # through; that code analyzes in the web app itself and never starts
+        # the job, so the app has to be sized for it again (ROLLBACK.md).
+        az acr repository show --name $acr --image "birdsense-analyzer:$tag" --output none 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "deploy: warning -- $tag is from before analysis ran as a job, so the web app will analyze by itself; set cpu and memory back to the analysis sizes in prod.tfvars (ROLLBACK.md)" -ForegroundColor Yellow
+            az acr import --name $acr --source "$acr.azurecr.io/birdsense:$tag" --image "birdsense-analyzer:$tag" --output none
+            Assert-LastExitCode 'az acr import'
+        }
         Write-Host "deploy: birdsense:$tag is already built; skipping the build"
     }
     else {
@@ -306,9 +316,17 @@ try {
         # than yours, and the result is linux/amd64 whatever this machine is.
         # An arm64 image (an Apple Silicon `docker build`) starts and dies in
         # Container Apps with an exec format error.
-        Write-Host "deploy: building birdsense:$tag in $acr"
-        az acr build --registry $acr --image "birdsense:$tag" --platform 'linux/amd64' '.'
-        Assert-LastExitCode 'az acr build'
+        #
+        # Two images at the same tag (Dockerfile): the web app's, and the
+        # analysis job's with BirdNET in it. Terraform applies both together,
+        # so they never disagree about a document.
+        foreach ($image in @(
+                @{ Name = 'birdsense'; Target = 'web' },
+                @{ Name = 'birdsense-analyzer'; Target = 'analyzer' })) {
+            Write-Host "deploy: building $($image.Name):$tag in $acr"
+            az acr build --registry $acr --image "$($image.Name):$tag" --target $image.Target --platform 'linux/amd64' '.'
+            Assert-LastExitCode "az acr build ($($image.Name))"
+        }
     }
 
     Write-Host "deploy: applying image_tag=$tag"

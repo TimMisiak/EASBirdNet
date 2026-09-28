@@ -1,6 +1,15 @@
-# Three stages, one image: build the Go binaries, install BirdNET's Python
-# runtime and models, then ship both next to the frontend files so a single
-# container serves the API and the UI and can analyze audio.
+# Two images from one file (ANALYSIS.md, *The two images*):
+#
+#   --target web       the server and the frontend on Alpine: what the container
+#                      app runs when analysis runs as a job. No Python, no
+#                      models, tens of MB.
+#   --target analyzer  the same, plus BirdNET's Python runtime and the models:
+#                      what the analysis job's workers run (`birdsense worker`),
+#                      and what serves everything in one container when
+#                      analysis runs in the web app's own process. It is the
+#                      last stage, so a plain `docker build` and compose get it.
+#
+# scripts/deploy.ps1 builds both at the same tag.
 
 # At least the `toolchain` line in backend/go.mod, or the build downloads its
 # own copy; bump the two together (CLAUDE.md, *Dependencies are scanned*).
@@ -46,7 +55,35 @@ birdnet.load("geo", "2.4", "tf", library="litert"); \
 birdnet.load_perch_v2()'
 
 
-FROM python:3.12-slim-bookworm
+FROM alpine:3.22 AS web
+
+# The server is a static binary; it needs CA roots for Azure, and nothing
+# else. Time zones are compiled into it.
+RUN apk add --no-cache ca-certificates \
+ && adduser -D -u 10001 birdsense \
+ && mkdir -p /app/data /app/audio \
+ && chown birdsense:birdsense /app/data /app/audio
+
+WORKDIR /app
+COPY --from=build /out/birdsense /app/
+COPY frontend/ /app/frontend/
+COPY THIRD_PARTY_NOTICES.md /app/
+COPY LICENSES/ /app/LICENSES/
+
+USER birdsense
+EXPOSE 8080
+
+ENV BIRDSENSE_ADDR=":8080" \
+    BIRDSENSE_STATIC_DIR="/app/frontend" \
+    BIRDSENSE_STORAGE_DIR="/app/audio"
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+
+ENTRYPOINT ["/app/birdsense"]
+
+
+FROM python:3.12-slim-bookworm AS analyzer
 
 # /app/data is where BIRDSENSE_DB=local keeps its JSON file, and /app/audio is
 # where BIRDSENSE_STORAGE=local keeps card audio. Creating them here, owned by

@@ -91,6 +91,19 @@ No image can bring them back.
 with `BIRDSENSE_SESSION_KEY`, which is configuration; the roster is in Cosmos.
 Rolling back signs nobody out and un-removes nobody.
 
+**Where analysis runs, across the job.** A tag is two images since analysis
+became a job -- `birdsense` for the web app and `birdsense-analyzer` for the
+job's workers -- built from one commit and applied together, so a rollback is
+still one tag. A tag from *before* the job has only `birdsense`, which is the
+whole app and analyzes in its own process; `deploy.ps1 -ImageTag` copies it to
+`birdsense-analyzer` so the apply goes through, and says so. That old code
+never starts the job, so the web app is analyzing again: set `cpu` and
+`memory` in `infra/prod.tfvars` back to what analysis needs (`1.0`/`"2Gi"`,
+or `2.0`/`"4Gi"` with Perch) before rolling back that far, or cards will crawl
+through a half-vCPU replica. Rolling back also leaves claims (SCHEMA.md,
+*Claims*) on files mid-analysis; code from before claims ignores them, and
+code from after lets them lapse.
+
 ## Gotchas
 
 **Applying the tag that is already applied does nothing.** Container Apps keys

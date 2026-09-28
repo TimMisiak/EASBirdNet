@@ -58,3 +58,8 @@ output "image_tag" {
   description = "The tag Terraform currently has deployed. Handy for applying a settings change without a rebuild: pass it back as -var image_tag=..."
   value       = var.image_tag
 }
+
+output "analysis_job_name" {
+  description = "The analysis job, for `az containerapp job execution list --name <this> -g <group>`."
+  value       = azurerm_container_app_job.analysis.name
+}

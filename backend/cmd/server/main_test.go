@@ -607,3 +607,28 @@ func TestAnalysisTuning(t *testing.T) {
 		t.Setenv(name, "")
 	}
 }
+
+// A worker serves nothing, so it starts on a production configuration
+// without the sign-in settings the web app requires; the web app reads the
+// job it starts workers of.
+func TestWorkerConfigNeedsNoSignIn(t *testing.T) {
+	t.Setenv("BIRDSENSE_DB", "cosmos")
+	t.Setenv("BIRDSENSE_COSMOS_ENDPOINT", "https://cosmos.example.net")
+	t.Setenv("BIRDSENSE_BLOB_ENDPOINT", "https://st.example.net")
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB", "/subscriptions/s/resourceGroups/rg/providers/Microsoft.App/jobs/caj")
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB_WORKERS", "4")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "SESSION_KEY") && !strings.Contains(err.Error(), "OIDC") {
+		t.Fatalf("web app config = %v, want it refused for want of sign-in settings", err)
+	}
+	cfg, err := readConfig(true)
+	if err != nil {
+		t.Fatalf("worker config: %v", err)
+	}
+	if cfg.AnalysisJob == "" || cfg.AnalysisWorkers != 4 {
+		t.Errorf("job = %q, workers = %d", cfg.AnalysisJob, cfg.AnalysisWorkers)
+	}
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB_WORKERS", "0")
+	if _, err := readConfig(true); err == nil {
+		t.Error("BIRDSENSE_ANALYSIS_JOB_WORKERS=0 was accepted")
+	}
+}

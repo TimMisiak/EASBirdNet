@@ -164,6 +164,15 @@ type Queue struct {
 	Capacity Capacity
 	Costs    map[string]Cost
 
+	// OnStatus, if set, is told the queue's status each time it is set: a
+	// worker publishes it for the web app (PublishStatus). It is called on the
+	// goroutine running the queue, outside any lock.
+	OnStatus func(Status)
+
+	// started counts the tasks drain has started, for RunUntilIdle to tell a
+	// pass that found work from one that didn't.
+	started int
+
 	// nextWake is the soonest a waiting file becomes claimable -- its
 	// retryAfter passes, or someone else's claim on it lapses -- as the last
 	// scan found it. Run looks again then, since nothing else will wake it.
@@ -213,7 +222,6 @@ func (q *Queue) Status() Status {
 // looked at.
 func (q *Queue) setStatus(state, detail string) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	now := q.stamp()
 	if q.status.State != state {
 		q.status.Since = now
@@ -221,6 +229,11 @@ func (q *Queue) setStatus(state, detail string) {
 	// Trimmed because a subprocess's error ends in a newline, and this is read
 	// on a screen.
 	q.status.State, q.status.Detail, q.status.CheckedAt = state, strings.TrimSpace(detail), now
+	s := q.status
+	q.mu.Unlock()
+	if q.OnStatus != nil {
+		q.OnStatus(s)
+	}
 }
 
 // Enqueue tells the queue a card has been received. It never blocks: the card
@@ -554,6 +567,7 @@ func (q *Queue) fill(ctx context.Context, running map[taskKey]*task, results cha
 			}
 			t.card = cards[c.card]
 			running[t.key()] = t
+			q.started++
 			go func() { results <- outcome{t, q.runTask(ctx, t)} }()
 		}
 	}

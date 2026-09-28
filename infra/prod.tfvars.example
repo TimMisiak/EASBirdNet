@@ -31,9 +31,19 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 # put a short suffix here and update DEPLOYMENT.md's naming table.
 # name_suffix = ""
 
-# Sized for the analysis queue. Container Apps only allows particular pairs.
-# cpu    = 1.0
-# memory = "2Gi"
+# The web app. With the analysis job (the default) it only serves pages and
+# uploads. Container Apps only allows particular pairs.
+# cpu    = 0.5
+# memory = "1Gi"
+
+# Analysis runs as a job the web app starts (ANALYSIS.md). Each worker replica
+# is this size; with Perch on, 2.0/4Gi at least, and 4.0/8Gi packs more per
+# replica. analysis_job_enabled = false puts analysis back in the web app,
+# which then needs cpu/memory sized for it.
+# analysis_job_enabled = true
+# analysis_cpu         = 2.0
+# analysis_memory      = "4Gi"
+# analysis_max_workers = 10
 
 # Perch as a second model after BirdNET (DEPLOYMENT.md, Perch). It needs the
 # next size up, cpu 2.0 with 4Gi, which terraform plan checks.

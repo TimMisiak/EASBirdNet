@@ -111,6 +111,11 @@ func PerfName(day, instance, segment string) string {
 	return perfPrefix + "/" + Segment(day) + "/" + Segment(instance) + "/" + Segment(segment) + ".jsonl"
 }
 
+// AnalysisStatusName is where an analysis worker publishes the queue's
+// status for the web app, when analysis runs as a job (internal/analysis,
+// PublishStatus). Outside every card's prefix, like perf/.
+const AnalysisStatusName = "status/analysis.json"
+
 // Segment keeps an id to letters, digits, "-", "_" and ".", so it can't add a
 // level to a name or climb out of one. It is what every element of a stored
 // name goes through: the card prefix and the random token an upload id is

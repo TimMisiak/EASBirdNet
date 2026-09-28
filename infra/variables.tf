@@ -48,15 +48,45 @@ variable "bootstrap_admin" {
 }
 
 variable "cpu" {
-  description = "vCPU for the container. The analysis queue runs BirdNET in this container (CLAUDE.md), so this is sized for analysis, not for serving pages."
+  description = "vCPU for the web app's container. With analysis_job_enabled (the default) it only serves pages and uploads; with it off, the analysis queue runs in this container too, and this has to be sized for that (1.0, or 2.0 with Perch)."
   type        = number
-  default     = 1.0
+  default     = 0.5
 }
 
 variable "memory" {
-  description = "Memory for the container. Container Apps only allows particular cpu/memory pairs; 1.0 goes with 2Gi."
+  description = "Memory for the web app's container. Container Apps only allows particular cpu/memory pairs: 0.5 goes with 1Gi, 1.0 with 2Gi, 2.0 with 4Gi."
   type        = string
-  default     = "2Gi"
+  default     = "1Gi"
+}
+
+variable "analysis_job_enabled" {
+  description = "Run analysis as the Container Apps job in job.tf, started by the web app, rather than in the web app's own process. Off, the web app runs the analysis image and analyzes by itself, as before the job existed -- then size cpu and memory for it. See ANALYSIS.md."
+  type        = bool
+  default     = true
+}
+
+variable "analysis_cpu" {
+  description = "vCPU for each analysis worker replica. It packs BirdNET and Perch into what it has (ANALYSIS.md, Packing); Consumption allows up to 4.0."
+  type        = number
+  default     = 2.0
+}
+
+variable "analysis_memory" {
+  description = "Memory for each analysis worker replica, paired with analysis_cpu: 2.0 with 4Gi, 4.0 with 8Gi. Perch needs at least 4Gi."
+  type        = string
+  default     = "4Gi"
+}
+
+variable "analysis_max_workers" {
+  description = "Most analysis worker replicas at once. Each is billed only while it runs; more finish a card sooner for about the same total."
+  type        = number
+  default     = 10
+}
+
+variable "analysis_replica_timeout_seconds" {
+  description = "Longest one worker replica may run. Workers exit when there is nothing left, so this only bounds a long queue; a stopped worker lets go of its files and the web app starts another."
+  type        = number
+  default     = 14400
 }
 
 variable "perch_enabled" {

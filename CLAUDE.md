@@ -2,25 +2,29 @@
 
 Birdsense is the Eastside Audubon web app for bird-call detections (BirdNET)
 from local listening stations. One Go binary serves the JSON API *and* the
-static frontend, so the whole app is one container with no reverse proxy, no
-Node runtime, and no separate deploy for the UI.
+static frontend, so the web app is one container with no reverse proxy, no
+Node runtime, and no separate deploy for the UI. The same binary, as
+`birdsense worker` in a second image with BirdNET in it, is the analysis job
+the web app starts (*Analysis runs as a job*).
 
 What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
 runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md),
 and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
-Moving analysis out of the web app into a Container Apps job is designed in
-[ANALYSIS.md](ANALYSIS.md), not yet built.
+How analysis runs as a job -- the design, what was measured, and where it
+stands -- is [ANALYSIS.md](ANALYSIS.md).
 
 ```
 /
 ├── .github/workflows/  CI: gofmt, vet, tests and govulncheck
 ├── backend/            Go module: API + static file server
-│   ├── cmd/server/     main(): config, routing, graceful shutdown
+│   ├── cmd/server/     main(): config, routing, graceful shutdown; `worker`: an analysis job replica
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
 │   ├── cmd/perf/       CLI: summarizes internal/perf's records for sizing analysis
 │   ├── cmd/perchcover/ CLI: what running Perch only around BirdNET's detections saves and misses
 │   └── internal/
-│       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
+│       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections;
+│       │               and the Dispatcher that starts the job's workers
+│       ├── azjob/      Starts and counts the analysis job's executions (ARM REST)
 │       ├── api/        JSON handlers under /api/v1/
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
@@ -62,7 +66,7 @@ Moving analysis out of the web app into a Container Apps job is designed in
 ├── LICENSES/           Full licence texts the notices refer to
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
-├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
+├── Dockerfile          Two images: `web` (Alpine: binary + frontend/) and `analyzer` (+ BirdNET)
 └── docker-compose.yml
 ```
 
@@ -500,9 +504,30 @@ spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in
 exchange each file's detections are stored as soon as it's done and only one
 file sits in temp storage at a time.
-*Revisit when:* analysis moves to its own Container Apps job (see
-DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
-the job's image, and `Queue.Run` is what the job runs.
+**Analysis runs as a job the web app starts.** In Azure, the queue above runs
+in the workers of a Container Apps job (`infra/job.tf`), not in the web app:
+each execution is one replica of the analysis image running `birdsense worker`
+(`cmd/server/worker.go`), which claims files until nothing has been claimable
+for two minutes and exits. The web app, given the job's resource id
+(`BIRDSENSE_ANALYSIS_JOB`), runs an `analysis.Dispatcher` where the queue would
+be: when a card's last file lands, and every five minutes as a backstop, it
+counts the steps waiting and starts executions -- one per 25 steps, up to
+`analysis_max_workers` -- through Azure Resource Manager (`internal/azjob`,
+two REST calls, allowed by a custom role that can start the job and nothing
+else). The claims (SCHEMA.md, *Claims*) are what let several workers share
+the queue. So the web app is sized to serve pages (0.5 vCPU / 1Gi) and ships
+on Alpine, and a card's analysis is billed only while workers run. A worker's
+status lives in its own process, so it publishes it to
+`status/analysis.json` in file storage, and the web app serves that on
+`/health` and the coordinator's card screens -- or its own failure to start
+workers, which a coordinator needs to see first. Without
+`BIRDSENSE_ANALYSIS_JOB` -- development, compose, or `analysis_job_enabled =
+false` -- the web app runs the queue in its own process as it always did.
+Gotchas: the job's execution list can lag a start, so the dispatcher counts
+its own recent starts on top; and the two images are built at the same tag
+and applied together, so rolling back is still one tag (ROLLBACK.md).
+*Revisit when:* the bill says Batch on spot VMs is worth a second platform
+(ANALYSIS.md) -- the worker runs unchanged there; only the launcher changes.
 
 **Perch is a second opinion, run as a step of its own.** With
 `BIRDSENSE_PERCH` on, Google's Perch v2 runs over every file after BirdNET,
@@ -571,8 +596,9 @@ start leaves the site perfectly able to serve. The probe numbers in
 `infra/app.tf` are set explicitly for the same reason the split exists: the
 provider's defaults assume a container that isn't CPU-saturated by BirdNET for
 hours.
-*Revisit when:* analysis moves to its own job -- then no health response is
-ever queued behind a BirdNET run, and tighter probes are reasonable again.
+*Revisit now:* with analysis in the job (the default), no health response is
+queued behind a BirdNET run, so the probes can be tightened -- unless
+`analysis_job_enabled` is off, when this reasoning still holds.
 
 **Clips are FLAC.** `clip.py` writes each clip as mono 16-bit FLAC at the
 source's sample rate. It is lossless, so a clip is still exactly what BirdNET
@@ -782,7 +808,8 @@ The Cosmos DB backend and the Blob Storage backend have both run in Azure
 against a real card: documents, uploads and analysis all work there. The
 JSON-file backend and its tests still define the behaviour Cosmos must match.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
-and the analysis queue runs BirdNET over it in the server process, writing
+and the analysis queue -- the job's workers in Azure, the server's own
+process in development -- runs BirdNET over it, writing
 `unreviewed` detections, each with a clip -- and, with `BIRDSENSE_PERCH` on,
 Perch's detections after them, as a second list (see *Perch is a second
 opinion* above). The coordinator's card page
