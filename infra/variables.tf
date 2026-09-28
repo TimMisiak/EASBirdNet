@@ -137,6 +137,29 @@ variable "oidc_microsoft_tenant" {
   default     = "common"
 }
 
+variable "oidc_google_client_id" {
+  description = "Client ID of the Google OAuth client (a Web application) volunteers can sign in through, alongside Microsoft. Empty (the default) offers no Google button. See DEPLOYMENT.md, Sign-in."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.oidc_google_client_id == "" || can(regex("^[0-9]+-[0-9a-z]+\\.apps\\.googleusercontent\\.com$", var.oidc_google_client_id))
+    error_message = "oidc_google_client_id must be the OAuth client's ID, ending in .apps.googleusercontent.com."
+  }
+}
+
+variable "oidc_google_client_secret" {
+  description = "Client secret of that OAuth client. Required when oidc_google_client_id is set. Kept as a Container Apps secret, not in the revision's environment."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = (var.oidc_google_client_id == "") == (var.oidc_google_client_secret == "")
+    error_message = "oidc_google_client_id and oidc_google_client_secret are set together or not at all."
+  }
+}
+
 variable "session_key" {
   description = "Signs the session cookie. Any long random string (openssl rand -base64 32). Changing it signs everyone out, which is how to end every session at once."
   type        = string

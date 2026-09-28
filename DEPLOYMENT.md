@@ -246,6 +246,8 @@ normal rather than a sick replica.
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID` | `var.oidc_microsoft_client_id` | The Entra ID app registration; see [Sign-in](#sign-in). |
 | `BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET` | Container Apps secret `oidc-microsoft-client-secret` | Kept as a secret, so it isn't in the revision's environment listing. |
 | `BIRDSENSE_OIDC_MICROSOFT_TENANT` | `var.oidc_microsoft_tenant`, default `common` | `common` accepts any organization and any personal Microsoft account. A tenant GUID restricts sign-in to that directory. |
+| `BIRDSENSE_OIDC_GOOGLE_CLIENT_ID` | `var.oidc_google_client_id`, *unset* when empty | Optional second provider; see [Adding Google](#adding-google). Unset, the sign-in page offers Microsoft only. |
+| `BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET` | Container Apps secret `oidc-google-client-secret`, only when the client id is set | A Container Apps secret can't be empty, so the secret and both variables are left out together. |
 | `BIRDSENSE_SESSION_KEY` | Container Apps secret `session-key` | Signs the session cookie. At least 32 characters, or the server won't start. Keep it stable across deploys; changing it signs everyone out. |
 | `BIRDSENSE_ADDR`, `BIRDSENSE_STATIC_DIR`, `BIRDSENSE_STORAGE_DIR` | *unset* | Already set in the image (`:8080`, `/app/frontend`, and `/app/audio`, which only local storage uses). |
 | `BIRDSENSE_BIRDNET_PYTHON`, `BIRDSENSE_BIRDNET_SCRIPT`, `BIRDNET_APP_DATA` | *unset* | Already set in the image, pointing at its BirdNET venv, `analyze.py` and the models baked in at build time. The analysis queue checks them before it starts, and again on a growing delay until they work, logging `BirdNET isn't available` (and analyzing nothing) meanwhile. `/api/v1/health` reports `"queue":"unavailable"`, and the coordinator's card screens say so; see *When cards sit in processing*. |
@@ -361,10 +363,36 @@ short one is a forgeable admin session. `terraform plan` refuses a shorter one,
 and so does the server at startup, which is what covers a deployment that sets
 `BIRDSENSE_SESSION_KEY` some other way.
 
-**Adding Google** is two more variables and no code:
-`oidc_google_client_id` and `_secret` would follow the same shape, and the
-sign-in page grows a second button on its own -- `GET /api/v1/session` reports
-which providers the server has, and the page renders a button per provider.
+### Adding Google
+
+Google is optional and a second way in beside Microsoft: set
+`oidc_google_client_id` and `oidc_google_client_secret` and apply. There is no
+code to change -- `GET /api/v1/session` reports which providers the server
+has, and the sign-in page renders a button per provider.
+
+The OAuth client lives in a Google Cloud project, which, like the Entra app
+registration, Terraform does not own. It needs no Google Cloud organization or
+billing account: a project in any Google account will do. What an organization
+would add is the *Internal* audience, and volunteers need *External* anyway. Do
+add a second owner (IAM → Grant access), so the client isn't lost with one
+person's account. Set it up in the Google Auth Platform as:
+
+| | |
+|---|---|
+| Audience | **External**, and **published** ("In production"). Left in *Testing*, only the test users listed there can sign in, which looks like Birdsense refusing everyone else. Safe for the same reason Microsoft's "any account" is: the roster decides who gets in. |
+| Branding | App name, a user support email (shown to everyone who signs in: an address or a Google Group you manage), and the app's domain under *Authorized domains*. No logo -- a logo means brand verification. |
+| Data access | `openid`, `…/auth/userinfo.email`, `…/auth/userinfo.profile`. All non-sensitive, so there is no app verification and no "unverified app" screen. |
+| Client | Type **Web application**. Authorized redirect URIs as for Microsoft, with `google` in place of `microsoft`: `<public URL>/api/v1/auth/google/callback` for each hostname the app answers on, plus `http://localhost:8080/api/v1/auth/google/callback` for development. No JavaScript origins -- the browser never talks to Google itself. |
+| Client secret | Into `oidc_google_client_secret`. Google shows a new secret only once, when it is created; if it is lost, add another and delete the old one. |
+
+Google's `email_verified` is the whole trust rule on this side (see above), so
+a Workspace user or a Gmail address both work, and the address a coordinator
+puts on the roster is the one they sign in with -- `googlemail.com` and
+dot-variants of a Gmail address are *not* folded together.
+
+Try it locally first: dev mode reads `BIRDSENSE_OIDC_GOOGLE_CLIENT_ID` and
+`_CLIENT_SECRET` from the environment and shows both the provider button and
+the roster picker.
 
 ## Custom domain
 
@@ -498,7 +526,8 @@ Two steps, in this order, because the app builds its redirect URI from
 `public_url` and the provider rejects one it doesn't know:
 
 1. Register `https://owls.eastsideaudubon.org/api/v1/auth/microsoft/callback`
-   as a redirect URI on the Entra app registration. Adding one is additive --
+   as a redirect URI on the Entra app registration, and the `google` one on
+   the Google OAuth client if Google is set up. Adding one is additive --
    the `azurecontainerapps.io` one keeps working, so there is no window where
    sign-in is broken.
 2. Set `public_url = "https://owls.eastsideaudubon.org"` in `prod.tfvars` and
@@ -939,7 +968,8 @@ from this file to that one.
 Everything else has the default this file describes: `subscription_id` (null, so `ARM_SUBSCRIPTION_ID` from the
 environment), `public_url` (empty, so the container app's own hostname),
 `custom_domain` (empty, so the app answers only on its own hostname),
-`oidc_microsoft_tenant` (`common`), `env`, `location`, `name_suffix`, `cpu`,
+`oidc_microsoft_tenant` (`common`), `oidc_google_client_id` and `_secret`
+(empty, so no Google sign-in), `env`, `location`, `name_suffix`, `cpu`,
 `memory`, `log_retention_days`, `audio_retention_days`, `audio_backstop_days`,
 `budget_monthly_usd` and `grant_operator_blob_access`. A `staging` copy is a
 second tfvars file with `env = "staging"`.

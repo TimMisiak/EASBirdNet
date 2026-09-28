@@ -53,6 +53,12 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 oidc_microsoft_client_id     = "00000000-0000-0000-0000-000000000000"
 oidc_microsoft_client_secret = "the client secret's *value*, not its id"
 
+# Optional: a Google OAuth client (Web application) as a second way in. Its
+# redirect URI is `terraform output -raw app_url` + /api/v1/auth/google/callback.
+# Leave both out to offer Microsoft only. DEPLOYMENT.md, "Adding Google".
+# oidc_google_client_id     = "123456789012-abc123.apps.googleusercontent.com"
+# oidc_google_client_secret = "GOCSPX-..."
+
 # Signs the session cookie: any long random string, kept the same across
 # deploys so a new revision doesn't sign everyone out.
 #   openssl rand -base64 32

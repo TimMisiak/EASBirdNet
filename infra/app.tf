@@ -37,6 +37,14 @@ resource "azurerm_container_app" "this" {
     name  = "oidc-microsoft-client-secret"
     value = var.oidc_microsoft_client_secret
   }
+  # Google is optional, and a Container Apps secret can't be empty.
+  dynamic "secret" {
+    for_each = var.oidc_google_client_id != "" ? [1] : []
+    content {
+      name  = "oidc-google-client-secret"
+      value = var.oidc_google_client_secret
+    }
+  }
   secret {
     name  = "session-key"
     value = var.session_key
@@ -168,6 +176,22 @@ resource "azurerm_container_app" "this" {
       env {
         name  = "BIRDSENSE_OIDC_MICROSOFT_TENANT"
         value = var.oidc_microsoft_tenant
+      }
+      # Google, if configured. The server offers a provider when its client id
+      # is set, and the sign-in page grows a button for it on its own.
+      dynamic "env" {
+        for_each = var.oidc_google_client_id != "" ? [1] : []
+        content {
+          name  = "BIRDSENSE_OIDC_GOOGLE_CLIENT_ID"
+          value = var.oidc_google_client_id
+        }
+      }
+      dynamic "env" {
+        for_each = var.oidc_google_client_id != "" ? [1] : []
+        content {
+          name        = "BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET"
+          secret_name = "oidc-google-client-secret"
+        }
       }
       # Signs the session cookie. Changing it signs everyone out.
       env {
