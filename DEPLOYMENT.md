@@ -864,12 +864,16 @@ What it needs, beyond resources 7 and 8:
   deletes both after.
 - **Request time.** The Container Apps ingress ends a request after 240 s. At
   50 MB a request that holds down to about 2 Mb/s of upstream; for slower links,
-  lower `CHUNK_BYTES` in `frontend/js/upload-flow.js`. Deleting a card is the
-  other request that has to fit: it removes a few hundred recordings and, with
-  them, tens of thousands of clips and documents. Blobs go in Blob Batch
-  requests of 256 and documents in Cosmos transactional batches of 100, several
-  of each in flight, which is a few hundred round-trips rather than tens of
-  thousands. One request per blob or per document does not fit.
+  lower `CHUNK_BYTES` in `frontend/js/upload-flow.js`. Deleting a card used to
+  be the other request that had to fit, and no longer is: the request only
+  marks the card `deleting`, and `internal/deletion` removes it in the
+  background (DELETE-CARDS.md). That is a few hundred recordings and tens of
+  thousands of clips and documents. Blobs go in Blob Batch requests of 256 and
+  documents in Cosmos transactional batches of 100, several of each in flight.
+  Batching saves round-trips, not request units, so a large card's delete runs
+  into serverless Cosmos's per-partition RU/s limit; it waits out those 429s
+  (`whileThrottled`, in `internal/db`), and a pass that fails anyway is tried
+  again on a growing delay.
 - **CPU and memory while a card uploads.** Every byte of a ~128 GB card passes
   through the container, for the hours the upload takes. Inbound transfer is
   free, and the app only copies bytes, but at `0.25` vCPU the upload rate may

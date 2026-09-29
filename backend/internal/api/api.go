@@ -22,6 +22,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
@@ -41,7 +42,10 @@ type Options struct {
 	Files storage.Store
 	// Queue is told when a card has all its files, so BirdNET can start on it.
 	Queue Queue
-	Log   *slog.Logger
+	// Deleter is told when a card has been marked for deletion, so it can
+	// start on it (internal/deletion).
+	Deleter Deleter
+	Log     *slog.Logger
 	// Dev turns on the development-only routes -- the roster the sign-in page
 	// lets you pick an account from, and the sign-in that goes with it.
 	Dev bool
@@ -57,7 +61,7 @@ type Options struct {
 // Register mounts the API routes on mux.
 func Register(mux *http.ServeMux, o Options) {
 	register(mux, &handlers{
-		store: o.Store, files: o.Files, queue: o.Queue, log: o.Log, dev: o.Dev,
+		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
 		retention: o.Retention, now: time.Now,
 	})
@@ -69,6 +73,12 @@ func Register(mux *http.ServeMux, o Options) {
 type Queue interface {
 	Enqueue(reference string)
 	Status() analysis.Status
+}
+
+// Deleter removes cards marked for deletion (internal/deletion). A marked
+// card is work by its status already; Wake only says to look now.
+type Deleter interface {
+	Wake()
 }
 
 func register(mux *http.ServeMux, h *handlers) {
@@ -143,7 +153,10 @@ type handlers struct {
 	files storage.Store
 	// queue hears about cards that are ready for BirdNET. Nil runs no analysis.
 	queue Queue
-	log   *slog.Logger
+	// deleter hears about cards marked for deletion. Nil leaves them marked
+	// until a deleter's backstop finds them.
+	deleter Deleter
+	log     *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
 	// auth is OIDC sign-in, or nil when none is configured.
@@ -558,6 +571,9 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 				if u.UserID != me.ID {
 					return errCardTaken
 				}
+				if u.Status == db.StatusDeleting {
+					return errCardDeleting
+				}
 				// A card that is already in keeps the list it was sent with, and
 				// doesn't go back to being sent. A different list is another card
 				// with the same recorder and pull date, and answering with the one
@@ -591,6 +607,9 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	case errors.Is(err, errCardReceived):
 		h.problem(w, http.StatusConflict,
 			"a different card from this recorder, pulled on the same date, has already been uploaded; check the date you pulled the card")
+	case errors.Is(err, errCardDeleting):
+		h.problem(w, http.StatusConflict,
+			"this card is being deleted; once it is gone, in a few minutes, it can be sent again")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
@@ -601,6 +620,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 var (
 	errCardTaken    = errors.New("card belongs to someone else")
 	errCardReceived = errors.New("card has been received with a different file list")
+	errCardDeleting = errors.New("card is being deleted")
 )
 
 // listedAsBefore reports whether a card's file list is the one it was last
@@ -896,51 +916,26 @@ func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.Use
 	}
 }
 
-// deleteUpload removes a card for good: its audio, its audio files, the
-// detections BirdNET found in them, and the card itself. The audio goes first
-// and the card last, so a delete that fails part way leaves the card listed to
-// be deleted again.
-func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, _ db.User) {
-	ctx := r.Context()
-	u, err := h.store.GetUpload(ctx, r.PathValue("reference"))
-	if err == nil {
-		err = h.deleteAudio(ctx, u)
-	}
-	// Not found by now means the analysis queue, finding the card going, got to
-	// the end of deleting it first.
-	if err == nil {
-		if err = h.store.DeleteUpload(ctx, u.ID); errors.Is(err, db.ErrNotFound) {
-			err = nil
-		}
-	}
+// deleteUpload marks a card for deletion and answers at once. The card goes
+// to deleting, which stops anything else being done to it, and the deleter
+// removes its audio, its clips, its files, its detections and then the card
+// itself (internal/deletion) -- more work than a request can be trusted to
+// finish on a large card. Deleting a card already being deleted is the same
+// answer again.
+func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, me db.User) {
+	u, err := deletion.Mark(r.Context(), h.store, r.PathValue("reference"), h.stamp())
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		h.problem(w, http.StatusNotFound, "no such card")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]string{"removed": u.ID})
-	}
-}
-
-// deleteAudio removes everything storage holds for a card: its files, finished
-// or not, and its clips, which is everything under its prefix. storagePrefix
-// can spell two references the same, so if another card shares the prefix the
-// audio is left where it is, rather than taking that card's with it.
-func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
-	prefix := storagePrefix(u.ID)
-	all, err := h.store.ListUploads(ctx, db.UploadFilter{})
-	if err != nil {
-		return err
-	}
-	for _, other := range all {
-		if other.ID != u.ID && storagePrefix(other.ID) == prefix {
-			h.log.Warn("deleting a card: leaving its audio and clips in storage, another card shares its prefix",
-				"upload", u.ID, "other", other.ID, "prefix", storage.Name(prefix))
-			return nil
+		h.log.Info("card marked for deletion", "upload", u.ID, "by", me.Email)
+		if h.deleter != nil {
+			h.deleter.Wake()
 		}
+		h.json(w, http.StatusAccepted, map[string]string{"deleting": u.ID})
 	}
-	return h.files.DeleteAll(ctx, prefix)
 }
 
 // listCardDetections is what BirdNET heard on a card, or with ?file= in one of

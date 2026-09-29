@@ -325,3 +325,68 @@ func TestPerchDetectionsAreListedApart(t *testing.T) {
 		t.Errorf("confirmed on the public page went %d -> %d; Perch's shouldn't count", before.ConfirmedDetections, after.ConfirmedDetections)
 	}
 }
+
+// A card being deleted drops out of the detections list and the landing page
+// as soon as it is marked, not when the deleter gets to it.
+func TestACardBeingDeletedIsNotCounted(t *testing.T) {
+	mux, store := newTestMux(t)
+	ctx := t.Context()
+	const going = "OWL-20260913-SR05"
+	yearStart := time.Date(testNow.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+	all, err := store.ListDetections(ctx, db.DetectionFilter{Since: yearStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := store.ListDetections(ctx, db.DetectionFilter{Since: yearStart, ReviewStatus: db.ReviewConfirmed, Model: db.ModelBirdNET})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onCard := func(ds []db.Detection) (n int) {
+		for _, d := range ds {
+			if d.UploadID == going {
+				n++
+			}
+		}
+		return n
+	}
+	if onCard(all) == 0 || onCard(confirmed) == 0 {
+		t.Fatalf("the seed has no confirmed detections on %s to leave out", going)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+going, "", admin); rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE = %d (%s)", rec.Code, rec.Body)
+	}
+
+	rec := do(t, mux, http.MethodGet, "/api/v1/detections?since=2026-01-01T00:00:00Z", "", admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detections = %d %s", rec.Code, rec.Body)
+	}
+	listed := decodeInto[listedBody](t, rec)
+	if want := len(all) - onCard(all); listed.Total != want {
+		t.Errorf("listed %d, want %d: every detection but the %d on the card being deleted", listed.Total, want, onCard(all))
+	}
+	for _, d := range listed.Detections {
+		if d.Reference == going {
+			t.Errorf("listed %s from the card being deleted", d.ID)
+		}
+	}
+	species := 0
+	for _, s := range listed.Species {
+		species += s.Detections
+	}
+	if species != listed.Total {
+		t.Errorf("species count %d detections, want the %d listed", species, listed.Total)
+	}
+
+	rec = do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET overview = %d %s", rec.Code, rec.Body)
+	}
+	overview := decodeInto[struct {
+		Program ProgramStats `json:"program"`
+	}](t, rec)
+	if want := len(confirmed) - onCard(confirmed); overview.Program.ConfirmedDetections != want {
+		t.Errorf("confirmed detections = %d, want %d", overview.Program.ConfirmedDetections, want)
+	}
+}

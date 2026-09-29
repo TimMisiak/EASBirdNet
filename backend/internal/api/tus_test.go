@@ -23,6 +23,7 @@ import (
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -497,9 +498,34 @@ func TestDeleteUpload(t *testing.T) {
 		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 	admin := signedIn(t, s.mux, db.RoleAdmin)
-	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusOK {
-		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusAccepted, rec.Body)
 	}
+
+	// The request only marks the card. It is listed as being deleted, and
+	// nothing more can be sent to it or registered for it.
+	marked, err := s.store.GetUpload(ctx, ref)
+	if err != nil || marked.Status != db.StatusDeleting || marked.DeleteRequestedAt == nil {
+		t.Fatalf("card after DELETE = %+v, %v; want it deleting, with the time", marked, err)
+	}
+	if got := s.card(jane, ref); got.Status != db.StatusDeleting {
+		t.Errorf("the volunteer's card is %q, want %q", got.Status, db.StatusDeleting)
+	}
+	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
+		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)
+	}
+	if rec := do(t, s.mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-03", "2026-09-14", "", "2026-09-12", 2, 1), jane); rec.Code != http.StatusConflict {
+		t.Errorf("registering the card again = %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	// Deleting it again is the same answer, and doesn't move the time on.
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusAccepted {
+		t.Errorf("DELETE again while deleting = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if again, _ := s.store.GetUpload(ctx, ref); !again.DeleteRequestedAt.Equal(*marked.DeleteRequestedAt) {
+		t.Errorf("marked again at %v, want %v kept", again.DeleteRequestedAt, marked.DeleteRequestedAt)
+	}
+
+	sweepDeleted(t, s.store, s.files)
 
 	if _, err := s.store.GetUpload(ctx, ref); !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
@@ -514,9 +540,6 @@ func TestDeleteUpload(t *testing.T) {
 			t.Errorf("stored %s after delete: err = %v, want ErrNotFound", name, err)
 		}
 	}
-	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
-		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)
-	}
 	for _, u := range decodeInto[uploadsBody](t, do(t, s.mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)).Uploads {
 		if u.Reference == ref {
 			t.Error("deleted card is still listed")
@@ -529,6 +552,17 @@ func TestDeleteUpload(t *testing.T) {
 
 	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusNotFound {
 		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// sweepDeleted runs the deleter over every card marked for deletion, as the
+// server's own would, and fails the test if it leaves one.
+func sweepDeleted(t *testing.T, store db.Store, files storage.Store) {
+	t.Helper()
+	d := deletion.New(store, files, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d.Settle = 0
+	if again := d.Sweep(t.Context()); again != 0 {
+		t.Fatalf("the deleter left a card, to look at again in %v", again)
 	}
 }
 
@@ -557,9 +591,10 @@ func TestDeleteUploadLeavesAudioSharedWithAnotherCard(t *testing.T) {
 	}
 
 	admin := signedIn(t, mux, db.RoleAdmin)
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+url.PathEscape("OWL-20260914-SRA B"), "", admin); rec.Code != http.StatusOK {
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+url.PathEscape("OWL-20260914-SRA B"), "", admin); rec.Code != http.StatusAccepted {
 		t.Fatalf("DELETE = %d (%s)", rec.Code, rec.Body)
 	}
+	sweepDeleted(t, store, files)
 	if _, err := store.GetUpload(ctx, "OWL-20260914-SRA B"); !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
 	}

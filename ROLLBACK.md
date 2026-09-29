@@ -83,6 +83,14 @@ every write.) So before rolling back over a SCHEMA.md change,
 decide whether losing that field on the documents that get touched is
 acceptable; usually it is, but it is a decision, not a no-op.
 
+**Cards being deleted.** Since `deleting` (DELETE-CARDS.md), a coordinator's
+delete only marks a card, and the web app's deleter removes it a minute or
+more later. An image from before that doesn't know the status: a card
+rolled back onto while `deleting` shows the raw word in a grey chip and
+nothing sweeps it. That older image's own delete removes a card in any
+status, so delete such a card again. Anything the deleter had already
+removed stays removed.
+
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).
 No image can bring them back.

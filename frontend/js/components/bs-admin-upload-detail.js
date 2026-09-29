@@ -103,7 +103,13 @@ class AdminUploadDetail extends BaseElement {
       for (const id of this.#open) this.#fetchHeard(files.find((f) => f.id === id));
     } catch (error) {
       if (reference !== this.reference) return;
-      if (this.#state.status !== "ready") this.#state = { status: "error", upload: null, files: [], queue: null, error };
+      // A card that was on the page and has gone was deleted, most likely
+      // while it said so.
+      if (this.#state.status === "ready" && error.status === 404) {
+        this.#state = { status: "deleted", upload: null, files: [], queue: null, error: null };
+      } else if (this.#state.status !== "ready") {
+        this.#state = { status: "error", upload: null, files: [], queue: null, error };
+      }
     }
     if (!this.isConnected) return;
     this.render();
@@ -211,7 +217,9 @@ class AdminUploadDetail extends BaseElement {
           ? `<p class="empty">Loading the card…</p>`
           : status === "error"
             ? `<p class="empty">Couldn't load ${escapeHTML(this.reference)}: ${escapeHTML(error.message)}</p>`
-            : this.#card(upload, files)
+            : status === "deleted"
+              ? `<p class="empty">${escapeHTML(this.reference)} has been deleted, with its recordings, clips and detections.</p>`
+              : this.#card(upload, files)
       }
     `;
 
@@ -245,6 +253,11 @@ class AdminUploadDetail extends BaseElement {
       </p>
       ${upload.notes ? `<p class="note-line">“${escapeHTML(upload.notes)}”</p>` : ""}
       ${upload.status === "processing" ? `<bs-queue-note></bs-queue-note>` : ""}
+      ${
+        upload.status === "deleting"
+          ? `<p class="note-line">This card is being deleted: its recordings, clips and detections are being removed. This page says so when it's gone.</p>`
+          : ""
+      }
 
       <dl class="stats">
         <div class="stat"><dt>Received</dt><dd>${count(upload.filesUploaded)} <small>of ${count(upload.fileCount)}</small></dd></div>

@@ -11,6 +11,7 @@ const LABELS = {
   in_review: "In review",
   needs_attention: "Needs attention",
   results_sent: "Results sent",
+  deleting: "Deleting",
 };
 
 const KINDS = {
@@ -20,6 +21,7 @@ const KINDS = {
   in_review: "processing",
   needs_attention: "attention",
   results_sent: "done",
+  deleting: "neutral",
 };
 
 /** @returns {{kind: string, label: string}} for <bs-chip>. */
@@ -42,8 +44,12 @@ export function statusChip(upload) {
 /** Files BirdNET is done with, whether or not it could read them. */
 export const analyzedSoFar = (upload) => (upload.filesAnalyzed ?? 0) + (upload.filesFailed ?? 0);
 
-/** True while the server is still moving a card along, so a page showing it should look again. */
-export const isMoving = (upload) => isUnfinished(upload) || upload.status === "processing";
+/**
+ * True while the server is still moving a card along, so a page showing it
+ * should look again. A card being deleted is moving too: it is gone once the
+ * server has removed everything of it, a few minutes on.
+ */
+export const isMoving = (upload) => isUnfinished(upload) || upload.status === "processing" || upload.status === "deleting";
 
 /**
  * How one file on a card reads on screen. An uploaded file on a card that is

@@ -23,6 +23,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/azjob"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
@@ -159,6 +160,17 @@ func main() {
 		log.Info("audio retention is off: card originals are kept until the card is deleted")
 	}
 
+	// Deleting cards: a coordinator's delete only marks the card, and this
+	// removes it. It runs here rather than in the analysis job, because the
+	// web app is the one process that is always running.
+	deleter := deletion.New(store, files, log)
+	deleteCtx, stopDeleting := context.WithCancel(context.Background())
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		deleter.Run(deleteCtx)
+	}()
+
 	// Sign-in. Reaching the provider is a network call, so a provider that is
 	// unreachable now is retried when someone signs in rather than stopping
 	// the server -- the same call BirdNET's check makes above.
@@ -181,7 +193,7 @@ func main() {
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: requestLogger(log, web.SecurityHeaders(
-			newMux(cfg, store, files, analysisAPI, auth, log),
+			newMux(cfg, store, files, analysisAPI, deleter, auth, log),
 			// Dev is http://localhost, where HSTS is ignored anyway.
 			web.SecurityOptions{StaticDir: cfg.StaticDir, HTTPS: !cfg.Dev, Log: log},
 		)),
@@ -208,6 +220,9 @@ func main() {
 	// A sweep in flight stops between files; the next start finishes it.
 	stopRetention()
 	<-retentionDone
+	// A card being deleted is left in deleting; the next start finishes it.
+	stopDeleting()
+	<-deleteDone
 	if err := store.Close(); err != nil {
 		log.Error("closing the database", "err", err)
 	}
@@ -249,10 +264,10 @@ func shutdownHTTP(srv *http.Server, grace time.Duration, log *slog.Logger) error
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, deleter api.Deleter, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Options{
-		Store: store, Files: files, Queue: queue, Log: log,
+		Store: store, Files: files, Queue: queue, Deleter: deleter, Log: log,
 		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
 	})
 	web.Register(mux, cfg.StaticDir, log)

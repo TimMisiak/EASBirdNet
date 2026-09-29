@@ -69,7 +69,9 @@ type Recorder struct {
 
 // Upload statuses. A card moves down this list; needs_attention is a side
 // branch a coordinator resolves by hand. in_review is a card BirdNET has been
-// over, every file of it, waiting for its detections to be reviewed.
+// over, every file of it, waiting for its detections to be reviewed. deleting
+// can follow any of them: a coordinator has deleted the card, and
+// internal/deletion is removing it.
 const (
 	StatusInProgress     = "in_progress"
 	StatusInterrupted    = "interrupted"
@@ -77,6 +79,7 @@ const (
 	StatusInReview       = "in_review"
 	StatusNeedsAttention = "needs_attention"
 	StatusResultsSent    = "results_sent"
+	StatusDeleting       = "deleting"
 )
 
 // Upload is one SD card on its way from a recorder into storage and through
@@ -124,8 +127,12 @@ type Upload struct {
 	// audio without reading their files. The card's detections and their clips
 	// are kept: only a coordinator deleting the card removes those.
 	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	// DeleteRequestedAt is when a coordinator deleted the card, which moved it
+	// to deleting. The card itself goes once internal/deletion has removed
+	// everything else of it.
+	DeleteRequestedAt *time.Time `json:"deleteRequestedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
 // RecorderSnapshot is the part of a Recorder an upload keeps for itself.
