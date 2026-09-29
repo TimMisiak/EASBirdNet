@@ -155,6 +155,7 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `processedAt?`   | instant  | When BirdNET finished the card's last file (and Perch, when it runs, finished its last one too). |
 | `resultsSentAt?` | instant  | When the results email went out. |
 | `audioDeletedAt?`| instant  | When the last of the card's original recordings was removed under [Audio retention](#audio-retention). Its detections and their clips stay. |
+| `deleteRequestedAt?` | instant | When a coordinator deleted the card, which moved it to `deleting`. Kept as it was if the card is deleted again while it is going. |
 | `createdAt`      | instant  | When the card was first registered. |
 | `updatedAt`      | instant  | |
 
@@ -214,6 +215,7 @@ species, matched by scientific name.
 in_progress ⇄ interrupted ──(last file lands)──▶ processing ──(last file analyzed)──▶ in_review ──▶ results_sent
                                                      └──(some files failed)──▶ needs_attention
         any state ──(coordinator flags it)──▶ needs_attention ──(resolved)──▶ back
+        any state ──(coordinator deletes it)──▶ deleting ──(the deleter is done)──▶ gone
 ```
 
 | Value             | Meaning | Set by |
@@ -224,6 +226,7 @@ in_progress ⇄ interrupted ──(last file lands)──▶ processing ──(l
 | `in_review`       | BirdNET has analyzed every file; detections wait for review. | The analysis queue. |
 | `needs_attention` | A coordinator has to look (short card, unreadable files). The analysis queue sets it, with `statusDetail` like `2 files not analyzed`, when it finishes a card some of whose files failed. | Server checks or a coordinator. |
 | `results_sent`    | Detections reviewed and results emailed. | The server. |
+| `deleting`        | A coordinator has deleted the card, and `internal/deletion` is removing it: its audio and clips, its `audioFiles`, its `detections`, then the upload itself. Nothing else moves a card on from here -- the analysis queue only takes files of `processing` cards, retention only looks at finished ones, and neither the client nor the tus endpoint can reach it. Its detections are left out of `GET /detections` and the public overview. `statusDetail` is `couldn't finish deleting; trying again` after a pass that failed on it. | `DELETE /admin/uploads/{ref}`. |
 
 ## `audioFiles`
 
@@ -614,7 +617,7 @@ What the write routes do to documents:
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
 | `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/flac`, or `audio/wav` for a clip cut before FLAC -- the stored name decides, not a constant. Answers range requests. 404 for a detection with no clip. |
 | `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
-| `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Deletes the card in any status: first every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a delete that fails part way can be run again. A tus request for the card's files 404s from then on. |
+| `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |

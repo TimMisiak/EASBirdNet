@@ -2,8 +2,8 @@
 
 Deleting a card by marking it `deleting` and answering at once, and letting a
 sweep in the web app remove it, so a delete no longer has to finish inside
-one request. Proposed, not built: the **Status** table at the end is where to
-resume. Where this and the code disagree, the code is what runs -- fix
+one request. Built on branch `delete-upload-failed`, not yet deployed: the
+**Status** table at the end is where to resume. Where this and the code disagree, the code is what runs -- fix
 whichever is wrong.
 
 ## Problem
@@ -68,7 +68,11 @@ it.
    `analysisAPI` is passed.
 4. **It waits for claims.** The deleter skips a card while any of its files
    has a step `analyzing` with a lease in force (SCHEMA.md, *Claims*),
-   whether BirdNET's or Perch's. See below for why.
+   whether BirdNET's or Perch's. See below for why. It also leaves a card
+   alone for its first minute in `deleting` (`settle`). The queue lists
+   `processing` cards and then claims their files, so a claim on a card that
+   was listed just before the mark can land just after it. The minute is
+   there so that such a claim exists by the time the sweep looks for one.
 5. **Other paths refuse a `deleting` card.**
    - `tusAccess` 404s it, as if it were already gone. Today a transfer in
      flight keeps sending chunks to a card being deleted, because only
@@ -161,12 +165,13 @@ it. ROLLBACK.md says so.
 
 | Step | State |
 |---|---|
-| `internal/db/cosmos.go`: `whileThrottled` around every request in `deletePartition` and `deleteEach` | Built, on branch `delete-upload-failed`, not deployed |
-| `internal/db/models.go` + SCHEMA.md: `StatusDeleting`, `deleteRequestedAt`; the *Upload status* table and the `DELETE /admin/uploads/{ref}` row in *API mapping* | Not started |
-| `internal/deletion`: `Deleter` (`Run`, `Wake`, one card at a time, waits for leases, retries on a growing delay, `statusDetail` on failure); `deleteAudio` and `storagePrefix` move here from `internal/api` | Not started |
-| `internal/api`: `deleteUpload` marks and answers 202; `tusAccess` and `createUpload` refuse a `deleting` card; the overview and `GET /detections` skip one | Not started |
-| `cmd/server/main.go`: start and stop the deleter beside retention, pass it to `newMux`; `main_test.go` still wires the real mux | Not started |
-| Tests: mark then sweep; a card with a live lease waits and a lapsed one doesn't; a failed pass leaves `deleting` and the next finishes; tus and re-registering refused; overview and list exclude it | Not started |
-| Frontend: `upload-status.js` label, kind and `isMoving`; the card page's 404 while polling; My uploads doesn't offer to resume | Not started |
-| CLAUDE.md (a paragraph under *Decisions*, the tree, *State of the code*), DEPLOYMENT.md *Request time*, ROLLBACK.md | Not started |
-| Measure one real card's delete in RU, then choose the deleter's concurrency | Not started |
+| `internal/db/cosmos.go`: `whileThrottled` around every request in `deletePartition` and `deleteEach` | Built |
+| `internal/db/models.go` + SCHEMA.md: `StatusDeleting`, `deleteRequestedAt`; the *Upload status* table and the `DELETE /admin/uploads/{ref}` row in *API mapping* | Built |
+| `internal/deletion`: `Mark`; `Deleter` (`Run`, `Wake`, `Sweep`, one card at a time, a minute's settle, waits for leases, retries 30 s to 10 min, `statusDetail` on failure); `deleteAudio` moved here from `internal/api` | Built |
+| `internal/api`: `deleteUpload` marks and answers 202; `tusAccess` and `createUpload` refuse a `deleting` card; the overview and `GET /detections` skip one | Built |
+| `cmd/server/main.go`: start and stop the deleter beside retention, pass it to `newMux` | Built |
+| Tests: `internal/deletion` (sweep, settle, BirdNET and Perch leases, a failed pass tried again, the retry bound, `Mark` keeping its time, `Run` woken); `TestDeleteUpload` (marked, tus and re-registering refused, then swept); `TestACardBeingDeletedIsNotCounted` | Built |
+| Frontend: `upload-status.js` label, kind and `isMoving`; the card page's note and its 404 while polling; All uploads hides the bin on a `deleting` card; My uploads doesn't offer to resume one | Built; checked in a dev server with screenshots |
+| CLAUDE.md (*Deleting a card is a status and a sweep*, the tree, the route table, *State of the code*), DEPLOYMENT.md *Request time*, ROLLBACK.md | Built |
+| Deploy, then delete one large real card: check the deleter's log (`deleted a card`, `took`) and the Cosmos **Total Request Units** metric | Not started |
+| Choose the deleter's concurrency from that measurement | Not started |

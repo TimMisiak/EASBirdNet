@@ -98,7 +98,9 @@ func (h *handlers) tusAccess(uploads tushandler.DataStore, next http.Handler) ht
 				}
 				card, err := h.store.GetUpload(ctx, info.MetaData[metaReference])
 				switch {
-				case errors.Is(err, db.ErrNotFound) || (err == nil && !canSee(me, card)):
+				// A card being deleted is as good as gone: what is sent to it
+				// now would land after the deleter had cleared its storage.
+				case errors.Is(err, db.ErrNotFound) || (err == nil && (!canSee(me, card) || card.Status == db.StatusDeleting)):
 					h.problem(w, http.StatusNotFound, "no such upload")
 					return
 				case err != nil:

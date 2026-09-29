@@ -28,6 +28,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── api/        JSON handlers under /api/v1/
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
+│       ├── deletion/   Removes the cards a coordinator deletes, in the background
 │       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
@@ -174,7 +175,7 @@ GET    /api/v1/detections/{reference}/{id}         one detection, with its card 
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
 PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
 GET    /api/v1/admin/uploads              every card, admin only
-GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it
+GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it (202: it goes in the background)
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
@@ -643,6 +644,31 @@ still inside it.
 *Revisit when:* a card has to be held past its window (a hold flag on the
 upload, which the sweep would skip), or re-analysis matters more than the bill.
 
+**Deleting a card is a status and a sweep.** A card is tens of thousands of
+documents and clips, and serverless Cosmos charges a delete about what the
+write cost, so deleting a large one runs into the RU/s limit for minutes --
+longer than the ingress lets a request run, and longer than a deploy's grace.
+So `DELETE /admin/uploads/{ref}` only moves the card to `deleting` and answers
+202, and `internal/deletion`'s `Deleter` runs in the web app (in both modes;
+the job's workers aren't always there) and removes it: woken by the request,
+with a backstop every five minutes and a growing delay after a failed pass.
+The status is what makes it safe. Nothing else moves a card on from
+`deleting` -- the queue only takes `processing` cards' files, `tally` only
+moves a card from `processing`, retention only looks at finished cards --
+and tus and registering the card again both refuse it. The order is the one
+it always was, storage first and the upload last, so a pass cut part way
+leaves a card that says `deleting` and the next pass finishes. Its detections
+drop out of the Detections tab and the landing page as soon as it is marked.
+Gotcha: a card isn't touched for a minute after it's marked, nor while a
+worker holds a lease on one of its files -- a step already running writes its
+clips at the end, and clips written after the sweep passed would be in storage
+with nothing naming them. `Queue.gone` stays as the backstop for detections
+written after the sweep; nothing is a backstop for clips, which is why the
+sweep waits. DELETE-CARDS.md has the design and the gaps it accepts.
+*Revisit when:* one card's delete has to be fast -- then look at Cosmos's
+delete-by-partition-key (a preview feature; check it serves a serverless
+account), not more concurrency against the same RU budget.
+
 **Spectrograms are drawn in the browser.** `<bs-spectrogram>` fetches a
 detection's clip once, plays it from a blob URL, decodes it with Web Audio and
 runs its own FFT onto a canvas, in the paper and ink tokens. The clip is the
@@ -797,7 +823,8 @@ left in `internal/api`. The API's JSON shapes live in `internal/api/shapes.go`
 and differ from the stored documents in a few names. SCHEMA.md's *API mapping*
 section is the rulebook for both the fields and what each write route does
 (DELETE on people and stations sets `removedAt`/`retiredAt`; deleting a card
-is the one hard delete, and takes its audio and detections with it).
+is the one hard delete, and takes its audio and detections with it, in the
+background: see *Deleting a card is a status and a sweep*).
 `internal/api` tests build their own small fixed-date program in the JSON
 backend, deliberately not the dev seed.
 

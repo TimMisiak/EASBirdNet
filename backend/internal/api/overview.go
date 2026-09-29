@@ -53,7 +53,13 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 	year := yearStart.Format("2006-")
 	nights := map[[2]string]bool{}
 	stationName := map[string]string{}
+	// A card being deleted counts for nothing, nor does what was heard on it.
+	deleting := map[string]bool{}
 	for _, u := range uploads {
+		if u.Status == db.StatusDeleting {
+			deleting[u.ID] = true
+			continue
+		}
 		stationName[u.ID] = u.Recorder.Name
 		for _, n := range u.Nights {
 			if strings.HasPrefix(n.Date, year) {
@@ -70,6 +76,9 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 	}
 	bySpecies := map[string]*tally{}
 	for _, d := range confirmed {
+		if deleting[d.UploadID] {
+			continue
+		}
 		if !d.DetectedAt.Before(yearStart) {
 			program.ConfirmedDetections++
 		}

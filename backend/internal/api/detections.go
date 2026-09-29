@@ -88,11 +88,26 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 		return
 	}
 
+	// What was heard on a card being deleted is left out, counts and all.
+	// There is rarely such a card, so this is usually an empty query.
+	deleting, err := h.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusDeleting})
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	going := make(map[string]bool, len(deleting))
+	for _, u := range deleting {
+		going[u.ID] = true
+	}
+
 	// The species come from before the species filter, so picking one still
 	// offers the others.
 	tally := map[string]*SpeciesCount{}
 	matched := found[:0]
 	for _, d := range found {
+		if going[d.UploadID] {
+			continue
+		}
 		s := tally[d.ScientificName]
 		if s == nil {
 			s = &SpeciesCount{ScientificName: d.ScientificName, CommonName: d.CommonName}
