@@ -43,11 +43,13 @@ const SPEED_WINDOW_MS = 15_000;
 /** Progress arrives many times a second; pages hear about it this often. */
 const NOTIFY_EVERY_MS = 150;
 /**
- * How many files go at once on a fast line. Each waits on the server between
- * its chunks; the others keep the line busy meanwhile. A browser can set its
- * own for measuring (localStorage "birdsense.upload.parallelFiles", 1-8).
+ * The most files that go at once. Each waits on the server between its chunks
+ * -- measured on Azure, ~2 s to stage every 50 MB -- and the others keep the
+ * line busy meanwhile: on a 518 Mbit/s line, 3 at once reached 260 Mbit/s and
+ * 6 reached 460 (PARALLEL-UPLOADS.md, *Measured on Azure*). A browser can set
+ * its own for measuring (localStorage "birdsense.upload.parallelFiles", 1-8).
  */
-const PARALLEL_FILES = parallelOverride() ?? 3;
+const PARALLEL_FILES = parallelOverride() ?? 6;
 
 function parallelOverride() {
   try {
@@ -58,10 +60,12 @@ function parallelOverride() {
   }
 }
 /**
- * Below this a line is its own limit, and splitting it only stretches each
- * chunk toward the ingress timeout, so a slower card goes one file at a time.
+ * The share of the line each file gets: one file at a time per this much
+ * measured speed. Splitting a line thinner only stretches each chunk toward
+ * the ingress timeout, so a line under twice this goes one file at a time, and
+ * a 50 MB chunk arrives in about 20 s at any number of files.
  */
-const PARALLEL_MIN_MBPS = 20;
+const MBPS_PER_FILE = 20;
 /** How the server turns down one file (see beforeFileUpload); the others can still go. */
 const FILE_REFUSED = [400, 413, 422];
 
@@ -373,10 +377,11 @@ async function sendOne(tus, reference, entry) {
   if (running(reference)) set({ files: state.files });
 }
 
-/** One file until the line is measured, then PARALLEL_FILES while it's fast enough to share. */
+/** One file until the line is measured, then one per MBPS_PER_FILE of it, up to PARALLEL_FILES. */
 function filesAtOnce() {
   const speed = bytesPerSecond();
-  return speed !== null && (speed * 8) / 1e6 >= PARALLEL_MIN_MBPS ? PARALLEL_FILES : 1;
+  if (speed === null) return 1;
+  return Math.min(PARALLEL_FILES, Math.max(1, Math.floor((speed * 8) / 1e6 / MBPS_PER_FILE)));
 }
 
 class Stopped extends Error {}

@@ -67,13 +67,34 @@ finishing and ~1-2 s of staging per file. The rest was the line.
 per file). The query in *Checking a card's upload* below splits each upload's
 first PATCH from its last.
 
+### Measured on Azure
+
+A test card from a 518 Mbit/s line (Google's speed test), 0.5 vCPU web app,
+read with the queries in *Checking a card's upload*:
+
+| Files at once | Through us | Staging share | Staging speed |
+|---|---|---|---|
+| 1 (before) | 100-300 Mbit/s, by eye | -- | -- |
+| 3 | 260 Mbit/s | 0.51 | 185 Mbit/s |
+| 6 | ~460 Mbit/s | 0.33 | 193 Mbit/s |
+
+Gaps between requests were 0.0016 h against 0.05 h inside them, so the browser
+kept the line fed. Staging runs at ~190 Mbit/s per chunk whatever else is
+going on -- ~2 s for every 50 MB -- so it is a fixed wait per chunk, not the
+server running out of room. More files at once hide it behind the others'
+bytes rather than shorten it. The CPU reached its limit only once the card's
+analysis started in the same container, not during the upload. At 6 files the
+card ran at ~89% of the speed test, which uses several connections where the
+browser uses one; the rest isn't worth chasing.
+
 ## Proposal
 
-Send up to three files at once from the browser, so one file's bytes are on
-the wire while another's chunk is being staged or finished. The change is all
+Send up to six files at once from the browser -- one per 20 Mbit/s the line
+is measured at -- so some files' bytes are on the wire while others' chunks
+are being staged or finished. The change is all
 in `upload-flow.js`; the server already takes it.
 
-**Browser.** `sendWaiting` becomes a small pool: up to `PARALLEL_FILES = 3`
+**Browser.** `sendWaiting` becomes a small pool: up to `filesAtOnce()`
 calls to `send()`, each taking the next `waiting` file in card order, so
 nights still finish roughly oldest first.
 
@@ -84,18 +105,21 @@ nights still finish roughly oldest first.
 - A refused file (400, 413, 422) is still marked failed while the others go
   on. Any other error aborts the rest and interrupts the card, as one file's
   error does now.
-- A second and third file start only while the measured speed is above about
-  20 Mbit/s. Below that the line is already the limit, and splitting it would
-  stretch each 50 MB chunk toward the ingress's 240 s timeout (three chunks at
-  5 Mbit/s take 240 s).
+- `filesAtOnce()` is one file until the line is measured, then one per
+  `MBPS_PER_FILE = 20` of the measured speed, up to `PARALLEL_FILES = 6`: a
+  30 Mbit/s line sends one, 60 sends three, 120 or more sends six. Each file
+  keeps a ~20 Mbit/s share, so a 50 MB chunk arrives in ~20 s at any count --
+  splitting a line thinner only stretches each chunk toward the ingress's
+  240 s timeout. The count follows the speed as it is measured, so a line that
+  slows starts fewer files; the ones already moving finish at the slower rate.
 
 **Server.** Nothing is required to change:
 
 - tusd locks per upload, so different files never contend for a lock.
 - Each file is its own upload with its own id and blob, so staged blocks never
   mix.
-- A PATCH body goes to a temp file, not memory, so three at once is up to
-  150 MB of temp disk per volunteer.
+- A PATCH body goes to a temp file, not memory, so six at once is up to
+  300 MB of temp disk per volunteer.
 - Card updates are replace-if-unchanged with 5 attempts, so files finishing
   together retry rather than lose a write.
 
@@ -108,9 +132,9 @@ assume one file at a time.
 |---|---|---|
 | File list (`bs-upload-file-list.js`) | Scrolls to the one `sending` row | Several rows show a percentage; it follows the first, which already works |
 | Card counts (`tallyFiles`) | One recount at a time | Two recounts can overlap and the older one can write last, so "files in" can briefly step back. The card still reaches `processing` correctly, because a file is marked before its recount lists. CARD-COUNTS.md removes this. |
-| Pause, deploy, dropped line | Loses up to one partial chunk | Loses up to three partial chunks, each resumed from its last stored chunk |
-| Server temp disk | Up to 50 MB per volunteer | Up to 150 MB per volunteer, which has to fit the replica's ephemeral storage when several cards arrive together |
-| Ingress timeout (240 s) | A 50 MB chunk needs above 1.7 Mbit/s | Guarded by the 20 Mbit/s rule, so a slow line stays at one file |
+| Pause, deploy, dropped line | Loses up to one partial chunk | Loses up to six partial chunks, each resumed from its last stored chunk |
+| Server temp disk | Up to 50 MB per volunteer | Up to 300 MB per volunteer, which has to fit the replica's ephemeral storage when several cards arrive together |
+| Ingress timeout (240 s) | A 50 MB chunk needs above 1.7 Mbit/s | Each file keeps ~20 Mbit/s of the measured line, so a chunk takes ~20 s; a line that slows sharply mid-run can still stretch the chunks already moving |
 
 The docs that describe "files go one at a time" change with it: the comment at
 the top of `upload-flow.js` and CLAUDE.md, *Card audio goes over tus*.
@@ -149,7 +173,7 @@ store writes as bytes arrive, and has neither.
 once from the gigabit line, and compare the queries below for each. A browser
 picks its own number with `localStorage.setItem("birdsense.upload.parallelFiles", "4")`
 in the console (1-8; remove it to go back to 3), so the runs need no deploys.
-Keep 3 unless 4 is clearly better. One more run with the browser's network
+Done at 3 and 6 (*Measured on Azure*); 6 is the default. One more run with the browser's network
 throttling at 10 Mbit/s checks that a slow line stays at one file.
 
 ### Checking a card's upload
@@ -206,6 +230,42 @@ ContainerAppConsoleLogs_CL
 | extend staging_share = (staged_s + committed_s) / patch_s
 ```
 
+**Each chunk, receiving against staging.** The same split per PATCH, by
+pairing each with its own staging line (a file's nth PATCH with its nth staged
+chunk). `receive_mbit` is one chunk's bytes over everything but staging, so
+several files at once each get a share of the line; `stage_mbit` is one
+chunk's trip to Blob Storage.
+
+```kusto
+let ref = "OWL-REPLACE-ME";
+let logs = ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(30d)
+| extend l = parse_json(Log_s)
+| extend msg = tostring(l.msg);
+let patches = logs
+| where msg == "request" and tostring(l.method) == "PATCH" and toint(l.status) == 204
+    and tostring(l.path) startswith strcat("/api/v1/tus/", ref, "/")
+| extend upload = substring(tostring(l.path), strlen("/api/v1/tus/")),
+         bytes = tolong(l.bytes), patch_s = tolong(l.dur) / 1e9
+| sort by upload asc, TimeGenerated asc
+| extend n = row_number(1, prev(upload) != upload)
+| project upload, n, bytes, patch_s;
+let stages = logs
+| where msg == "chunk staged" and tobool(l.ok)
+    and tostring(l.blob) startswith strcat("uploads/", ref, "/")
+| extend upload = substring(tostring(l.blob), strlen("uploads/")), stage_s = tolong(l.dur) / 1e9
+| sort by upload asc, TimeGenerated asc
+| extend n = row_number(1, prev(upload) != upload)
+| project upload, n, stage_s;
+patches
+| join kind=inner stages on upload, n
+| extend receive_mbit = bytes * 8 / (patch_s - stage_s) / 1e6, stage_mbit = bytes * 8 / stage_s / 1e6
+| summarize chunks = count(),
+            receive_mbit_p10 = percentile(receive_mbit, 10), receive_mbit_p50 = percentile(receive_mbit, 50),
+            stage_mbit_p10 = percentile(stage_mbit, 10), stage_mbit_p50 = percentile(stage_mbit, 50),
+            stage_s_p50 = percentile(stage_s, 50), stage_share = sum(stage_s) / sum(patch_s)
+```
+
 **Recording each file**, bucketed by how far into the card it was. The time
 should be flat from the first tenth to the last; one that climbs with
 `filesUploaded` is a recount per file come back (CARD-COUNTS.md).
@@ -231,7 +291,10 @@ method, path and duration; the first query works on it without `failed`,
   ~26 Mbit/s through us; a speed test near 30 would put nearly all of the
   rest on the line.
 - How much ephemeral storage does the 0.5 vCPU web replica get? It has to hold
-  three 50 MB temp files per volunteer uploading at once.
+  six 50 MB temp files per volunteer uploading at once.
+- With the analysis job off, BirdNET runs in the web app and took its CPU to
+  the limit during the test. A card arriving while another is analyzed would
+  compete for it; the job (ANALYSIS.md) is the way out.
 
 ## Status
 
@@ -240,6 +303,10 @@ method, path and duration; the first query works on it without `failed`,
 | Existing logs read on the reported card | Done 2026-09-28: 6.78 h in requests, 0.43 h between, bandwidth-bound (*Measured*) |
 | Logging: request status and bytes, staging and commit times, each file's finish | Done 2026-09-28 |
 | Card-count counter (CARD-COUNTS.md), so overlapping finishes can't step the count back | Done 2026-09-28 |
-| Pool in `upload-flow.js`: `PARALLEL_FILES` (3, or a browser's own for measuring) and the 20 Mbit/s guard | Done 2026-09-28; checked against a stubbed tus client (pause and resume, a quick pause and resume, a refused file, a server error), and in headless Chromium against the dev server: at 100 Mbit/s 16 files went three at once (log: 2.77 at once, 98.7 Mbit/s), at 8 Mbit/s 6 files went one at a time (0.98, 7.8) |
-| Deploy; upload a real card and read *Checking a card's upload* | Not started |
-| Benchmark; set `PARALLEL_FILES` and decide `CHUNK_BYTES` | Not started |
+| Pool in `upload-flow.js`, first at a fixed 3 behind a 20 Mbit/s guard | Done 2026-09-28; checked against a stubbed tus client and in headless Chromium against the dev server (100 Mbit/s: 2.77 files at once in the log; 8 Mbit/s: 0.98) |
+| Deployed; test card read with *Checking a card's upload* | Done 2026-09-28: 3 at once reached 260 Mbit/s, 6 reached ~460 of 518 (*Measured on Azure*) |
+| One file per 20 Mbit/s measured, up to 6 (`MBPS_PER_FILE`, `PARALLEL_FILES`) | Done 2026-09-28, not yet deployed; stub: 1 at 10 Mbit/s, 2 at 50, 6 at 200; Chromium at 100 Mbit/s: 4 |
+| Confirm on Azure that a fast line reaches 6 at once and ~460 Mbit/s without the localStorage override | Not started |
+| Decide `CHUNK_BYTES` (a whole ten-minute file per chunk) | Not started; less pressing now that staging is hidden |
+| Streaming `WriteChunk` | Not needed for speed at 6 files; would save ~2 s per chunk of temp-file wait and the temp disk |
+
