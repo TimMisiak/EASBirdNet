@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"log/slog"
@@ -114,6 +115,12 @@ var importMapScript = regexp.MustCompile(`(?s)<script type="importmap">(.*?)</sc
 // and an import map the policy doesn't name is silently ignored by the
 // browser, which loses the recorders map without an error anyone would see.
 // An external import map would avoid this, but no browser supports one.
+//
+// The browser hashes the script as parsed, not as sent: HTML parsing turns
+// every CRLF and lone CR into LF first. So the file's bytes are normalized the
+// same way before hashing, or a checkout with Windows line endings (Git's
+// autocrlf, and deploy.ps1 builds the image from the working tree) ships a
+// hash no browser will ever match.
 func importMapHash(dir string, log *slog.Logger) string {
 	if dir == "" {
 		return ""
@@ -127,7 +134,9 @@ func importMapHash(dir string, log *slog.Logger) string {
 	if m == nil {
 		return ""
 	}
-	sum := sha256.Sum256(m[1])
+	script := bytes.ReplaceAll(m[1], []byte("\r\n"), []byte("\n"))
+	script = bytes.ReplaceAll(script, []byte("\r"), []byte("\n"))
+	sum := sha256.Sum256(script)
 	hash := "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
 	if log != nil {
 		log.Info("import map allowed by the content security policy", "hash", hash)

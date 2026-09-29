@@ -128,7 +128,9 @@ deliberate:
   hash. Gotcha: it is hashed out of the file at startup rather than written
   down as a constant, because nothing keeps a constant in step with a file that
   has no build step -- and a blocked import map fails *silently*, so the
-  mistake would surface only as the recorders map quietly not loading. An
+  mistake would surface only as the recorders map quietly not loading. The
+  file's line endings are normalized to LF before hashing, as the browser's
+  HTML parser does, so a Windows checkout (autocrlf) hashes the same. An
   external import map would avoid the whole problem, but no browser supports
   one. `internal/web`'s test checks the shipped `index.html` has nothing else
   inline.
