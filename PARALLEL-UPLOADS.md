@@ -2,7 +2,8 @@
 
 Sending a few of a card's files at once, so a volunteer's line stays busy
 while the server stages one file's chunk to Blob Storage or finishes another.
-Proposed, not built: the **Status** table at the end is where to resume.
+Built, not yet deployed or benchmarked (2026-09-28): the **Status** table at
+the end is where to resume.
 Where this and the code disagree, the code is what runs -- fix whichever is
 wrong. The per-file recount it leans on is [CARD-COUNTS.md](CARD-COUNTS.md).
 
@@ -130,32 +131,38 @@ streaming chunks is the natural follow-up if staging still shows in the logs.
 
 ## Measure first
 
-Add logging that splits each PATCH into receiving and staging, then pick the
-number of parallel files from a real card rather than by guess. Today the
-request log has only method, path and duration, so a slow PATCH can't be
-blamed on either side.
+What the server logs, so a card's upload can be split into the line and the
+server, and each improvement seen or not. All of it is JSON on stdout, so it
+reaches Log Analytics as `ContainerAppConsoleLogs_CL.Log_s`.
 
-1. **Request log:** add the status code and `Content-Length` to
-   `requestLogger` (`cmd/server/main.go`).
-2. **Staging:** log bytes and duration in `skipEmptyBlob.Upload`
-   (`internal/storage/storage.go`), which already wraps the `StageBlock` call.
-   Receiving time is then PATCH time minus staging time.
-3. **Finishing a file:** log how long `afterFileUpload` takes, with the card's
-   file count.
-4. **Benchmark:** deploy that, then upload the same ~200-file folder with
-   `PARALLEL_FILES` at 1, 2, 3 and 4 from the gigabit line. Record wall time,
-   Mbit/s and the staging share for each. Keep 3 unless 4 is clearly better.
+| Line (`msg`) | Where | Fields | Answers |
+|---|---|---|---|
+| `request` | `requestLogger` (`cmd/server/main.go`) | `method`, `path`, `status`, `bytes` (request body; a PATCH's chunk), `dur` | Each chunk's size and time, and whether it failed |
+| `chunk staged` | `skipEmptyBlob.Upload` (`internal/storage`), card audio only | `blob`, `bytes`, `dur`, `ok` | How much of a PATCH was the server passing it on to Blob Storage; the rest was receiving it |
+| `upload committed` | `skipEmptyBlob.Commit` | `blob`, `dur`, `ok` | The block-list commit a file's last PATCH waits on |
+| `file received` | `afterFileUpload` (`internal/api/tus.go`) | `card`, `upload`, `counted`, `filesUploaded`, `fileCount`, `dur` | What recording a file cost, and whether it grows with the card (CARD-COUNTS.md) |
 
-One more run on a throttled link (the browser's network throttling at
-25 Mbit/s) checks that the speed guard keeps a slow line at one file.
+`dur` is nanoseconds. Staging and commit lines are Azure's only: the local
+store writes as bytes arrive, and has neither.
+
+**Benchmark.** Upload the same ~200-file folder with 1, 2, 3 and 4 files at
+once from the gigabit line, and compare the queries below for each. A browser
+picks its own number with `localStorage.setItem("birdsense.upload.parallelFiles", "4")`
+in the console (1-8; remove it to go back to 3), so the runs need no deploys.
+Keep 3 unless 4 is clearly better. One more run with the browser's network
+throttling at 10 Mbit/s checks that a slow line stays at one file.
 
 ### Checking a card's upload
 
-The request log goes to the `log-birdsense-prod` Log Analytics workspace, kept
-30 days. In the portal: open the workspace, then **Logs**, switch to **KQL
-mode**, set **Time range** to "Set in query", and put the card's reference
-(as the app shows it) in the path. POSTs go to `/api/v1/tus/` before the
+In the portal: open the `log-birdsense-prod` Log Analytics workspace, then
+**Logs**, switch to **KQL mode**, set **Time range** to "Set in query", and put
+the card's reference (as the app shows it) where the queries say
+`OWL-REPLACE-ME`. Logs are kept 30 days. POSTs go to `/api/v1/tus/` before the
 upload has an id, so their time lands in the gaps.
+
+**Where the time went**, and whether files overlapped. `files_at_once` is the
+PATCH time over the span of the upload: ~1 is one file at a time, and near 3
+means parallel files kicked in. `mbit_s` is the card's rate through us.
 
 ```kusto
 ContainerAppConsoleLogs_CL
@@ -163,34 +170,60 @@ ContainerAppConsoleLogs_CL
 | extend l = parse_json(Log_s)
 | where tostring(l.msg) == "request"
     and tostring(l.path) startswith "/api/v1/tus/OWL-REPLACE-ME/"
-| extend method = tostring(l.method), dur_s = tolong(l.dur) / 1e9
+| extend method = tostring(l.method), dur_s = tolong(l.dur) / 1e9, bytes = tolong(l.bytes)
 | extend started = datetime_add('millisecond', -tolong(dur_s * 1000), TimeGenerated)
 | sort by started asc
 | extend gap_s = datetime_diff('millisecond', started, prev(TimeGenerated)) / 1000.0
 | summarize first = min(started), last = max(TimeGenerated),
-            patches = countif(method == "PATCH"),
+            patches = countif(method == "PATCH"), failed = countif(toint(l.status) >= 400),
             in_requests_h = sum(dur_s) / 3600,
             between_requests_h = sumif(gap_s, gap_s > 0) / 3600,
-            patch_p50_s = percentile(dur_s, 50), patch_p90_s = percentile(dur_s, 90)
+            patch_gb = sumif(bytes, method == "PATCH") / 1e9
+| extend span_s = datetime_diff('second', last, first)
+| extend files_at_once = in_requests_h * 3600 / span_s,
+         mbit_s = patch_gb * 8e3 / span_s
 ```
 
-Each upload's first PATCH against its last, which separates a file's bulk from
-its finishing work:
+**Receiving against staging.** `staging_share` is the part of PATCH time the
+server spent passing chunks on; the rest was the volunteer's bytes arriving.
+A high share is what streaming `WriteChunk` would fix (*Alternatives*).
+
+```kusto
+let ref = "OWL-REPLACE-ME";
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(30d)
+| extend l = parse_json(Log_s)
+| extend msg = tostring(l.msg), dur_s = tolong(l.dur) / 1e9
+| where (msg == "request" and tostring(l.method) == "PATCH"
+         and tostring(l.path) startswith strcat("/api/v1/tus/", ref, "/"))
+     or (msg in ("chunk staged", "upload committed")
+         and tostring(l.blob) startswith strcat("uploads/", ref, "/"))
+| summarize patch_s = sumif(dur_s, msg == "request"),
+            staged_s = sumif(dur_s, msg == "chunk staged"),
+            committed_s = sumif(dur_s, msg == "upload committed"),
+            stage_mbit_s = sumif(tolong(l.bytes), msg == "chunk staged") * 8 / 1e6
+                           / sumif(dur_s, msg == "chunk staged")
+| extend staging_share = (staged_s + committed_s) / patch_s
+```
+
+**Recording each file**, bucketed by how far into the card it was. The time
+should be flat from the first tenth to the last; one that climbs with
+`filesUploaded` is a recount per file come back (CARD-COUNTS.md).
 
 ```kusto
 ContainerAppConsoleLogs_CL
 | where TimeGenerated > ago(30d)
 | extend l = parse_json(Log_s)
-| where tostring(l.msg) == "request" and tostring(l.method) == "PATCH"
-    and tostring(l.path) startswith "/api/v1/tus/OWL-REPLACE-ME/"
-| extend upload = tostring(l.path), dur_s = tolong(l.dur) / 1e9
-| sort by upload asc, TimeGenerated asc
-| extend first_s = iff(upload != prev(upload), dur_s, real(null)),
-         last_s = iff(upload != next(upload), dur_s, real(null))
-| summarize uploads = count(first_s), patches = count(),
-            first_p50 = percentile(first_s, 50), last_p50 = percentile(last_s, 50),
-            last_p90 = percentile(last_s, 90)
+| where tostring(l.msg) == "file received" and tostring(l.card) == "OWL-REPLACE-ME"
+| extend dur_ms = tolong(l.dur) / 1e6,
+         tenth = toint(10 * toint(l.filesUploaded) / max_of(toint(l.fileCount), 1))
+| summarize files = count(), p50_ms = percentile(dur_ms, 50), p90_ms = percentile(dur_ms, 90) by tenth
+| sort by tenth asc
 ```
+
+A card uploaded before these lines existed still has the `request` lines'
+method, path and duration; the first query works on it without `failed`,
+`patch_gb` and `mbit_s`.
 
 ## Open questions
 
@@ -205,8 +238,8 @@ ContainerAppConsoleLogs_CL
 | Step | State |
 |---|---|
 | Existing logs read on the reported card | Done 2026-09-28: 6.78 h in requests, 0.43 h between, bandwidth-bound (*Measured*) |
-| Logging (*Measure first*, steps 1-3) | Not started |
+| Logging: request status and bytes, staging and commit times, each file's finish | Done 2026-09-28 |
 | Card-count counter (CARD-COUNTS.md), so overlapping finishes can't step the count back | Done 2026-09-28 |
-| Pool in `upload-flow.js`, with `PARALLEL_FILES` and the 20 Mbit/s guard | Not started |
+| Pool in `upload-flow.js`: `PARALLEL_FILES` (3, or a browser's own for measuring) and the 20 Mbit/s guard | Done 2026-09-28; checked against a stubbed tus client (pause and resume, a quick pause and resume, a refused file, a server error), and in headless Chromium against the dev server: at 100 Mbit/s 16 files went three at once (log: 2.77 at once, 98.7 Mbit/s), at 8 Mbit/s 6 files went one at a time (0.98, 7.8) |
+| Deploy; upload a real card and read *Checking a card's upload* | Not started |
 | Benchmark; set `PARALLEL_FILES` and decide `CHUNK_BYTES` | Not started |
-| CLAUDE.md and the `upload-flow.js` header say files go a few at a time | Not started |

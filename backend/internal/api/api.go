@@ -780,7 +780,7 @@ func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error
 // short because a file was marked but its card never counted up (the next
 // registration recounts that), or one over because a registration's recount
 // already included a file that was finishing.
-func (h *handlers) countFile(ctx context.Context, ref string, size int64) error {
+func (h *handlers) countFile(ctx context.Context, ref string, size int64) (db.Upload, error) {
 	u, err := h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
 		if !transferring(u.Status) {
 			return nil
@@ -790,9 +790,9 @@ func (h *handlers) countFile(ctx context.Context, ref string, size int64) error 
 		return nil
 	})
 	if err == nil && transferring(u.Status) && u.FilesUploaded >= u.FileCount {
-		_, err = h.tallyFiles(ctx, ref)
+		u, err = h.tallyFiles(ctx, ref)
 	}
-	return err
+	return u, err
 }
 
 // transferring reports whether a card's files are still being sent, which are

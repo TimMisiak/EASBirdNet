@@ -51,6 +51,7 @@ func runWorker(log *slog.Logger) int {
 		return 1
 	}
 	defer store.Close()
+	cfg.Storage.Log = log
 	files, err := storage.Open(cfg.Storage)
 	if err != nil {
 		log.Error("opening file storage", "err", err)

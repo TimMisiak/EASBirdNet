@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 	expslog "golang.org/x/exp/slog"
@@ -212,7 +213,8 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPResponse, error) {
 	ctx, info := hook.Context, hook.Upload
 	ref, fileID := info.MetaData[metaReference], info.MetaData[metaAudioFile]
-	now := h.stamp()
+	start, now := time.Now(), h.stamp()
+	var card db.Upload
 	var counted bool
 	var size int64
 	_, err := h.store.UpdateAudioFile(ctx, ref, fileID, func(f *db.AudioFile) error {
@@ -229,10 +231,15 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 		return nil
 	})
 	if err == nil && counted {
-		err = h.countFile(ctx, ref, size)
+		card, err = h.countFile(ctx, ref, size)
 	}
 	if err != nil {
 		h.log.Error("recording a received file", "upload", info.ID, "err", err)
+	} else {
+		// How long a file's last PATCH waited on recording it, and how far
+		// along its card is: the per-file cost CARD-COUNTS.md is about.
+		h.log.Info("file received", "card", ref, "upload", info.ID, "counted", counted,
+			"filesUploaded", card.FilesUploaded, "fileCount", card.FileCount, "dur", time.Since(start))
 	}
 	return tushandler.HTTPResponse{}, err
 }

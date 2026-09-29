@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -156,6 +158,9 @@ type Config struct {
 	// account has shared keys turned off.
 	AzureAccountName string
 	AzureAccountKey  string
+	// Log hears how long each chunk of card audio took to stage to Azure.
+	// Nil logs nothing.
+	Log *slog.Logger
 }
 
 // Open connects to the configured backend.
@@ -307,7 +312,7 @@ func OpenAzure(cfg Config) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: connecting to blob container %s: %w", cfg.AzureContainer, err)
 	}
-	wrapped := skipEmpty{service}
+	wrapped := skipEmpty{AzService: service, log: cfg.Log}
 	tus := azurestore.New(wrapped)
 	tus.ObjectPrefix = prefix
 	tus.Container = cfg.AzureContainer
@@ -344,17 +349,34 @@ func containerClient(cfg Config) (*container.Client, error) {
 // and an upload id is unique, so a new upload never lands on a name that
 // already has committed blocks. Without the sentinel a new upload's blob does
 // not exist yet, and tusd already reads that as offset 0.
-type skipEmpty struct{ azurestore.AzService }
+//
+// It is also where a chunk of card audio is timed. tusd's Azure store takes a
+// PATCH's whole body before staging it as one block, so a PATCH's time is
+// receiving plus this; logging this is what splits the two, and tells a slow
+// volunteer's line from a slow trip to Blob Storage (PARALLEL-UPLOADS.md).
+type skipEmpty struct {
+	azurestore.AzService
+	log *slog.Logger
+}
 
 func (s skipEmpty) NewBlob(ctx context.Context, name string) (azurestore.AzBlob, error) {
 	b, err := s.AzService.NewBlob(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return skipEmptyBlob{b}, nil
+	blob := skipEmptyBlob{AzBlob: b}
+	// Card audio only: clips go through here too, tens of thousands a card.
+	if s.log != nil && strings.HasPrefix(name, prefix+"/") && !strings.HasSuffix(name, infoSuffix) {
+		blob.log, blob.name = s.log, name
+	}
+	return blob, nil
 }
 
-type skipEmptyBlob struct{ azurestore.AzBlob }
+type skipEmptyBlob struct {
+	azurestore.AzBlob
+	log  *slog.Logger
+	name string
+}
 
 func (b skipEmptyBlob) Upload(ctx context.Context, body io.ReadSeeker) error {
 	n, err := remaining(body)
@@ -364,7 +386,23 @@ func (b skipEmptyBlob) Upload(ctx context.Context, body io.ReadSeeker) error {
 	if n == 0 {
 		return nil
 	}
-	return b.AzBlob.Upload(ctx, body)
+	start := time.Now()
+	err = b.AzBlob.Upload(ctx, body)
+	if b.log != nil {
+		b.log.Info("chunk staged", "blob", b.name, "bytes", n, "dur", time.Since(start), "ok", err == nil)
+	}
+	return err
+}
+
+// Commit is the block list being committed as a file's last byte lands, which
+// is part of what a file's last PATCH waits on.
+func (b skipEmptyBlob) Commit(ctx context.Context) error {
+	start := time.Now()
+	err := b.AzBlob.Commit(ctx)
+	if b.log != nil {
+		b.log.Info("upload committed", "blob", b.name, "dur", time.Since(start), "ok", err == nil)
+	}
+	return err
 }
 
 // remaining is how many bytes are left in body, leaving it where it was.

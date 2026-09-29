@@ -2,12 +2,15 @@
 // erase". It spans four routes, so the state lives here rather than in any one
 // page component, and the pages subscribe to it.
 //
-// Files go one at a time, each as its own tus upload (https://tus.io) to
-// /api/v1/tus/, in chunks: a dropped connection or a pause picks a file up from
-// its last chunk rather than its first byte. The server checks every file
-// against the list the card was registered with, and counts it once its last
-// byte lands, so the card's counts always come from the server. This module
-// tracks the files in this tab and the one that's moving.
+// Each file is its own tus upload (https://tus.io) to /api/v1/tus/, sent in
+// chunks: a dropped connection or a pause picks a file up from its last chunk
+// rather than its first byte. On a fast line a few files go at once, because
+// the server answers each chunk only once it has passed it on to storage, and
+// one file at a time leaves the line idle while it does (PARALLEL-UPLOADS.md).
+// The server checks every file against the list the card was registered with,
+// and counts it once its last byte lands, so the card's counts always come
+// from the server. This module tracks the files in this tab and the ones that
+// are moving.
 
 import * as api from "./api.js";
 import { isUnfinished } from "./upload-status.js";
@@ -39,6 +42,26 @@ const ASSUMED_BYTES_PER_SECOND = (ASSUMED_MBPS * 1e6) / 8;
 const SPEED_WINDOW_MS = 15_000;
 /** Progress arrives many times a second; pages hear about it this often. */
 const NOTIFY_EVERY_MS = 150;
+/**
+ * How many files go at once on a fast line. Each waits on the server between
+ * its chunks; the others keep the line busy meanwhile. A browser can set its
+ * own for measuring (localStorage "birdsense.upload.parallelFiles", 1-8).
+ */
+const PARALLEL_FILES = parallelOverride() ?? 3;
+
+function parallelOverride() {
+  try {
+    const n = Number(localStorage.getItem("birdsense.upload.parallelFiles"));
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : null;
+  } catch {
+    return null;
+  }
+}
+/**
+ * Below this a line is its own limit, and splitting it only stretches each
+ * chunk toward the ingress timeout, so a slower card goes one file at a time.
+ */
+const PARALLEL_MIN_MBPS = 20;
 /** How the server turns down one file (see beforeFileUpload); the others can still go. */
 const FILE_REFUSED = [400, 413, 422];
 
@@ -47,9 +70,15 @@ const KEY = "birdsense.upload.reference";
 const listeners = new Set();
 let state = initial();
 
-// The file being sent, and how fast things are moving. None of it is rendered
+// The files being sent, and how fast things are moving. None of it is rendered
 // directly, so it stays out of state.
-let inFlight = null;
+const inFlight = new Set();
+/**
+ * The files being sent now: `fill` starts more when there's room for them.
+ * Stopping clears it, so what a stopped run still has in hand can't start
+ * files beside the next run's.
+ */
+let sending = null;
 let samples = [];
 let sentThisTab = 0;
 let elapsedMs = 0;
@@ -280,33 +309,80 @@ async function run(reference) {
 
 const running = (reference) => state.upload?.reference === reference && state.status === "uploading";
 
-/** Send every waiting file in order. False if the run was stopped part-way. */
-async function sendWaiting(tus, reference) {
-  for (;;) {
-    if (!running(reference)) return false;
-    const entry = state.files.find((f) => f.state === "waiting");
-    if (!entry) return true;
-    try {
-      await send(tus, reference, entry);
-      Object.assign(entry, { state: "done", sent: entry.bytes });
-    } catch (error) {
-      if (error instanceof Stopped) return false;
-      const status = error?.originalResponse?.getStatus?.();
-      if (!FILE_REFUSED.includes(status)) throw explain(status);
-      const refusal = serverReason(error);
-      if (refusal?.code === "ERR_FILE_RECEIVED") {
-        Object.assign(entry, { state: "already", sent: entry.bytes });
-      } else {
-        Object.assign(entry, { state: "failed", sent: 0, error: refusal?.message ?? error.message });
+/**
+ * Send every waiting file, in order, as many at once as the line warrants
+ * (filesAtOnce). True once every file is sent or turned down; false if the run
+ * was stopped part-way. A failure that isn't one file being turned down stops
+ * the lot, as it did one file at a time.
+ */
+function sendWaiting(tus, reference) {
+  return new Promise((resolve, reject) => {
+    // Files only leave "waiting" during a run, so the next one is always at
+    // or after the last one taken, and finding it never rescans the card.
+    let next = 0;
+    let settled = false;
+    const run = {};
+    const settle = (done, value) => {
+      if (settled) return;
+      settled = true;
+      if (sending === run) sending = null;
+      done(value);
+    };
+    const nextWaiting = () => {
+      while (next < state.files.length && state.files[next].state !== "waiting") next += 1;
+      return state.files[next];
+    };
+    // This run's own, so a file stopped by a pause settles this run, not
+    // whichever a quick resume has started since.
+    const fill = () => {
+      if (settled) return;
+      if (sending !== run || !running(reference)) return settle(resolve, false);
+      while (inFlight.size < filesAtOnce()) {
+        const entry = nextWaiting();
+        if (!entry) break;
+        sendOne(tus, reference, entry).then(fill, (error) => settle(reject, error));
       }
+      if (!inFlight.size && !nextWaiting()) settle(resolve, true);
+    };
+    run.fill = fill;
+    sending = run;
+    fill();
+  });
+}
+
+/** One file, to the end: sent, already in, or turned down. Throws what should stop the card. */
+async function sendOne(tus, reference, entry) {
+  try {
+    await send(tus, reference, entry);
+    Object.assign(entry, { state: "done", sent: entry.bytes });
+  } catch (error) {
+    if (error instanceof Stopped) return;
+    const status = error?.originalResponse?.getStatus?.();
+    if (!FILE_REFUSED.includes(status)) {
+      // Not this file's fault: it goes again from its last chunk next time.
+      entry.state = "waiting";
+      throw explain(status);
     }
-    set({ files: state.files });
+    const refusal = serverReason(error);
+    if (refusal?.code === "ERR_FILE_RECEIVED") {
+      Object.assign(entry, { state: "already", sent: entry.bytes });
+    } else {
+      Object.assign(entry, { state: "failed", sent: 0, error: refusal?.message ?? error.message });
+    }
   }
+  if (running(reference)) set({ files: state.files });
+}
+
+/** One file until the line is measured, then PARALLEL_FILES while it's fast enough to share. */
+function filesAtOnce() {
+  const speed = bytesPerSecond();
+  return speed !== null && (speed * 8) / 1e6 >= PARALLEL_MIN_MBPS ? PARALLEL_FILES : 1;
 }
 
 class Stopped extends Error {}
 
 function send(tus, reference, entry) {
+  let handle = null;
   return new Promise((resolve, reject) => {
     let stopped = false;
     // The first progress report of a resumed file is what had already landed.
@@ -327,7 +403,7 @@ function send(tus, reference, entry) {
       onSuccess: resolve,
       onError: reject,
     });
-    inFlight = {
+    handle = {
       stop() {
         stopped = true;
         upload.abort();
@@ -335,6 +411,7 @@ function send(tus, reference, entry) {
         reject(new Stopped());
       },
     };
+    inFlight.add(handle);
     entry.state = "sending";
     set({ files: state.files });
     upload.findPreviousUploads().then((previous) => {
@@ -343,7 +420,7 @@ function send(tus, reference, entry) {
       upload.start();
     }, reject);
   }).finally(() => {
-    inFlight = null;
+    inFlight.delete(handle);
   });
 }
 
@@ -354,6 +431,8 @@ function progress(entry, sent, first) {
   samples.push([now, sentThisTab]);
   while (samples.length > 2 && now - samples[1][0] >= SPEED_WINDOW_MS) samples.shift();
   if (now - lastNotify >= NOTIFY_EVERY_MS) set({ files: state.files });
+  // Once the line is measured fast, the other files can start.
+  sending?.fill();
 }
 
 /** Register the card again to learn which files the server has, and queue the rest. */
@@ -372,9 +451,10 @@ function interrupt(reference, error) {
   report(reference, "interrupted");
 }
 
-/** Stop the file in flight and the clock. */
+/** Stop the files in flight and the clock. */
 function stop() {
-  inFlight?.stop();
+  sending = null;
+  for (const upload of [...inFlight]) upload.stop();
   if (runningSince) elapsedMs += Date.now() - runningSince;
   runningSince = 0;
   samples = [];

@@ -70,6 +70,7 @@ func main() {
 			"endpoint", cfg.DB.CosmosEndpoint, "database", cfg.DB.CosmosDatabase, "key_auth", cfg.DB.CosmosKey != "")
 	}
 
+	cfg.Storage.Log = log
 	files, err := storage.Open(cfg.Storage)
 	if err != nil {
 		log.Error("opening file storage", "err", err)
@@ -715,10 +716,48 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// requestLogger logs every request once it is answered: its status, and the
+// length of the body it brought (-1 when unstated), which on a tus PATCH is
+// the chunk -- so a card's upload rate can be read off the log
+// (PARALLEL-UPLOADS.md, *Checking a card's upload*).
 func requestLogger(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Info("request", "method", r.Method, "path", r.URL.Path, "dur", time.Since(start))
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		log.Info("request", "method", r.Method, "path", r.URL.Path, "status", sw.status(),
+			"bytes", r.ContentLength, "dur", time.Since(start))
 	})
+}
+
+// statusWriter notes the status a handler answers with. It unwraps, so
+// http.ResponseController reaches the real writer: tusd sets read deadlines
+// through one, and a wrapper that hid them would fail every PATCH.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.code == 0 {
+		w.code = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// status is what was answered; a handler that wrote nothing answered 200.
+func (w *statusWriter) status() int {
+	if w.code == 0 {
+		return http.StatusOK
+	}
+	return w.code
 }
