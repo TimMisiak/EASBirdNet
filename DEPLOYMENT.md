@@ -302,6 +302,32 @@ for jobs is better if the tenant has one (`az role definition list --query
 at all leaves `analysis_job_enabled` off until someone can; nothing about the
 job is then assigned, and the web app analyzes by itself.
 
+**Assigning the role by hand.** Where the deployer's own role assignments are
+limited by a condition to particular roles -- Terraform then fails with
+`AuthorizationFailed ... ABAC condition that is not fulfilled ...
+roleAssignments/write` -- set `analysis_job_role_managed = false` and have
+someone with Owner or User Access Administrator run this once, after the apply
+has created the job:
+
+```sh
+SCOPE_RG=$(az group show -n rg-birdsense-prod --query id -o tsv)
+JOB=$(terraform -chdir=infra output -raw analysis_job_id)
+APP=$(terraform -chdir=infra output -raw app_identity_principal_id)
+az role definition create --role-definition "{
+  \"Name\": \"Birdsense analysis job starter (birdsense-prod)\",
+  \"Description\": \"Start executions of the Birdsense analysis job and list them.\",
+  \"Actions\": [\"Microsoft.App/jobs/read\", \"Microsoft.App/jobs/start/action\", \"Microsoft.App/jobs/executions/read\"],
+  \"AssignableScopes\": [\"$SCOPE_RG\"]}"
+az role assignment create --assignee-object-id "$APP" --assignee-principal-type ServicePrincipal \
+  --role "Birdsense analysis job starter (birdsense-prod)" --scope "$JOB"
+```
+
+The same definition Terraform would make, so switching back to
+`analysis_job_role_managed = true` later means importing the two into state
+rather than creating them again (or deleting them first). Until the assignment
+exists, the web app can't count or start workers, and the coordinator's card
+screens say so with Azure's 403.
+
 **Watching it.** `az containerapp job execution list --name caj-birdsense-prod
 -g rg-birdsense-prod -o table` lists recent executions and how they ended. A
 worker whose models can't run exits 1 after logging the line the

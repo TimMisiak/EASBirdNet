@@ -71,6 +71,12 @@ variable "analysis_job_starter_role" {
   default     = ""
 }
 
+variable "analysis_job_role_managed" {
+  description = "Whether Terraform gives the web app its role on the analysis job. False leaves that to someone with the rights, once, by hand (DEPLOYMENT.md, 12b, *Assigning the role by hand*) -- for a deployer whose role assignments are limited to particular roles."
+  type        = bool
+  default     = true
+}
+
 variable "analysis_cpu" {
   description = "vCPU for each analysis worker replica. It packs BirdNET and Perch into what it has (ANALYSIS.md, Packing); Consumption allows up to 4.0."
   type        = number

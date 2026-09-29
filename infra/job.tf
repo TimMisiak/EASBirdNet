@@ -133,7 +133,7 @@ resource "azurerm_container_app_job" "analysis" {
 # to a built-in role instead, none is defined and that one is assigned, on the
 # job alone. Nothing is assigned while the job is off.
 resource "azurerm_role_definition" "job_starter" {
-  count = var.analysis_job_enabled && var.analysis_job_starter_role == "" ? 1 : 0
+  count = var.analysis_job_enabled && var.analysis_job_role_managed && var.analysis_job_starter_role == "" ? 1 : 0
 
   name        = "Birdsense analysis job starter (${local.base})"
   scope       = azurerm_resource_group.this.id
@@ -151,7 +151,7 @@ resource "azurerm_role_definition" "job_starter" {
 }
 
 resource "azurerm_role_assignment" "app_job_starter" {
-  count = var.analysis_job_enabled ? 1 : 0
+  count = var.analysis_job_enabled && var.analysis_job_role_managed ? 1 : 0
 
   scope                = azurerm_container_app_job.analysis.id
   role_definition_id   = var.analysis_job_starter_role == "" ? azurerm_role_definition.job_starter[0].role_definition_resource_id : null
