@@ -2,8 +2,9 @@
 
 Keeping a card's `filesUploaded` and `bytesUploaded` as a running count,
 instead of re-reading every file on the card each time one lands, so a card
-of n files costs O(n) rather than O(n²). Proposed, not built: the **Status**
-table at the end is where to resume. Where this and the code disagree, the
+of n files costs O(n) rather than O(n²). The upload side is built (2026-09-28);
+analysis's recounts are still to do. The **Status** table at the end is where
+to resume. Where this and the code disagree, the
 code is what runs -- fix whichever is wrong. It comes before
 [PARALLEL-UPLOADS.md](PARALLEL-UPLOADS.md), which would otherwise let two
 recounts race.
@@ -88,9 +89,9 @@ per redraw, not per file, so it doesn't grow with the card squared.
 
 | Step | State |
 |---|---|
-| `internal/api/tus.go`: `counted` in `afterFileUpload`'s mutate; `countFile` only when it is true | Not started |
-| `internal/api/api.go`: `countFile`, which increments the card and calls `tallyFiles` when `filesUploaded` reaches `fileCount` | Not started |
-| `tus_test.go`: counts rise by one per file; a repeated finish adds nothing; a failed card update is repaired by registering again; the last file still moves the card to `processing` | Not started |
-| A test over a large card (say 2,000 files) that counts `ListAudioFiles` calls, so a recount per file can't come back unnoticed | Not started |
-| SCHEMA.md, *API mapping*: the last-byte row says the counts are incremented and recounted at the last file; CLAUDE.md names `countFile` beside `tallyFiles` | Not started |
+| `internal/api/tus.go`: `counted` in `afterFileUpload`'s mutate; `countFile` only when it is true | Done 2026-09-28 |
+| `internal/api/api.go`: `countFile`, which increments the card and calls `tallyFiles` when `filesUploaded` reaches `fileCount` | Done 2026-09-28 |
+| Tests (`tus_test.go`): a 60-file card lists its files once, at the last file; a repeated finish adds nothing; a failed card update is repaired by registering again. The existing tests cover counts rising per file and the last file moving the card to `processing` | Done 2026-09-28 |
+| SCHEMA.md, *API mapping*, and CLAUDE.md name `countFile` beside `tallyFiles` | Done 2026-09-28 |
+| Deployed, and a large card's last-PATCH time checked in the logs (PARALLEL-UPLOADS.md, *Checking a card's upload*) | Not started |
 | Later, as its own change: the same counter for `Queue.tally`, and a claimable-only query for `Queue.fill` | Not started |

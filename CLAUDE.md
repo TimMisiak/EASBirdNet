@@ -194,9 +194,13 @@ A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
 anyone else, and the `/admin/*` routes 403 for a volunteer.
 Detections are not a card's: anyone signed in hears and reviews every card's,
 under `/detections`. A card's counts are
-the server's own tally of the files it has received (`tallyFiles`), never
-reported by the client, so a retried chunk can't count twice, and a card moves
-to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
+the server's own count of the files it has received, never reported by the
+client: a file is counted (`countFile`) by the write that marks it received, so
+a retried chunk can't count twice, and the card is recounted from its files
+(`tallyFiles`) only when it is registered and when that count reaches its last
+file -- recounting as each file landed made a card cost the square of its files
+(CARD-COUNTS.md). A card moves to `processing` only from that recount, once
+every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **A list of detections is bounded twice: by a window, and by a ceiling.** A
@@ -334,8 +338,13 @@ paused file resumes from the last chunk the server has. Birdsense's rules live
 in tusd's hooks (`internal/api/tus.go`). A file can only be created if it is on
 the list its card was registered with, at that size, and not already in. When
 its last byte lands, its `audioFiles` document is marked `uploaded` and the card
-recounted, before the browser is told it succeeded. Files go one at a time, in
-50 MB chunks, so each request fits the Container Apps ingress timeout.
+counted up, before the browser is told it succeeded. Files go in 50 MB chunks,
+so each request fits the Container Apps ingress timeout, and three at once once
+the browser has measured the line at 20 Mbit/s or more: tusd's Azure store
+takes a chunk's whole body before staging it to Blob Storage, and one file at a
+time leaves the line idle while it does (PARALLEL-UPLOADS.md). Each chunk's
+staging, each file's finish and every request's status and body size are
+logged, so a slow card can be put down to the line or to the server.
 Going through the app rather than straight to Blob Storage with SAS URLs keeps
 one upload path for dev and prod and the card rules in Go, at the cost of every
 byte passing through the container.

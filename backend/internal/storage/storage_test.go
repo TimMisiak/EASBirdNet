@@ -3,9 +3,11 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -266,7 +268,7 @@ func (s fakeService) NewBlob(context.Context, string) (azurestore.AzBlob, error)
 // so TestAzure passes either way.
 func TestSkipEmpty(t *testing.T) {
 	blob := &fakeBlob{}
-	s, err := skipEmpty{fakeService{blob}}.NewBlob(t.Context(), "uploads/OWL-20260907-SR02/x")
+	s, err := skipEmpty{AzService: fakeService{blob}}.NewBlob(t.Context(), "uploads/OWL-20260907-SR02/x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +292,37 @@ func TestSkipEmpty(t *testing.T) {
 	}
 	if got := string(blob.uploads[len(blob.uploads)-1]); got != "keep this" {
 		t.Errorf("Azure saw %q, want %q", got, "keep this")
+	}
+}
+
+// Staging a chunk of card audio is logged, with its size and time, so a
+// PATCH's time can be split into receiving and staging. Clips go through the
+// same store, tens of thousands a card, and aren't.
+func TestSkipEmptyLogsCardAudioOnly(t *testing.T) {
+	var out bytes.Buffer
+	service := skipEmpty{AzService: fakeService{&fakeBlob{}}, log: slog.New(slog.NewJSONHandler(&out, nil))}
+	for _, name := range []string{"uploads/OWL-20260907-SR02/x", "uploads/OWL-20260907-SR02/x.info", "clips/OWL-20260907-SR02/d.flac"} {
+		b, err := service.NewBlob(t.Context(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Upload(t.Context(), strings.NewReader("a chunk")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines, want 1 for the card audio alone:\n%s", len(lines), out.String())
+	}
+	var line struct {
+		Msg   string `json:"msg"`
+		Blob  string `json:"blob"`
+		Bytes int64  `json:"bytes"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line.Msg != "chunk staged" || line.Blob != "uploads/OWL-20260907-SR02/x" || line.Bytes != 7 {
+		t.Errorf("logged %+v, want the card audio's 7-byte chunk", line)
 	}
 }

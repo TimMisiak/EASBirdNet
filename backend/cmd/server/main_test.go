@@ -632,3 +632,41 @@ func TestWorkerConfigNeedsNoSignIn(t *testing.T) {
 		t.Error("BIRDSENSE_ANALYSIS_JOB_WORKERS=0 was accepted")
 	}
 }
+
+// The request log says what each request was answered with and how big its
+// body was -- a tus PATCH's chunk -- and the writer it wraps the response in
+// still lets a handler reach the connection: tusd sets read deadlines through
+// http.ResponseController, and a wrapper that hid them would fail every PATCH.
+func TestRequestLoggerRecordsStatusAndBytes(t *testing.T) {
+	var out bytes.Buffer
+	var deadlineErr error
+	h := requestLogger(newLogger(&out), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadlineErr = http.NewResponseController(w).SetReadDeadline(time.Now().Add(time.Minute))
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/api/v1/tus/x/y", strings.NewReader("chunk"))
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if deadlineErr != nil {
+		t.Errorf("setting a read deadline through the logged writer: %v", deadlineErr)
+	}
+	var line struct {
+		Msg    string `json:"msg"`
+		Method string `json:"method"`
+		Status int    `json:"status"`
+		Bytes  int64  `json:"bytes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
+		t.Fatalf("log line %q: %v", out.String(), err)
+	}
+	if line.Msg != "request" || line.Method != http.MethodPatch || line.Status != http.StatusNoContent || line.Bytes != 5 {
+		t.Errorf("logged %+v, want a PATCH answered 204 with a 5-byte body", line)
+	}
+}

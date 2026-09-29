@@ -757,7 +757,9 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 // tallyFiles sets a card's uploaded counts from its audio files, and moves a
 // card whose every listed file has landed on to processing. The counts are
 // recounted rather than added to, so a retried request can't count a file
-// twice, and the browser never reports them.
+// twice, and the browser never reports them. It reads every file on the card,
+// so it runs when a card is registered and when countFile says the last file
+// is in, never as each file lands.
 func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error) {
 	files, err := h.store.ListAudioFiles(ctx, ref)
 	if err != nil {
@@ -787,6 +789,28 @@ func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error
 	})
 	if err == nil && u.Status == db.StatusProcessing && h.queue != nil {
 		h.queue.Enqueue(ref)
+	}
+	return u, err
+}
+
+// countFile adds one newly received file to its card's counts, and recounts
+// the card from its files once the count says every file is in. The recount
+// is what moves the card to processing, so that step is always checked
+// against the files themselves, and it corrects a count that drifted: one
+// short because a file was marked but its card never counted up (the next
+// registration recounts that), or one over because a registration's recount
+// already included a file that was finishing.
+func (h *handlers) countFile(ctx context.Context, ref string, size int64) (db.Upload, error) {
+	u, err := h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+		if !transferring(u.Status) {
+			return nil
+		}
+		u.FilesUploaded = min(u.FilesUploaded+1, u.FileCount)
+		u.BytesUploaded = min(u.BytesUploaded+size, u.TotalBytes)
+		return nil
+	})
+	if err == nil && transferring(u.Status) && u.FilesUploaded >= u.FileCount {
+		u, err = h.tallyFiles(ctx, ref)
 	}
 	return u, err
 }
