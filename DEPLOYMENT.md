@@ -869,7 +869,11 @@ What it needs, beyond resources 7 and 8:
   them, tens of thousands of clips and documents. Blobs go in Blob Batch
   requests of 256 and documents in Cosmos transactional batches of 100, several
   of each in flight, which is a few hundred round-trips rather than tens of
-  thousands. One request per blob or per document does not fit.
+  thousands. One request per blob or per document does not fit. Batching
+  saves round-trips, not request units, so a large card's delete runs into
+  serverless Cosmos's per-partition RU/s limit; the delete waits out those 429s
+  (`whileThrottled`, in `internal/db`) rather than failing, which makes the RU
+  limit, not the round-trips, what bounds how big a card can be deleted in 240 s.
 - **CPU and memory while a card uploads.** Every byte of a ~128 GB card passes
   through the container, for the hours the upload takes. Inbound transfer is
   free, and the app only copies bytes, but at `0.25` vCPU the upload rate may

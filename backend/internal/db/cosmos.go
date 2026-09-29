@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,13 @@ const (
 	// batchOps is how many operations go in one transactional batch; Cosmos
 	// takes at most 100.
 	batchOps = 100
+	// maxThrottleRetries is how many more times whileThrottled tries a request
+	// Cosmos keeps throttling, on top of the three the SDK has already made.
+	maxThrottleRetries = 8
+	// throttleBackoff and maxThrottleBackoff bound the wait between those
+	// tries when Cosmos doesn't say how long to wait.
+	throttleBackoff    = 500 * time.Millisecond
+	maxThrottleBackoff = 8 * time.Second
 )
 
 type cosmosStore struct {
@@ -449,19 +458,36 @@ type docID struct {
 // card's detections run to tens of thousands: one request per document takes
 // longer than the Container Apps ingress lets a request run (DEPLOYMENT.md,
 // *Request time*).
+//
+// Batching saves round-trips, not request units: each document deleted is
+// charged about what writing it was, and a serverless partition allows ~5,000
+// RU/s. So a large card's delete is throttled as a matter of course, and every
+// request here goes through whileThrottled rather than failing the delete on
+// the SDK's third 429.
 func deletePartition(ctx context.Context, c *azcosmos.ContainerClient, partition string) error {
-	docs, err := queryDocs[docID](ctx, c, partition, "SELECT c.id FROM c")
+	var docs []docID
+	err := whileThrottled(ctx, func() (err error) {
+		docs, err = queryDocs[docID](ctx, c, partition, "SELECT c.id FROM c")
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	pk := azcosmos.NewPartitionKeyString(partition)
 	chunks := slices.Collect(slices.Chunk(docs, batchOps))
 	return inParallel(ctx, chunks, func(ctx context.Context, chunk []docID) error {
-		batch := c.NewTransactionalBatch(pk)
-		for _, doc := range chunk {
-			batch.DeleteItem(doc.ID, nil)
-		}
-		resp, err := c.ExecuteTransactionalBatch(ctx, batch, nil)
+		var resp azcosmos.TransactionalBatchResponse
+		err := whileThrottled(ctx, func() (err error) {
+			batch := c.NewTransactionalBatch(pk)
+			for _, doc := range chunk {
+				batch.DeleteItem(doc.ID, nil)
+			}
+			resp, err = c.ExecuteTransactionalBatch(ctx, batch, nil)
+			if err == nil && !resp.Success && batchThrottled(resp) {
+				err = errThrottled
+			}
+			return err
+		})
 		if err != nil {
 			return cosmosErr(err)
 		}
@@ -481,12 +507,69 @@ func deletePartition(ctx context.Context, c *azcosmos.ContainerClient, partition
 // already gone counts as deleted.
 func deleteEach(ctx context.Context, c *azcosmos.ContainerClient, pk azcosmos.PartitionKey, docs []docID) error {
 	for _, doc := range docs {
-		_, err := c.DeleteItem(ctx, pk, doc.ID, nil)
+		err := whileThrottled(ctx, func() error {
+			_, err := c.DeleteItem(ctx, pk, doc.ID, nil)
+			return err
+		})
 		if err != nil && !hasStatus(err, http.StatusNotFound) {
 			return cosmosErr(err)
 		}
 	}
 	return nil
+}
+
+// errThrottled is a transactional batch that Cosmos rolled back because it
+// throttled one of its operations, which the batch reports in its results
+// rather than as the request's own status.
+var errThrottled = errors.New("cosmos: batch throttled")
+
+// batchThrottled reports whether a failed batch failed because an operation in
+// it was throttled.
+func batchThrottled(resp azcosmos.TransactionalBatchResponse) bool {
+	for _, r := range resp.OperationResults {
+		if r.StatusCode == http.StatusTooManyRequests {
+			return true
+		}
+	}
+	return false
+}
+
+// whileThrottled runs do, and runs it again while Cosmos answers 429, up to
+// maxThrottleRetries more times. It waits as long as Cosmos asks, or else
+// backs off from throttleBackoff, plus up to as long again at random, so the
+// batches that were throttled together don't all come back at once.
+func whileThrottled(ctx context.Context, do func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := do()
+		if attempt == maxThrottleRetries || !throttled(err) {
+			return err
+		}
+		wait := throttleWait(err, attempt)
+		t := time.NewTimer(wait + rand.N(wait+1))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return err
+		case <-t.C:
+		}
+	}
+}
+
+func throttled(err error) bool {
+	return errors.Is(err, errThrottled) || hasStatus(err, http.StatusTooManyRequests)
+}
+
+// throttleWait is how long to wait before trying a throttled request again:
+// what Cosmos asked for in x-ms-retry-after-ms, if it did, or else
+// throttleBackoff doubled for each attempt so far, up to maxThrottleBackoff.
+func throttleWait(err error, attempt int) time.Duration {
+	var re *azcore.ResponseError
+	if errors.As(err, &re) && re.RawResponse != nil {
+		if ms, perr := strconv.ParseFloat(re.RawResponse.Header.Get("x-ms-retry-after-ms"), 64); perr == nil && ms > 0 {
+			return min(time.Duration(ms*float64(time.Millisecond)), maxThrottleBackoff)
+		}
+	}
+	return min(throttleBackoff<<attempt, maxThrottleBackoff)
 }
 
 // inParallel runs do over items, batchWorkers at a time, and stops at the
