@@ -2,11 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,7 +91,12 @@ func newTusServerIn(t *testing.T, dir string) *tusServer {
 	if err != nil {
 		t.Fatalf("open test file storage: %v", err)
 	}
-	store := newTestStore(t)
+	return newTusServerOver(t, dir, files, newTestStore(t))
+}
+
+// newTusServerOver is newTusServerIn over a store the test has wrapped.
+func newTusServerOver(t *testing.T, dir string, files storage.Store, store db.Store) *tusServer {
+	t.Helper()
 	mux := muxFor(store, files, false)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -559,5 +567,123 @@ func TestDeleteUploadLeavesAudioSharedWithAnotherCard(t *testing.T) {
 		t.Errorf("the other card's audio went: %v", err)
 	} else {
 		r.Close()
+	}
+}
+
+// spyStore counts a card's full file listings, and can fail the next card
+// update, which is how the tests below see what a received file costs.
+type spyStore struct {
+	db.Store
+	listings   atomic.Int64
+	failUpdate atomic.Bool
+}
+
+func (s *spyStore) ListAudioFiles(ctx context.Context, uploadID string) ([]db.AudioFile, error) {
+	s.listings.Add(1)
+	return s.Store.ListAudioFiles(ctx, uploadID)
+}
+
+func (s *spyStore) UpdateUpload(ctx context.Context, id string, mutate func(*db.Upload) error) (db.Upload, error) {
+	if s.failUpdate.CompareAndSwap(true, false) {
+		return db.Upload{}, errors.New("injected: the card update failed")
+	}
+	return s.Store.UpdateUpload(ctx, id, mutate)
+}
+
+func newSpiedTusServer(t *testing.T) (*tusServer, *spyStore) {
+	t.Helper()
+	dir := t.TempDir()
+	files, err := storage.OpenLocal(dir)
+	if err != nil {
+		t.Fatalf("open test file storage: %v", err)
+	}
+	spy := &spyStore{Store: newTestStore(t)}
+	return newTusServerOver(t, dir, files, spy), spy
+}
+
+// A received file counts its card up by one; only the last file recounts the
+// card from its files. Recounting as each file lands read every file on the
+// card each time, so a card cost the square of its files (CARD-COUNTS.md).
+func TestReceivingAFileDoesntRecountTheCard(t *testing.T) {
+	s, spy := newSpiedTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	const files = 60
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 3, files/3))
+	ref := reg.Upload.Reference
+
+	spy.listings.Store(0)
+	for i, f := range reg.Files[:files-1] {
+		s.send(jane, ref, f.Path, audio(i), 100)
+	}
+	if n := spy.listings.Load(); n != 0 {
+		t.Errorf("sending %d of %d files listed the card's files %d times, want 0", files-1, files, n)
+	}
+	u, err := s.store.GetUpload(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.FilesUploaded != files-1 || u.BytesUploaded != 100*(files-1) || u.Status != db.StatusInProgress {
+		t.Errorf("before the last file: %d files, %d bytes, %s; want %d, %d, in_progress",
+			u.FilesUploaded, u.BytesUploaded, u.Status, files-1, 100*(files-1))
+	}
+
+	s.send(jane, ref, reg.Files[files-1].Path, audio(files), 100)
+	if n := spy.listings.Load(); n != 1 {
+		t.Errorf("the last file listed the card's files %d times, want 1", n)
+	}
+	if u := s.card(jane, ref); u.FilesUploaded != files || u.Status != db.StatusProcessing {
+		t.Errorf("after every file: %d files, %s; want %d, processing", u.FilesUploaded, u.Status, files)
+	}
+}
+
+// Only the write that marks a file uploaded counts it, so the finish hook
+// running again for the same upload adds nothing.
+func TestFinishingAFileTwiceCountsItOnce(t *testing.T) {
+	s := newTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 2))
+	ref, path := reg.Upload.Reference, reg.Files[0].Path
+	s.send(jane, ref, path, audio(1), 100)
+
+	h := &handlers{store: s.store, files: s.files, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now: func() time.Time { return testNow }}
+	hook := tushandler.HookEvent{Context: t.Context(), Upload: tushandler.FileInfo{
+		ID:       ref + "/again",
+		MetaData: tushandler.MetaData{metaReference: ref, metaAudioFile: db.AudioFileID(ref, path)},
+	}}
+	if _, err := h.afterFileUpload(hook); err != nil {
+		t.Fatalf("finishing again: %v", err)
+	}
+	if u := s.card(jane, ref); u.FilesUploaded != 1 || u.BytesUploaded != 100 {
+		t.Errorf("after finishing a file twice: %d files, %d bytes; want 1, 100", u.FilesUploaded, u.BytesUploaded)
+	}
+	if f, _ := s.store.GetAudioFile(t.Context(), ref, db.AudioFileID(ref, path)); strings.HasSuffix(f.BlobName, "/again") {
+		t.Errorf("finishing again replaced the stored copy: %s", f.BlobName)
+	}
+}
+
+// A file marked uploaded whose card update then failed leaves the card a file
+// short. Registering the card again -- which the browser does when every file
+// went but the card isn't in -- recounts it and moves it on.
+func TestAFileMissedByItsCardIsCountedWhenTheCardIsRegisteredAgain(t *testing.T) {
+	s, spy := newSpiedTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	body := cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 2)
+	reg := s.register(jane, body)
+	ref := reg.Upload.Reference
+
+	spy.failUpdate.Store(true)
+	created := s.create(jane, ref, reg.Files[0].Path, 100)
+	if r := s.patch(jane, created.header.Get("Location"), 0, audio(1)); r.status < 500 {
+		t.Fatalf("last chunk with the card update failing = %d (%s), want a server error", r.status, r.body)
+	}
+	s.send(jane, ref, reg.Files[1].Path, audio(2), 100)
+	if u := s.card(jane, ref); u.FilesUploaded != 1 || u.Status != db.StatusInProgress {
+		t.Fatalf("with one file's count lost: %d files, %s; want 1, in_progress", u.FilesUploaded, u.Status)
+	}
+
+	again := s.register(jane, body)
+	if u := again.Upload; u.FilesUploaded != 2 || u.BytesUploaded != 200 || u.Status != db.StatusProcessing {
+		t.Errorf("registered again: %d files, %d bytes, %s; want 2, 200, processing", u.FilesUploaded, u.BytesUploaded, u.Status)
 	}
 }

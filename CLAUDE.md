@@ -193,9 +193,13 @@ A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
 anyone else, and the `/admin/*` routes 403 for a volunteer.
 Detections are not a card's: anyone signed in hears and reviews every card's,
 under `/detections`. A card's counts are
-the server's own tally of the files it has received (`tallyFiles`), never
-reported by the client, so a retried chunk can't count twice, and a card moves
-to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
+the server's own count of the files it has received, never reported by the
+client: a file is counted (`countFile`) by the write that marks it received, so
+a retried chunk can't count twice, and the card is recounted from its files
+(`tallyFiles`) only when it is registered and when that count reaches its last
+file -- recounting as each file landed made a card cost the square of its files
+(CARD-COUNTS.md). A card moves to `processing` only from that recount, once
+every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **A list of detections is bounded twice: by a window, and by a ceiling.** A

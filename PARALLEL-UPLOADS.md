@@ -206,7 +206,7 @@ ContainerAppConsoleLogs_CL
 |---|---|
 | Existing logs read on the reported card | Done 2026-09-28: 6.78 h in requests, 0.43 h between, bandwidth-bound (*Measured*) |
 | Logging (*Measure first*, steps 1-3) | Not started |
-| Card-count counter (CARD-COUNTS.md), so overlapping finishes can't step the count back | Not started |
+| Card-count counter (CARD-COUNTS.md), so overlapping finishes can't step the count back | Done 2026-09-28 |
 | Pool in `upload-flow.js`, with `PARALLEL_FILES` and the 20 Mbit/s guard | Not started |
 | Benchmark; set `PARALLEL_FILES` and decide `CHUNK_BYTES` | Not started |
 | CLAUDE.md and the `upload-flow.js` header say files go a few at a time | Not started |

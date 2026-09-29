@@ -198,13 +198,26 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 // the browser is told the upload succeeded, so by the time the browser asks,
 // the card's counts include the file.
 //
+// The card is counted up by this one file rather than recounted: a recount
+// reads every file on the card, and doing that as each file lands made a
+// card cost the square of its files (CARD-COUNTS.md). Only the write that
+// moves the file to uploaded counts it, so a finish that runs twice counts
+// once.
+//
 // If it fails, the browser sees an error for a file that is in fact stored.
-// The file stays pending, and is sent again the next time the card is.
+// If the file wasn't marked, it stays pending and is sent again the next time
+// the card is; if it was marked but the card wasn't counted up, the card is a
+// file short until it is registered again, which recounts it -- and the
+// browser registers a card again when every file went but it isn't in.
 func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPResponse, error) {
 	ctx, info := hook.Context, hook.Upload
 	ref, fileID := info.MetaData[metaReference], info.MetaData[metaAudioFile]
 	now := h.stamp()
+	var counted bool
+	var size int64
 	_, err := h.store.UpdateAudioFile(ctx, ref, fileID, func(f *db.AudioFile) error {
+		// The mutate runs again when the document changed underneath it.
+		counted = false
 		// A file already in keeps its first copy; one taken off the card's
 		// list while it was being sent stays off it.
 		if received(*f) || f.StatusDetail == db.AudioDetailNotOnCard {
@@ -212,10 +225,11 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 		}
 		f.Status, f.StatusDetail = db.AudioUploaded, ""
 		f.UploadedAt, f.BlobName = &now, storage.Name(info.ID)
+		counted, size = true, f.SizeBytes
 		return nil
 	})
-	if err == nil {
-		_, err = h.tallyFiles(ctx, ref)
+	if err == nil && counted {
+		err = h.countFile(ctx, ref, size)
 	}
 	if err != nil {
 		h.log.Error("recording a received file", "upload", info.ID, "err", err)
