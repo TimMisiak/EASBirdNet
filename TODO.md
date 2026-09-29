@@ -285,18 +285,6 @@ documents that the `skipEmpty` tusd workaround is only safe *because* blob
 versioning is off — turning on `versioning_enabled` would break every card
 upload. `storage.tf` carries no warning about that coupling; it should.
 
-### 5.11 Every deploy rebuilds the BirdNET stage from scratch
-`scripts/deploy.ps1:110`, `Dockerfile:21-37`
-
-`az acr build` runs on a fresh agent with no `--cache-from` and no registry
-cache, so every deploy pip-installs the pinned requirements and re-downloads
-~90 MB of models from Zenodo.
-
-**If not fixed:** multi-minute deploys, and a deploy that can fail because PyPI
-or Zenodo is having a bad day. A rollback is no longer exposed to this —
-`deploy.ps1 -ImageTag` applies an image that is already built (ROLLBACK.md) —
-so this is now about forward deploys only.
-
 ### 5.12 The client secret expires, and nothing in Azure can warn about it — **[decide]**
 `infra/app.tf:36-43`, `infra/variables.tf`, `backend/internal/api/auth.go`
 

@@ -168,6 +168,20 @@ function Get-RunningTag {
     return ([string]$running).Trim()
 }
 
+# The BirdNET runtime image (analyzer/Dockerfile) is tagged by what it is built
+# from, not by the commit, so a deploy that didn't touch the requirements finds
+# it already in the registry and skips the pip installs and the model
+# downloads, which are most of a build. Line endings are normalized so a
+# Windows checkout and a Linux one agree on the tag.
+function Get-BirdnetTag {
+    $inputs = foreach ($file in @('analyzer/Dockerfile', 'analyzer/requirements.txt', 'analyzer/requirements-perch.txt')) {
+        "== $file`n" + ((Get-Content -Raw $file) -replace "`r`n", "`n")
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($inputs -join ''))
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return (([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant().Substring(0, 16))
+}
+
 $rollback = $PSCmdlet.ParameterSetName -eq 'Rollback'
 $listOnly = $PSCmdlet.ParameterSetName -eq 'List'
 
@@ -317,14 +331,30 @@ try {
         # An arm64 image (an Apple Silicon `docker build`) starts and dies in
         # Container Apps with an exec format error.
         #
+        # First the BirdNET runtime the analyzer image starts from, only if
+        # this set of requirements has never been built. Its context is
+        # analyzer/ alone, which holds no secrets, so the allow-list above
+        # doesn't apply to it.
+        $birdnet = "birdsense-birdnet:$(Get-BirdnetTag)"
+        az acr repository show --name $acr --image $birdnet --output none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "deploy: $birdnet is already built; reusing it"
+        }
+        else {
+            Write-Host "deploy: building $birdnet in $acr (new requirements: pip installs and model downloads, the slow part)"
+            az acr build --registry $acr --image $birdnet --platform 'linux/amd64' 'analyzer'
+            Assert-LastExitCode "az acr build ($birdnet)"
+        }
+
         # Two images at the same tag (Dockerfile): the web app's, and the
         # analysis job's with BirdNET in it. Terraform applies both together,
         # so they never disagree about a document.
         foreach ($image in @(
-                @{ Name = 'birdsense'; Target = 'web' },
-                @{ Name = 'birdsense-analyzer'; Target = 'analyzer' })) {
+                @{ Name = 'birdsense'; Target = 'web'; Args = @() },
+                @{ Name = 'birdsense-analyzer'; Target = 'analyzer'; Args = @('--build-arg', "BIRDNET_IMAGE=$acr.azurecr.io/$birdnet") })) {
             Write-Host "deploy: building $($image.Name):$tag in $acr"
-            az acr build --registry $acr --image "$($image.Name):$tag" --target $image.Target --platform 'linux/amd64' '.'
+            $buildArgs = $image.Args
+            az acr build --registry $acr --image "$($image.Name):$tag" --target $image.Target --platform 'linux/amd64' @buildArgs '.'
             Assert-LastExitCode "az acr build ($($image.Name))"
         }
     }

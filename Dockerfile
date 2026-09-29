@@ -10,6 +10,16 @@
 #                      last stage, so a plain `docker build` and compose get it.
 #
 # scripts/deploy.ps1 builds both at the same tag.
+#
+# `analyzer` starts from the BirdNET runtime -- Python, the venv, the models --
+# which is its own image, built from analyzer/Dockerfile, because it is the
+# slow part of the build and changes only when the requirements do. Name it
+# with BIRDNET_IMAGE: deploy.ps1 passes the registry's copy, tagged by a hash
+# of what it is built from; compose builds it as the `birdnet` service and
+# supplies it under this default name. A plain `docker build` needs it first:
+#
+#   docker build -t birdnet analyzer && docker build .
+ARG BIRDNET_IMAGE=birdnet
 
 # At least the `toolchain` line in backend/go.mod, or the build downloads its
 # own copy; bump the two together (CLAUDE.md, *Dependencies are scanned*).
@@ -24,35 +34,6 @@ RUN go mod download
 COPY backend/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/birdsense ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/birdsense-analyze ./cmd/analyze
-
-
-# BirdNET runs from the `birdnet` Python package on LiteRT (no TensorFlow).
-# Its wheels are built for glibc, which is why the runtime is Debian, not
-# Alpine. Keep this Python version in step with analyzer/requirements.txt.
-# Perch, the optional second model (BIRDSENSE_PERCH), only runs on TensorFlow,
-# which requirements-perch.txt adds. It is always installed, so turning Perch
-# on is a setting rather than a different image -- at ~1.3 GB of TensorFlow
-# and ~400 MB of model on top of everything else (DEPLOYMENT.md).
-FROM python:3.12-slim-bookworm AS birdnet
-
-ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    BIRDNET_APP_DATA=/opt/birdnet/models
-
-RUN python -m venv /opt/birdnet/venv
-COPY analyzer/requirements.txt /opt/birdnet/requirements.txt
-RUN /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt
-COPY analyzer/requirements-perch.txt /opt/birdnet/requirements-perch.txt
-RUN /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt -r /opt/birdnet/requirements-perch.txt
-
-# Download the models into the image (acoustic, plus geo for location
-# filtering, plus Perch) so analysis never reaches the network. This layer
-# depends only on the requirements files, so editing analyze.py doesn't fetch
-# them again. The loads must match the ones in analyze.py.
-RUN /opt/birdnet/venv/bin/python -c 'import birdnet; \
-birdnet.load("acoustic", "2.4", "tf", library="litert"); \
-birdnet.load("geo", "2.4", "tf", library="litert"); \
-birdnet.load_perch_v2()'
 
 
 FROM alpine:3.22 AS web
@@ -83,7 +64,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
 ENTRYPOINT ["/app/birdsense"]
 
 
-FROM python:3.12-slim-bookworm AS analyzer
+FROM ${BIRDNET_IMAGE} AS analyzer
 
 # /app/data is where BIRDSENSE_DB=local keeps its JSON file, and /app/audio is
 # where BIRDSENSE_STORAGE=local keeps card audio. Creating them here, owned by
@@ -92,11 +73,8 @@ RUN useradd --uid 10001 --create-home birdsense \
  && mkdir -p /app/data /app/audio \
  && chown birdsense:birdsense /app/data /app/audio
 
-# The venv's python links to this base image's /usr/local/bin/python3.12, which
-# is why both stages use the same image.
-COPY --from=birdnet /opt/birdnet/venv /opt/birdnet/venv
-COPY --from=birdnet /opt/birdnet/models /opt/birdnet/models
-
+# The venv and the models are in the base image, at /opt/birdnet, so pushing
+# this one sends only the layers below.
 WORKDIR /app
 COPY --from=build /out/birdsense /out/birdsense-analyze /app/
 COPY analyzer/analyze.py analyzer/clip.py /app/analyzer/

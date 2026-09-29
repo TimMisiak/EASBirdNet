@@ -1,8 +1,21 @@
 services:
+  # The BirdNET runtime the app's image starts from (analyzer/Dockerfile). It
+  # is only here to be built: `service:birdnet` below is what makes compose
+  # build it first and hand it to the Dockerfile as BIRDNET_IMAGE's default,
+  # and its layers stay cached until the requirements change. Its container
+  # does nothing and exits.
+  birdnet:
+    build:
+      context: analyzer
+    entrypoint: ["true"]
+    restart: "no"
+
   birdsense:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        birdnet: "service:birdnet"
     # The host port is assigned by the environment; the container always
     # listens on 8080.
     ports:

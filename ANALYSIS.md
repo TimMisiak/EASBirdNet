@@ -176,7 +176,10 @@ Built in M3. `Dockerfile` has two targets from the same stages:
   models: the ~2 GB image that used to be the only one. The worker is not a
   second program but `birdsense worker` (`cmd/server/worker.go`), so it reads
   the same configuration the same way. It is the last stage, so compose and a
-  plain `docker build` still get the everything-image.
+  plain `docker build` still get the everything-image. It starts `FROM` the
+  BirdNET runtime (`analyzer/Dockerfile`: the venv and the models, no
+  Birdsense code), which is built on its own and only when the requirements
+  change (DEPLOYMENT.md, *Deploying a new version*).
 
 `scripts/deploy.ps1` builds both at the same git sha (`birdsense` and
 `birdsense-analyzer`), and Terraform applies both together, so a web app and

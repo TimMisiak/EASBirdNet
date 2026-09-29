@@ -691,6 +691,18 @@ than yours, and produces a `linux/amd64` image whatever the machine running it
 is -- an arm64 image (an Apple Silicon `docker build`) starts and dies in
 Container Apps with an exec format error.
 
+Each `az acr build` runs on a fresh agent with no layer cache, so the slow
+part -- pip installing TensorFlow and BirdNET, downloading the models -- is its
+own image, `birdsense-birdnet`, built from `analyzer/Dockerfile` and tagged
+with a hash of that file and the two requirements files rather than the commit.
+The script builds it only when the registry doesn't have that tag, and the
+analyzer image starts `FROM` it (`--build-arg BIRDNET_IMAGE`), so an ordinary
+deploy pulls it inside Azure and pushes only the app's own layers. Changing a
+pin or a model load in `analyzer/Dockerfile` changes the hash, and that deploy
+is the slow one. Old `birdsense-birdnet` tags stay in the registry until
+someone deletes them; nothing a rollback applies names them, since each
+`birdsense-analyzer` tag already contains its base.
+
 `az acr build` uploads the whole build context to the registry's source
 storage, and the repo it is run from holds `infra/prod.tfvars` -- the OIDC
 client secret and the session key in plaintext -- next to `infra/.terraform`.

@@ -34,7 +34,8 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
-│                       (requirements-perch.txt adds TensorFlow, for Perch)
+│                       (requirements-perch.txt adds TensorFlow, for Perch); its
+│                       Dockerfile is the BirdNET runtime image `analyzer` builds on
 ├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
