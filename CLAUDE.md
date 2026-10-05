@@ -35,8 +35,8 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
-│                       (requirements-perch.txt adds TensorFlow, for Perch); its
-│                       Dockerfile is the BirdNET runtime image `analyzer` builds on
+│                       (requirements-perch.txt adds TensorFlow, for Perch), which the
+│                       Dockerfile's `birdnet` stage installs: the runtime `analyzer` builds on
 ├── test/               Audio fixtures (a known Osprey clip)
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
@@ -68,7 +68,8 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 ├── LICENSES/           Full licence texts the notices refer to
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
-├── Dockerfile          Two images: `web` (Alpine: binary + frontend/) and `analyzer` (+ BirdNET)
+├── Dockerfile          Two images: `web` (Alpine: binary + frontend/) and `analyzer` (+ BirdNET,
+│                    from the `birdnet` stage: one build locally, its own image in deploys)
 └── docker-compose.yml
 ```
 

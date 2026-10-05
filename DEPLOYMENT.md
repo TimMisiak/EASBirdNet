@@ -693,13 +693,18 @@ Container Apps with an exec format error.
 
 Each `az acr build` runs on a fresh agent with no layer cache, so the slow
 part -- pip installing TensorFlow and BirdNET, downloading the models -- is its
-own image, `birdsense-birdnet`, built from `analyzer/Dockerfile` and tagged
-with a hash of that file and the two requirements files rather than the commit.
-The script builds it only when the registry doesn't have that tag, and the
-analyzer image starts `FROM` it (`--build-arg BIRDNET_IMAGE`), so an ordinary
-deploy pulls it inside Azure and pushes only the app's own layers. Changing a
-pin or a model load in `analyzer/Dockerfile` changes the hash, and that deploy
-is the slow one. Old `birdsense-birdnet` tags stay in the registry until
+own image, `birdsense-birdnet`, built from the Dockerfile's `birdnet` stage
+(`--target birdnet`) and tagged with a hash of that stage's text and the two
+requirements files rather than the commit. The script builds it only when the
+registry doesn't have that tag, and the analyzer image's `birdnet` stage starts
+`FROM` it (`--build-arg BIRDNET_BASE`), so an ordinary deploy pulls it inside
+Azure and pushes only the app's own layers. `az acr build` is Docker's legacy
+builder, which runs every stage before its target, so the stage's steps skip
+themselves when their base already has `/opt/birdnet/ready` -- which is what
+keeps an ordinary deploy from reinstalling everything. Changing a pin or a
+model load in that stage changes the hash, and that deploy is the slow one.
+Locally, compose and `docker build .` build the stage from python in the same
+build, so there is one image and one container. Old `birdsense-birdnet` tags stay in the registry until
 someone deletes them; nothing a rollback applies names them, since each
 `birdsense-analyzer` tag already contains its base.
 

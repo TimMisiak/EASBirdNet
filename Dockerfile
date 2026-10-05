@@ -1,25 +1,26 @@
-# Two images from one file (ANALYSIS.md, *The two images*):
+# Three targets from one file (ANALYSIS.md, *The two images*):
 #
 #   --target web       the server and the frontend on Alpine: what the container
 #                      app runs when analysis runs as a job. No Python, no
 #                      models, tens of MB.
-#   --target analyzer  the same, plus BirdNET's Python runtime and the models:
-#                      what the analysis job's workers run (`birdsense worker`),
-#                      and what serves everything in one container when
-#                      analysis runs in the web app's own process. It is the
-#                      last stage, so a plain `docker build` and compose get it.
+#   --target birdnet   the BirdNET runtime alone -- Python, the venv, the models,
+#                      nothing of Birdsense's own. The slow part of the build,
+#                      and it changes only when the requirements do.
+#   --target analyzer  the server and the frontend on the BirdNET runtime: what
+#                      the analysis job's workers run (`birdsense worker`), and
+#                      what serves everything in one container when analysis
+#                      runs in the web app's own process. It is the last stage,
+#                      so a plain `docker build` and compose get it, in one
+#                      build and one container.
 #
-# scripts/deploy.ps1 builds both at the same tag.
-#
-# `analyzer` starts from the BirdNET runtime -- Python, the venv, the models --
-# which is its own image, built from analyzer/Dockerfile, because it is the
-# slow part of the build and changes only when the requirements do. Name it
-# with BIRDNET_IMAGE: deploy.ps1 passes the registry's copy, tagged by a hash
-# of what it is built from; compose builds it as the `birdnet` service and
-# supplies it under this default name. A plain `docker build` needs it first:
-#
-#   docker build -t birdnet analyzer && docker build .
-ARG BIRDNET_IMAGE=birdnet
+# scripts/deploy.ps1 builds `birdnet` on its own, into the registry, tagged by
+# a hash of its stage and the requirements, and only when that tag isn't there
+# yet; then it builds `web` and `analyzer` at the commit, with BIRDNET_BASE
+# naming the registry's runtime. `az acr build` is Docker's legacy builder,
+# which builds every stage before the target whether the target uses it or
+# not -- so the `birdnet` stage has to cost nothing when its base already holds
+# the runtime, which is what the `ready` marker is for.
+ARG BIRDNET_BASE=python:3.12-slim-bookworm
 
 # At least the `toolchain` line in backend/go.mod, or the build downloads its
 # own copy; bump the two together (CLAUDE.md, *Dependencies are scanned*).
@@ -64,7 +65,44 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
 ENTRYPOINT ["/app/birdsense"]
 
 
-FROM ${BIRDNET_IMAGE} AS analyzer
+# The BirdNET runtime. BirdNET runs from the `birdnet` Python package on LiteRT
+# (no TensorFlow). Its wheels are built for glibc, which is why the runtime is
+# Debian, not Alpine. Keep this Python version in step with requirements.txt.
+# Perch, the optional second model (BIRDSENSE_PERCH), only runs on TensorFlow,
+# which requirements-perch.txt adds. It is always installed, so turning Perch
+# on is a setting rather than a different image -- at ~1.3 GB of TensorFlow
+# and ~400 MB of model on top of everything else (DEPLOYMENT.md).
+#
+# From python, every step runs. From a runtime deploy.ps1 built earlier (the
+# BIRDNET_BASE it passes), /opt/birdnet/ready is already there and every step
+# is a no-op -- so editing this stage changes deploy.ps1's tag for it, and the
+# next deploy builds a fresh runtime rather than skipping over a stale one.
+FROM ${BIRDNET_BASE} AS birdnet
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    BIRDNET_APP_DATA=/opt/birdnet/models
+
+COPY analyzer/requirements.txt /opt/birdnet/requirements.txt
+RUN test -e /opt/birdnet/ready \
+ || { python -m venv /opt/birdnet/venv \
+   && /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt; }
+COPY analyzer/requirements-perch.txt /opt/birdnet/requirements-perch.txt
+RUN test -e /opt/birdnet/ready \
+ || /opt/birdnet/venv/bin/pip install -r /opt/birdnet/requirements.txt -r /opt/birdnet/requirements-perch.txt
+
+# Download the models into the image (acoustic, plus geo for location
+# filtering, plus Perch) so analysis never reaches the network. The loads must
+# match the ones in analyze.py.
+RUN test -e /opt/birdnet/ready \
+ || { /opt/birdnet/venv/bin/python -c 'import birdnet; \
+birdnet.load("acoustic", "2.4", "tf", library="litert"); \
+birdnet.load("geo", "2.4", "tf", library="litert"); \
+birdnet.load_perch_v2()' \
+   && touch /opt/birdnet/ready; }
+
+
+FROM birdnet AS analyzer
 
 # /app/data is where BIRDSENSE_DB=local keeps its JSON file, and /app/audio is
 # where BIRDSENSE_STORAGE=local keeps card audio. Creating them here, owned by
@@ -73,8 +111,8 @@ RUN useradd --uid 10001 --create-home birdsense \
  && mkdir -p /app/data /app/audio \
  && chown birdsense:birdsense /app/data /app/audio
 
-# The venv and the models are in the base image, at /opt/birdnet, so pushing
-# this one sends only the layers below.
+# The venv and the models are in the stage above, at /opt/birdnet, so when it
+# came from the registry, pushing this image sends only the layers below.
 WORKDIR /app
 COPY --from=build /out/birdsense /out/birdsense-analyze /app/
 COPY analyzer/analyze.py analyzer/clip.py /app/analyzer/

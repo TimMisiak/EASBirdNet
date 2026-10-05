@@ -168,13 +168,21 @@ function Get-RunningTag {
     return ([string]$running).Trim()
 }
 
-# The BirdNET runtime image (analyzer/Dockerfile) is tagged by what it is built
-# from, not by the commit, so a deploy that didn't touch the requirements finds
-# it already in the registry and skips the pip installs and the model
-# downloads, which are most of a build. Line endings are normalized so a
-# Windows checkout and a Linux one agree on the tag.
+# The BirdNET runtime image (the Dockerfile's `birdnet` stage) is tagged by
+# what it is built from, not by the commit, so a deploy that didn't touch the
+# requirements finds it already in the registry and skips the pip installs and
+# the model downloads, which are most of a build. What it is built from is that
+# stage's text -- from its FROM line to the next one -- and the two
+# requirements files. Line endings are normalized so a Windows checkout and a
+# Linux one agree on the tag.
 function Get-BirdnetTag {
-    $inputs = foreach ($file in @('analyzer/Dockerfile', 'analyzer/requirements.txt', 'analyzer/requirements-perch.txt')) {
+    $dockerfile = (Get-Content -Raw 'Dockerfile') -replace "`r`n", "`n"
+    $stage = [regex]::Match($dockerfile, '(?ms)^FROM \S+ AS birdnet\s*$.*?(?=^FROM )')
+    if (-not $stage.Success) {
+        Die "the Dockerfile has no 'birdnet' stage to hash"
+    }
+    $inputs = @("== Dockerfile (birdnet)`n" + $stage.Value)
+    $inputs += foreach ($file in @('analyzer/requirements.txt', 'analyzer/requirements-perch.txt')) {
         "== $file`n" + ((Get-Content -Raw $file) -replace "`r`n", "`n")
     }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes(($inputs -join ''))
@@ -332,9 +340,9 @@ try {
         # Container Apps with an exec format error.
         #
         # First the BirdNET runtime the analyzer image starts from, only if
-        # this set of requirements has never been built. Its context is
-        # analyzer/ alone, which holds no secrets, so the allow-list above
-        # doesn't apply to it.
+        # this set of requirements has never been built: the Dockerfile's
+        # `birdnet` stage, from python. Its context is the same allow-listed
+        # one as the app's.
         $birdnet = "birdsense-birdnet:$(Get-BirdnetTag)"
         az acr repository show --name $acr --image $birdnet --output none 2>$null
         if ($LASTEXITCODE -eq 0) {
@@ -342,16 +350,17 @@ try {
         }
         else {
             Write-Host "deploy: building $birdnet in $acr (new requirements: pip installs and model downloads, the slow part)"
-            az acr build --registry $acr --image $birdnet --platform 'linux/amd64' 'analyzer'
+            az acr build --registry $acr --image $birdnet --target birdnet --platform 'linux/amd64' '.'
             Assert-LastExitCode "az acr build ($birdnet)"
         }
 
         # Two images at the same tag (Dockerfile): the web app's, and the
         # analysis job's with BirdNET in it. Terraform applies both together,
-        # so they never disagree about a document.
+        # so they never disagree about a document. The analyzer's `birdnet`
+        # stage starts from the registry's runtime, where it is a no-op.
         foreach ($image in @(
                 @{ Name = 'birdsense'; Target = 'web'; Args = @() },
-                @{ Name = 'birdsense-analyzer'; Target = 'analyzer'; Args = @('--build-arg', "BIRDNET_IMAGE=$acr.azurecr.io/$birdnet") })) {
+                @{ Name = 'birdsense-analyzer'; Target = 'analyzer'; Args = @('--build-arg', "BIRDNET_BASE=$acr.azurecr.io/$birdnet") })) {
             Write-Host "deploy: building $($image.Name):$tag in $acr"
             $buildArgs = $image.Args
             az acr build --registry $acr --image "$($image.Name):$tag" --target $image.Target --platform 'linux/amd64' @buildArgs '.'
