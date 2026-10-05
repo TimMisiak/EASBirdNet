@@ -267,6 +267,7 @@ export function pause() {
 export function reset() {
   stop();
   elapsedMs = 0;
+  sentThisTab = 0;
   sessionStorage.removeItem(KEY);
   state = initial();
   for (const listener of listeners) listener(state);
@@ -546,6 +547,16 @@ export function bytesPerSecond() {
 export const minutesRemaining = () =>
   ((state.upload?.totalBytes ?? 0) - totals().bytes) / ((bytesPerSecond() ?? ASSUMED_BYTES_PER_SECOND) * 60);
 export const minutesElapsed = () => (elapsedMs + (runningSince ? Date.now() - runningSince : 0)) / 60_000;
+/**
+ * Bytes per second over the whole time spent sending, pauses left out, or null
+ * if this tab sent too little to say (a card that was already in, or a reload
+ * of the done page). Only what this tab sent counts: what had landed before a
+ * resume took none of its time.
+ */
+export function averageBytesPerSecond() {
+  const ms = minutesElapsed() * 60_000;
+  return ms >= 2_000 && sentThisTab > 0 ? (sentThisTab * 1_000) / ms : null;
+}
 /** Minutes to send this many bytes at the assumed speed, before anything has been sent. */
 export const totalMinutes = (bytes) => bytes / (ASSUMED_BYTES_PER_SECOND * 60);
 export const assumedSpeed = () => `${ASSUMED_MBPS} Mb/s`;

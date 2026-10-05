@@ -3,7 +3,9 @@
 // reader or to the line.
 //
 // - Reading the card: bytes read off the card's files as fast as the browser
-//   will hand them over, sent nowhere.
+//   will hand them over, sent nowhere -- as many files at once as the upload
+//   sends, each streamed, because that is how the upload reads them (tus hands
+//   each chunk to the browser as a Blob slice).
 // - Sending to Birdsense: bytes posted to /api/v1/speedtest, which the server
 //   reads and throws away -- the same route through the ingress a card takes,
 //   with no storage or database behind it. Once with one request at a time,
@@ -16,17 +18,17 @@
 import * as api from "./api.js";
 import { PARALLEL_FILES } from "./upload-flow.js";
 
-/** How much of a file is read, or sent, at a time. */
+/** How much of a file is sent at a time. */
 const PIECE_BYTES = 8_000_000;
 const READ = { ms: 8_000, bytes: 1_000_000_000 };
 const SEND = { ms: 7_000, bytes: 500_000_000 };
 
 /**
- * Where the last read test stopped, by file and offset, so a second test reads
- * on from there: what it already read is in the computer's file cache, and
- * reading it again would measure memory rather than the card.
+ * How far each file has been read, so a second test reads on from there: what
+ * it already read is in the computer's file cache, and reading it again would
+ * measure memory rather than the card.
  */
-let readFrom = { file: null, offset: 0 };
+const readTo = new WeakMap();
 
 /**
  * Run all three, in turn. `files` are the card's ({file, bytes}).
@@ -44,32 +46,38 @@ export async function run(files, { signal, onProgress = () => {} } = {}) {
   return { read, single, parallel, streams: PARALLEL_FILES };
 }
 
-/** Read the card's files in the order they are sent, a piece at a time, and drop what was read. */
+/**
+ * Read the card's files the way the upload does: PARALLEL_FILES of them at
+ * once, each streamed by the browser, and drop what was read. One file read a
+ * piece at a time, waiting on each before asking for the next, leaves the
+ * reader idle between pieces -- it measured half what the upload then reached.
+ */
 async function readCard(files, signal, onProgress) {
-  const list = files.filter((f) => f.file && f.bytes > 0);
-  if (!list.length) return null;
-  let i = Math.max(0, list.findIndex((f) => f.file === readFrom.file));
-  let offset = list[i].file === readFrom.file ? readFrom.offset : 0;
+  const list = files.filter((f) => f.file && f.bytes > 0).map((f) => f.file);
+  // Only what no test has read yet: past that, it's the cache again.
+  const queue = list.filter((file) => (readTo.get(file) ?? 0) < file.size);
   const start = performance.now();
   let bytes = 0;
-  // Once round the card at most: past that, it's the cache again.
-  for (let seen = 0; seen < list.length; ) {
-    signal?.throwIfAborted();
-    const { file } = list[i];
-    if (offset >= file.size) {
-      i = (i + 1) % list.length;
-      offset = 0;
-      seen += 1;
-      continue;
+  const spent = () => performance.now() - start >= READ.ms || bytes >= READ.bytes;
+  const lane = async () => {
+    while (!spent() && queue.length) {
+      const file = queue.shift();
+      const reader = file.slice(readTo.get(file) ?? 0).stream().getReader();
+      try {
+        while (!spent()) {
+          signal?.throwIfAborted();
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          readTo.set(file, (readTo.get(file) ?? 0) + value.byteLength);
+          onProgress(rate(bytes, performance.now() - start));
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
     }
-    const piece = await file.slice(offset, offset + PIECE_BYTES).arrayBuffer();
-    offset += piece.byteLength;
-    bytes += piece.byteLength;
-    readFrom = { file, offset };
-    const ms = performance.now() - start;
-    onProgress(rate(bytes, ms));
-    if (ms >= READ.ms || bytes >= READ.bytes) break;
-  }
+  };
+  await Promise.all(Array.from({ length: PARALLEL_FILES }, lane));
   return rate(bytes, performance.now() - start);
 }
 

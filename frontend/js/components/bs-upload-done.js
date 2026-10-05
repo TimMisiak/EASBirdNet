@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, typography } from "../shared-styles.js";
-import { byteSize, count, longDate, nightRange } from "../format.js";
+import { byteSize, count, duration, longDate, megabits, nightRange } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 
@@ -59,6 +59,7 @@ class UploadDone extends BaseElement {
       return;
     }
     const nights = upload.nights ?? [];
+    const speed = flow.averageBytesPerSecond();
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -105,6 +106,7 @@ class UploadDone extends BaseElement {
           ${entry("Recorder", `${upload.stationId} · ${upload.stationName}`)}
           ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
           ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
+          ${speed ? entry("Upload speed", `${megabits(speed)} average · ${duration(flow.minutesElapsed())}`) : ""}
           ${entry("Card pulled", longDate(upload.pulledOn))}
           ${upload.notes ? entry("Your note", `“${upload.notes}”`) : ""}
         </dl>
