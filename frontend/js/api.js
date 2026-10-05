@@ -85,6 +85,20 @@ export const createUpload = (body) => request("POST", "/uploads", body);
 export const reportProgress = (reference, body) =>
   request("POST", `/uploads/${encodeURIComponent(reference)}/progress`, body);
 
+/**
+ * Send a body for the server to read and throw away (the upload speed test,
+ * speed-test.js). Not JSON going out, so it doesn't go through request; a 401
+ * still signs the app out the same way.
+ */
+export async function sendSpeedTest(body, signal) {
+  const res = await fetch(`${BASE}/speedtest`, { method: "POST", body, signal });
+  if (!res.ok) {
+    if (res.status === 401) signedOut();
+    const payload = await res.json().catch(() => null);
+    throw new ApiError(res.status, payload?.error ?? `POST /speedtest failed (${res.status})`);
+  }
+}
+
 // Detections are anyone's to hear and review once signed in, on every card.
 
 /**

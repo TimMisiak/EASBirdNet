@@ -171,6 +171,7 @@ GET    POST /api/v1/uploads               your cards; register a card and its fi
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
+POST   /api/v1/speedtest                  a body read and thrown away: the upload speed test
 GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one model's: ?model=perch)
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file

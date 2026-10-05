@@ -1,20 +1,29 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { byteSize, count, duration, longDate, nightRange, shortDate } from "../format.js";
+import { byteSize, count, duration, longDate, megabits, nightRange, shortDate } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 import * as session from "../session.js";
+import * as speedTest from "../speed-test.js";
 
 /**
  * <bs-upload-check> -- step 2: what we found on the card, before anything is
  * sent. The point of the screen is the night-by-night table: a volunteer knows
  * whether a short night means flat batteries, and we don't, so the odd nights
  * are highlighted and left for them to explain in the notes.
+ *
+ * "Test connection" is here, with the card chosen and nothing yet sent, so a
+ * volunteer whose uploads crawl can see whether it's the card reader or the
+ * line (speed-test.js).
  */
 class UploadCheck extends BaseElement {
   static styles = [typography, controls, panels, tables];
 
   #unsubscribe = null;
+  /** The connection test: {running, phase, live, result, error}, or null before one has run. */
+  #test = null;
+  #abort = null;
+  #lastDraw = 0;
 
   connectedCallback() {
     super.connectedCallback();
@@ -29,19 +38,47 @@ class UploadCheck extends BaseElement {
 
   disconnectedCallback() {
     this.#unsubscribe?.();
+    this.#abort?.abort();
   }
 
   get actions() {
     return {
       back: () => navigate("/app/upload"),
+      test: () => this.#runTest(),
       start: () => {
+        // The test would be sending beside the card.
+        this.#abort?.abort();
         flow.start();
         navigate("/app/upload/progress");
       },
     };
   }
 
+  async #runTest() {
+    if (this.#test?.running) return;
+    this.#abort = new AbortController();
+    this.#test = { running: true, phase: "read", live: null, result: {}, error: null };
+    this.render();
+    try {
+      const result = await speedTest.run(flow.get().files, {
+        signal: this.#abort.signal,
+        onProgress: ({ phase, bytesPerSecond }) => {
+          if (phase !== this.#test.phase) this.#test.result[this.#test.phase] = this.#test.live;
+          Object.assign(this.#test, { phase, live: bytesPerSecond });
+          // Reading a fast card reports many times a second; the panel doesn't need to.
+          if (performance.now() - this.#lastDraw > 250) this.render();
+        },
+      });
+      Object.assign(this.#test, { running: false, phase: null, result });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      Object.assign(this.#test, { running: false, phase: null, error });
+    }
+    if (this.isConnected) this.render();
+  }
+
   render() {
+    this.#lastDraw = performance.now();
     const { upload, card } = flow.get();
     if (!upload) {
       this.shadowRoot.innerHTML = `<p class="lede">Reading the card…</p>`;
@@ -86,6 +123,10 @@ class UploadCheck extends BaseElement {
         .summary { display: flex; flex-direction: column; gap: var(--bs-space-4); }
         .summary .panel > div { font-size: 0.875rem; line-height: 1.5; color: var(--bs-text-soft); }
         .summary .stack { gap: 0.5625rem; }
+        .speeds { display: grid; grid-template-columns: 1fr auto; gap: 0.375rem var(--bs-space-4); margin: var(--bs-space-3) 0; font-size: 0.875rem; }
+        .speeds dt { color: var(--bs-text-soft); }
+        .speeds dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+        .test p { margin-bottom: var(--bs-space-3); }
         @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (max-width: 860px) { .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); } }
       </style>
@@ -170,6 +211,7 @@ class UploadCheck extends BaseElement {
                  </div>`
               : ""
           }
+          ${this.#testPanel()}
         </div>
       </div>
 
@@ -182,6 +224,55 @@ class UploadCheck extends BaseElement {
       </div>
     `;
   }
+
+  #testPanel() {
+    const t = this.#test;
+    const value = (key) => {
+      if (t?.phase === key) return t.live ? `${megabits(t.live)}…` : "measuring…";
+      const bps = t?.result?.[key];
+      return bps ? megabits(bps) : "—";
+    };
+    return `
+      <div class="panel test">
+        <h3>Test the connection</h3>
+        <p>
+          Uploads slower than your internet plan? This reads from the card, then sends test
+          data to us, for about 25 seconds. Nothing is saved.
+        </p>
+        ${
+          t
+            ? `<dl class="speeds" aria-live="polite">
+                 ${PHASES.map(([key, label]) => `<dt>${label}${key === "parallel" && t.result?.streams ? ` (${t.result.streams})` : ""}</dt><dd>${value(key)}</dd>`).join("")}
+               </dl>`
+            : ""
+        }
+        ${t && !t.running && !t.error ? `<p>${escapeHTML(verdict(t.result))}</p>` : ""}
+        ${t?.error ? `<p class="error">${escapeHTML(t.error.message)}</p>` : ""}
+        <button class="btn btn--quiet btn--small" data-action="test" ${t?.running ? "disabled" : ""}>
+          ${t?.running ? "Testing…" : t ? "Test again" : "Test connection"}
+        </button>
+      </div>
+    `;
+  }
+}
+
+const PHASES = [
+  ["read", "Reading the card"],
+  ["single", "Sending, one file at a time"],
+  ["parallel", "Sending, several files at once"],
+];
+
+/** Which part an upload is waiting on, from a finished test. */
+function verdict({ read, parallel }) {
+  if (!read || !parallel) return "";
+  // Past this, a card is a couple of hours however it splits, and neither is worth chasing.
+  if (Math.min(read, parallel) * 8 >= 200e6) {
+    return `Both look fast: a card should upload at around ${megabits(Math.min(read, parallel))}.`;
+  }
+  if (read < parallel * 0.8) {
+    return `The card reader is the slower part: the upload can't go faster than ${megabits(read)}, however fast the connection. A USB 3 reader, plugged straight into the computer, usually reads faster.`;
+  }
+  return `The connection is the slower part: the card reads faster than it can be sent. A wired connection is usually faster than Wi-Fi.`;
 }
 
 const REASONS = {

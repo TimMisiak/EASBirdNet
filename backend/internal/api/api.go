@@ -108,6 +108,8 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/uploads", h.requireSession(h.createUpload))
 	mux.HandleFunc("GET /api/v1/uploads/{reference}", h.requireSession(h.getUpload))
 	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", h.requireSession(h.recordProgress))
+	// The upload speed test: a body read and thrown away (speedtest.go).
+	mux.HandleFunc("POST /api/v1/speedtest", h.requireSession(h.speedTest))
 	// Detections are anyone's to hear and review once signed in, on every card.
 	mux.HandleFunc("GET /api/v1/detections", h.requireSession(h.listDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}", h.requireSession(h.listCardDetections))

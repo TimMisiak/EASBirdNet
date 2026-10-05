@@ -49,7 +49,7 @@ const NOTIFY_EVERY_MS = 150;
  * 6 reached 460 (PARALLEL-UPLOADS.md, *Measured on Azure*). A browser can set
  * its own for measuring (localStorage "birdsense.upload.parallelFiles", 1-8).
  */
-const PARALLEL_FILES = parallelOverride() ?? 6;
+export const PARALLEL_FILES = parallelOverride() ?? 6;
 
 function parallelOverride() {
   try {
