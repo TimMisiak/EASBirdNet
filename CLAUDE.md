@@ -453,6 +453,10 @@ fingerprint names the encoder (`ENCODER`), the FLAC's length and a hash of its
 bytes, so a FLAC that came out different starts a new upload. Progress is
 shown in the card's bytes, whatever goes on the line; the speed is the line's,
 and the time left scales what remains by the share the files so far went as.
+Beside the line's speed is the encoders', in the card's bytes and counting
+only the time they are working (`flac.js`'s meter), and the done page gives
+the share the card went as and that speed's average -- so a fast line the
+encoders can't keep up with shows as one, at about their speed times the share.
 Two costs: the WAV's own metadata chunks -- GUANO, a recorder's tags, gain and
 battery -- aren't carried into the FLAC (libflac.js can't write the blocks
 that would hold them), which is fine while nothing reads them and originals

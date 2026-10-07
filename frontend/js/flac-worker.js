@@ -53,7 +53,11 @@ self.onmessage = async ({ data }) => {
   const { id } = data;
   try {
     await ready;
-    const result = await encode(data, () => cancelled.has(id));
+    const result = await encode(
+      data,
+      () => cancelled.has(id),
+      (read) => self.postMessage({ id, read }),
+    );
     self.postMessage({ id, ok: true, ...result });
   } catch (error) {
     self.postMessage({ id, ok: false, error: error instanceof Cancelled ? "cancelled" : String(error?.message ?? error) });
@@ -65,9 +69,11 @@ self.onmessage = async ({ data }) => {
 /**
  * One file: {file, format (wav.js), spool: {tab, name} or null}. Answers the
  * FLAC as a File (OPFS) or Blob (memory), its length, and a hash of its bytes
- * for the upload's fingerprint.
+ * for the upload's fingerprint. `onRead` hears how many of the WAV's sample
+ * bytes have been read and encoded so far, after each read: what flac.js
+ * measures the encoder's speed by.
  */
-async function encode({ file, format, spool }, isCancelled) {
+async function encode({ file, format, spool }, isCancelled, onRead = () => {}) {
   if (!littleEndian) throw new Error("this machine's byte order isn't a WAV's");
   const { channels, sampleRate, bitsPerSample, dataStart, samples } = format;
   const sink = await openSink(spool);
@@ -108,6 +114,7 @@ async function encode({ file, format, spool }, isCancelled) {
         if (!Flac.FLAC__stream_encoder_process_interleaved(encoder, values, n)) {
           throw sinkError ?? new Error(`encoding failed (state ${Flac.FLAC__stream_encoder_get_state(encoder)})`);
         }
+        onRead((done + n) * frameBytes);
       }
       if (!Flac.FLAC__stream_encoder_finish(encoder)) {
         throw sinkError ?? new Error(`finishing the encode failed (state ${Flac.FLAC__stream_encoder_get_state(encoder)})`);

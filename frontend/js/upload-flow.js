@@ -17,7 +17,7 @@
 // while the ones before it are on the line -- and a file the encoder can't
 // take, or whose FLAC the server turns down, goes as it is on the card. A
 // file's progress is shown against its size on the card, whatever goes on the
-// line; the speed is the line's.
+// line; the speed is the line's, and the encoders' speed is shown beside it.
 
 import * as api from "./api.js";
 import * as flac from "./flac.js";
@@ -105,6 +105,12 @@ const encodes = new Map();
 /** The card's bytes of the files started in this tab, and the bytes they went as. */
 let startedCardBytes = 0;
 let startedLineBytes = 0;
+/** The files this tab sent to the end: how many, how many as FLAC, their bytes on the card and as sent. */
+let finished = noneFinished();
+
+function noneFinished() {
+  return { files: 0, flac: 0, cardBytes: 0, lineBytes: 0 };
+}
 
 function initial() {
   return {
@@ -288,6 +294,8 @@ export function reset() {
   sentThisTab = 0;
   startedCardBytes = 0;
   startedLineBytes = 0;
+  finished = noneFinished();
+  flac.resetMeter();
   sessionStorage.removeItem(KEY);
   state = initial();
   for (const listener of listeners) listener(state);
@@ -383,6 +391,10 @@ async function sendOne(tus, reference, entry) {
   try {
     await send(tus, reference, entry);
     Object.assign(entry, { state: "done", sent: entry.bytes });
+    finished.files += 1;
+    if (entry.encoding === "flac") finished.flac += 1;
+    finished.cardBytes += entry.bytes;
+    finished.lineBytes += entry.lineBytes;
   } catch (error) {
     if (error instanceof Stopped) return;
     const status = error?.originalResponse?.getStatus?.();
@@ -639,6 +651,24 @@ export function averageBytesPerSecond() {
   const ms = minutesElapsed() * 60_000;
   return ms >= 2_000 && sentThisTab > 0 ? (sentThisTab * 1_000) / ms : null;
 }
+/**
+ * Bytes of WAV compressed per second over the last few seconds of encoding
+ * (flac.js), or null until there's enough to say. In the card's bytes, where
+ * the line's speed is in the bytes that go: on a line the encoders can't keep
+ * up with, the line runs at about this times the share the card goes as.
+ */
+export const compressionBytesPerSecond = () => flac.bytesPerSecond();
+
+/**
+ * What the files this tab sent went as -- {files, flac, cardBytes, lineBytes},
+ * where `flac` counts the files that went as FLAC -- and `bytesPerSecond`, the
+ * average speed the card was compressed at, or null if too little was. Null
+ * if this tab sent no file to the end.
+ */
+export function compression() {
+  return finished.files ? { ...finished, bytesPerSecond: flac.averageBytesPerSecond() } : null;
+}
+
 /** Minutes to send this many bytes at the assumed speed, before anything has been sent. */
 export const totalMinutes = (bytes) => bytes / (ASSUMED_BYTES_PER_SECOND * 60);
 export const assumedSpeed = () => `${ASSUMED_MBPS} Mb/s`;

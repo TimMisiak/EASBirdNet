@@ -112,6 +112,7 @@ class UploadProgress extends BaseElement {
     const sent = flow.totals();
     const done = percent(sent.bytes, upload.totalBytes);
     const speed = flow.bytesPerSecond();
+    const compressing = flow.compressionBytesPerSecond();
 
     this.#out("pct", `${Math.floor(done)}%`);
     this.#out(
@@ -124,6 +125,17 @@ class UploadProgress extends BaseElement {
     this.#out("bytes", byteSize(sent.bytes));
     this.#out("elapsed", duration(flow.minutesElapsed()));
     this.#out("speed", status !== "uploading" ? "—" : speed ? megabits(speed) : "measuring…");
+    // A card the encoder can't take is never measured, so "measuring…" only while a file is compressing.
+    this.#out(
+      "compress",
+      status !== "uploading"
+        ? "—"
+        : compressing
+          ? megabits(compressing)
+          : files.some((f) => f.compressing)
+            ? "measuring…"
+            : "—",
+    );
     this.#out("pause", status === "paused" ? "Resume upload" : "Pause upload");
 
     const bar = this.$('bs-progress-bar[data-out="bar"]');
@@ -162,6 +174,7 @@ class UploadProgress extends BaseElement {
             ${live("bytes", `of ${byteSize(upload.totalBytes)}`)}
             ${live("elapsed", "elapsed")}
             ${live("speed", "current speed")}
+            ${live("compress", "compression speed")}
           </div>
 
           ${FILES_HEAD}
@@ -307,7 +320,8 @@ const STYLE = `
     .pct { font-family: var(--bs-font-display); font-size: 2.875rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .remain { font-size: 0.875rem; color: var(--bs-text-body); }
 
-    .live { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--bs-space-4); margin: 1.375rem 0 1.875rem; }
+    /* Five across where they fit, wrapping on a phone. */
+    .live { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); gap: var(--bs-space-4); margin: 1.375rem 0 1.875rem; }
     .live-value { font-family: var(--bs-font-mono); font-size: 1.125rem; }
     .live-label { font-size: 0.75rem; color: var(--bs-text-muted); margin-top: 0.25rem; }
 
@@ -330,7 +344,6 @@ const STYLE = `
 
     @media (max-width: 860px) {
       .columns { grid-template-columns: minmax(0, 1fr); gap: var(--bs-space-6); }
-      .live { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 `;

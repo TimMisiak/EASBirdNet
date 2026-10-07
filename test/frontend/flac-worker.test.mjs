@@ -11,9 +11,13 @@ import vm from "node:vm";
 
 const frontend = new URL("../../frontend/", import.meta.url);
 
-/** The worker in a global of its own, and a function that sends it a job and waits for the answer. */
+/**
+ * The worker in a global of its own, and a function that sends it a job and
+ * waits for the answer, with the progress it reported on the way as `reads`.
+ */
 function startWorker() {
   const answers = new Map();
+  const reads = new Map();
   // Not this realm's WebAssembly: libflac.js recognizes the error a wasm table
   // throws with `instanceof TypeError`, and that only holds when the table and
   // TypeError come from the same realm -- the context's own.
@@ -27,7 +31,10 @@ function startWorker() {
       new Response(readFileSync(new URL(`.${new URL(url, "http://localhost/").pathname}`, frontend)), {
         headers: { "Content-Type": "application/wasm" },
       }),
-    postMessage: (data) => answers.get(data.id)?.(data),
+    postMessage: (data) => {
+      if (data.read !== undefined) reads.get(data.id).push(data.read);
+      else answers.get(data.id)?.({ ...data, reads: reads.get(data.id) });
+    },
     addEventListener: () => {},
   };
   global.self = global;
@@ -37,6 +44,7 @@ function startWorker() {
     new Promise((resolve) => {
       const id = Math.random();
       answers.set(id, resolve);
+      reads.set(id, []);
       context.onmessage({ data: { id, ...job } });
     });
   return { send, context };
@@ -110,6 +118,15 @@ for (const shape of [
     assert.match(got.hash, /^[0-9a-f]{8}$/);
   });
 }
+
+test("reports how much of the WAV it has read, as it goes", async () => {
+  const { send } = startWorker();
+  // 6 MB of samples: two reads.
+  const { file, format, data } = wav({ channels: 1, bits: 16, frames: 3_000_000 });
+  const got = await send({ file, format, spool: null });
+  assert.ok(got.ok, got.error);
+  assert.deepEqual(got.reads, [4 << 20, data.length]);
+});
 
 test("the same samples encode to the same bytes, which a resumed upload relies on", async () => {
   const { file, format } = wav({ channels: 1, bits: 16, frames: 200_000 });

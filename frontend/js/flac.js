@@ -24,6 +24,18 @@ export const ENCODER = "libflacjs-5.6.0/5";
 const WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 /** Where encoded files wait for their upload, in the origin private file system. */
 const SPOOL = "birdsense-flac";
+/** The speed is averaged over this much encoding time, as the line's is over that much time (upload-flow.js). */
+const SPEED_WINDOW_MS = 15_000;
+
+/**
+ * How fast the card is being compressed: bytes of WAV read and encoded,
+ * against the time at least one worker was at it. Time the workers spend
+ * waiting for the line doesn't count against them, and workers running at
+ * once add up, so on a line the encoders can't keep up with this is the speed
+ * they cap the upload at, in the card's bytes. A file's check, after its
+ * encode, is time with no bytes, so it counts in the speed too.
+ */
+const meter = { bytes: 0, busyMs: 0, since: 0, samples: [] };
 
 const workers = [];
 const queue = [];
@@ -94,6 +106,7 @@ function pump() {
     const pending = queue.shift();
     worker.busy = pending;
     pending.worker = worker;
+    clock();
     worker.instance.postMessage({ id: pending.id, ...pending.job });
   }
 }
@@ -104,7 +117,9 @@ function startWorker() {
     if (data.fatal) return giveUp(data.fatal);
     const pending = worker.busy;
     if (!pending || pending.id !== data.id) return;
+    if (data.read !== undefined) return measure(pending, data.read);
     worker.busy = null;
+    clock();
     pending.done();
     if (data.ok && pending.aborted) unspool(pending.job);
     if (data.ok) pending.resolve(data);
@@ -134,10 +149,51 @@ function giveUp(why) {
     w.busy?.done();
     w.busy?.reject(failed);
   }
+  clock();
   for (const pending of queue.splice(0)) {
     pending.done();
     pending.reject(failed);
   }
+}
+
+/** Run the meter's clock while any worker has a job, and stop it while none does. */
+function clock() {
+  const now = performance.now();
+  if (meter.since) meter.busyMs += now - meter.since;
+  meter.since = workers.some((w) => w.busy) ? now : 0;
+}
+
+const busyMs = () => meter.busyMs + (meter.since ? performance.now() - meter.since : 0);
+
+/** A job has read and encoded `read` bytes of its WAV so far. */
+function measure(pending, read) {
+  meter.bytes += read - (pending.read ?? 0);
+  pending.read = read;
+  const t = busyMs();
+  meter.samples.push([t, meter.bytes]);
+  while (meter.samples.length > 2 && t - meter.samples[1][0] >= SPEED_WINDOW_MS) meter.samples.shift();
+}
+
+/** Bytes of WAV compressed per second, over the last few seconds of encoding, or null until there's enough to say. */
+export function bytesPerSecond() {
+  if (meter.samples.length < 2) return null;
+  const [t0, b0] = meter.samples[0];
+  const [t1, b1] = meter.samples[meter.samples.length - 1];
+  return t1 - t0 >= 2_000 ? ((b1 - b0) * 1_000) / (t1 - t0) : null;
+}
+
+/** Bytes of WAV compressed per second over all the encoding since resetMeter, or null if there was too little. */
+export function averageBytesPerSecond() {
+  const ms = busyMs();
+  return ms >= 2_000 && meter.bytes > 0 ? (meter.bytes * 1_000) / ms : null;
+}
+
+/** Start measuring afresh, for another card. */
+export function resetMeter() {
+  meter.bytes = 0;
+  meter.busyMs = 0;
+  meter.since = meter.since && performance.now();
+  meter.samples = [];
 }
 
 /** Remove the encoded copy of a job nobody wants any more. */

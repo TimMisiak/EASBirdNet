@@ -60,6 +60,7 @@ class UploadDone extends BaseElement {
     }
     const nights = upload.nights ?? [];
     const speed = flow.averageBytesPerSecond();
+    const packed = flow.compression();
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -107,6 +108,7 @@ class UploadDone extends BaseElement {
           ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
           ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
           ${speed ? entry("Upload speed", `${megabits(speed)} average · ${duration(flow.minutesElapsed())}`) : ""}
+          ${packed ? entry("Compression", compression(packed)) : ""}
           ${entry("Card pulled", longDate(upload.pulledOn))}
           ${upload.notes ? entry("Your note", `“${upload.notes}”`) : ""}
         </dl>
@@ -152,6 +154,18 @@ function lookupFailed(error) {
       <button class="btn btn--quiet" data-action="home">My uploads</button>
     </div>
   `;
+}
+
+/**
+ * "54% of the size · 410 Mb/s average": what the files this tab sent went as,
+ * against their size on the card, and how fast the card was compressed.
+ */
+function compression({ files, flac, cardBytes, lineBytes, bytesPerSecond }) {
+  if (!flac) return "None: sent as recorded";
+  const parts = [`${Math.round((lineBytes / cardBytes) * 100)}% of the size`];
+  if (flac < files) parts.push(`${count(flac)} of ${count(files)} files as FLAC`);
+  if (bytesPerSecond) parts.push(`${megabits(bytesPerSecond)} average`);
+  return parts.join(" · ");
 }
 
 function entry(label, value) {
