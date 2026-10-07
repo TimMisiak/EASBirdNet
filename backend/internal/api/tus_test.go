@@ -138,16 +138,22 @@ func (s *tusServer) do(method, url string, body []byte, header map[string]string
 // create starts an upload of one file on a card, as tus-js-client does.
 func (s *tusServer) create(cookie *http.Cookie, reference, path string, size int64) tusReply {
 	s.t.Helper()
-	meta := []string{}
-	if reference != "" {
-		meta = append(meta, "reference "+base64.StdEncoding.EncodeToString([]byte(reference)))
-	}
-	if path != "" {
-		meta = append(meta, "path "+base64.StdEncoding.EncodeToString([]byte(path)))
+	return s.createWith(cookie, map[string]string{metaReference: reference, metaPath: path}, size)
+}
+
+// createWith starts an upload with the metadata given, leaving out the keys
+// whose value is empty.
+func (s *tusServer) createWith(cookie *http.Cookie, meta map[string]string, size int64) tusReply {
+	s.t.Helper()
+	pairs := []string{}
+	for k, v := range meta {
+		if v != "" {
+			pairs = append(pairs, k+" "+base64.StdEncoding.EncodeToString([]byte(v)))
+		}
 	}
 	return s.do(http.MethodPost, tusPath, nil, map[string]string{
 		"Upload-Length":   strconv.FormatInt(size, 10),
-		"Upload-Metadata": strings.Join(meta, ","),
+		"Upload-Metadata": strings.Join(pairs, ","),
 	}, cookie)
 }
 
@@ -162,18 +168,35 @@ func (s *tusServer) patch(cookie *http.Cookie, location string, offset int, chun
 // send uploads data in chunks of at most chunk bytes and returns the upload URL.
 func (s *tusServer) send(cookie *http.Cookie, reference, path string, data []byte, chunk int) string {
 	s.t.Helper()
-	created := s.create(cookie, reference, path, int64(len(data)))
+	return s.sendWith(cookie, map[string]string{metaReference: reference, metaPath: path}, data, chunk)
+}
+
+// sendWith is send with the metadata given (createWith).
+func (s *tusServer) sendWith(cookie *http.Cookie, meta map[string]string, data []byte, chunk int) string {
+	s.t.Helper()
+	created := s.createWith(cookie, meta, int64(len(data)))
 	if created.status != http.StatusCreated {
-		s.t.Fatalf("create %s = %d (%s)", path, created.status, created.body)
+		s.t.Fatalf("create %s = %d (%s)", meta[metaPath], created.status, created.body)
 	}
 	location := created.header.Get("Location")
-	for offset := 0; offset < len(data); offset += chunk {
-		end := min(offset+chunk, len(data))
-		if r := s.patch(cookie, location, offset, data[offset:end]); r.status != http.StatusNoContent {
-			s.t.Fatalf("patch %s at %d = %d (%s)", path, offset, r.status, r.body)
-		}
+	if r := s.sendTo(cookie, location, data, chunk); r.status != http.StatusNoContent {
+		s.t.Fatalf("patch %s = %d (%s)", meta[metaPath], r.status, r.body)
 	}
 	return location
+}
+
+// sendTo sends data to an upload that has been created, in chunks of at most
+// chunk bytes, and returns the first reply that isn't a 204 or else the last.
+func (s *tusServer) sendTo(cookie *http.Cookie, location string, data []byte, chunk int) tusReply {
+	s.t.Helper()
+	var r tusReply
+	for offset := 0; offset < len(data); offset += chunk {
+		end := min(offset+chunk, len(data))
+		if r = s.patch(cookie, location, offset, data[offset:end]); r.status != http.StatusNoContent {
+			return r
+		}
+	}
+	return r
 }
 
 func (s *tusServer) register(cookie *http.Cookie, body string) registeredBody {
@@ -289,7 +312,7 @@ func TestTusRefusesFilesThatArentOnTheCard(t *testing.T) {
 		{"someone else's card", marcus, ref, reg.Files[1].Path, 100, http.StatusNotFound},
 		{"a card that's been received", marcus, "OWL-20260821-SR03", "DATA/a.WAV", 100, http.StatusUnprocessableEntity},
 		// A length no card list could carry: tusd refuses it before a byte lands.
-		{"longer than a file can be", jane, ref, reg.Files[1].Path, maxFileBytes + 1, http.StatusRequestEntityTooLarge},
+		{"longer than a file can be", jane, ref, reg.Files[1].Path, maxFLACBytes(maxFileBytes) + 1, http.StatusRequestEntityTooLarge},
 	}
 	for _, tc := range cases {
 		if r := s.create(tc.cookie, tc.ref, tc.path, tc.size); r.status != tc.want {

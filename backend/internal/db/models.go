@@ -229,6 +229,10 @@ type Claim struct {
 // no longer part of the card, so nothing counts or analyzes it.
 const AudioDetailNotOnCard = "not on the card when it was registered again"
 
+// EncodingFLAC is the Encoding of a file the browser read as a WAV and sent
+// as FLAC: the same samples, about half the bytes.
+const EncodingFLAC = "flac"
+
 // AudioFile is one recording from a card.
 type AudioFile struct {
 	ID         string `json:"id"`
@@ -244,7 +248,13 @@ type AudioFile struct {
 	SampleRate  int        `json:"sampleRate,omitempty"`
 	// BlobName is where the audio lives in file storage (storage.Name of its
 	// tus upload), set when the last byte lands.
-	BlobName     string     `json:"blobName,omitempty"`
+	BlobName string `json:"blobName,omitempty"`
+	// Encoding is how the browser sent the file, set with BlobName: empty
+	// for the file byte for byte as it was on the card, or EncodingFLAC for
+	// a WAV it encoded as FLAC first. SizeBytes is still the card's length;
+	// StoredBytes is the length of what is in storage.
+	Encoding     string     `json:"encoding,omitempty"`
+	StoredBytes  int64      `json:"storedBytes,omitempty"`
 	Status       string     `json:"status"`
 	StatusDetail string     `json:"statusDetail,omitempty"`
 	UploadedAt   *time.Time `json:"uploadedAt,omitempty"`

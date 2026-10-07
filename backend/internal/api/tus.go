@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,12 +29,15 @@ import (
 // (afterFileUpload).
 const tusPath = "/api/v1/tus/"
 
-// Upload-Metadata keys. The browser sends reference and path; the server
-// replaces the metadata when it creates the upload, so the finish hook only
-// ever reads values the server wrote.
+// Upload-Metadata keys. The browser sends reference and path, and for a WAV
+// it sends as FLAC, encoding and the number of samples the WAV holds; the
+// server replaces the metadata when it creates the upload, so the finish hook
+// only ever reads values the server wrote.
 const (
 	metaReference = "reference"
 	metaPath      = "path"
+	metaEncoding  = "encoding"
+	metaSamples   = "samples"
 	metaAudioFile = "audioFileId"
 	metaUserID    = "userId"
 )
@@ -47,10 +52,11 @@ func (h *handlers) tusEndpoint() http.Handler {
 		StoreComposer: composer,
 		BasePath:      tusPath,
 		// No file on a card's list is anywhere near this -- cardList holds the
-		// list to the same bound -- so it is the backstop for a length that was
-		// never on one: a POST claiming more is refused before a byte is taken,
-		// and a PATCH stops reading a body at it.
-		MaxSize: maxFileBytes,
+		// list to the same bound, and a FLAC of the longest file it allows
+		// to this one -- so it is the backstop for a length that was never on
+		// one: a POST claiming more is refused before a byte is taken, and a
+		// PATCH stops reading a body at it.
+		MaxSize: maxFLACBytes(maxFileBytes),
 		// Browsers only send files here: nothing downloads them, deletes them,
 		// or stitches partial uploads together.
 		DisableDownload:      true,
@@ -148,6 +154,11 @@ func idElement(s string) bool {
 // size it was listed, and not already in. The server then names the upload
 // "{card}/{random}", so a card's audio shares one prefix in storage.
 //
+// A WAV may come as FLAC instead (encoding "flac"), when the browser has
+// encoded it first. Its length is then the FLAC's, which is only known once
+// the encode is done, so it is held to what a FLAC of the listed WAV could be;
+// what it must hold is checked when it is finished (checkFLAC).
+//
 // Rejections are 4xx other than 409 and 423, which tus clients don't retry.
 func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPResponse, tushandler.FileInfoChanges, error) {
 	var (
@@ -160,6 +171,10 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 	if ref == "" || cardPath == "" || info.SizeIsDeferred {
 		return resp, none, tushandler.NewError("ERR_FILE_UNNAMED",
 			"an upload needs the card reference, the file's path on the card and its length", http.StatusBadRequest)
+	}
+	encoding, samples, problem := sentAs(info.MetaData, cardPath)
+	if problem != "" {
+		return resp, none, tushandler.NewError("ERR_FILE_ENCODING", problem, http.StatusBadRequest)
 	}
 
 	card, err := h.store.GetUpload(ctx, ref)
@@ -180,21 +195,44 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 			"that file isn't on the card's list; choose the card again", http.StatusBadRequest)
 	case err != nil:
 		return resp, none, err
-	case file.SizeBytes != info.Size:
+	case encoding == "" && file.SizeBytes != info.Size:
 		return resp, none, tushandler.NewError("ERR_FILE_SIZE",
 			"that file isn't the size it was when the card was read; choose the card again", http.StatusBadRequest)
+	case encoding == db.EncodingFLAC && (info.Size < flacHeaderBytes || info.Size > maxFLACBytes(file.SizeBytes) || samples > file.SizeBytes):
+		return resp, none, tushandler.NewError("ERR_FILE_SIZE",
+			"that FLAC can't have been made from the file the card was read with; choose the card again", http.StatusBadRequest)
 	case received(file):
 		return resp, none, tushandler.NewError("ERR_FILE_RECEIVED",
 			"that file is already in", http.StatusUnprocessableEntity)
 	}
 
-	return resp, tushandler.FileInfoChanges{
-		ID: storagePrefix(ref) + "/" + rand.Text(),
-		MetaData: tushandler.MetaData{
-			metaReference: ref, metaPath: cardPath,
-			metaAudioFile: file.ID, metaUserID: me.ID,
-		},
-	}, nil
+	meta := tushandler.MetaData{
+		metaReference: ref, metaPath: cardPath,
+		metaAudioFile: file.ID, metaUserID: me.ID,
+	}
+	if encoding != "" {
+		meta[metaEncoding], meta[metaSamples] = encoding, strconv.FormatInt(samples, 10)
+	}
+	return resp, tushandler.FileInfoChanges{ID: storagePrefix(ref) + "/" + rand.Text(), MetaData: meta}, nil
+}
+
+// sentAs reads how an upload says its file was sent: as it was on the card
+// (no encoding), or as FLAC with the number of samples per channel the WAV
+// holds, which checkFLAC holds the finished FLAC to. Only a WAV is encoded:
+// anything else on a card is sent as it is.
+func sentAs(meta tushandler.MetaData, cardPath string) (encoding string, samples int64, problem string) {
+	switch encoding = meta[metaEncoding]; encoding {
+	case "":
+		return "", 0, ""
+	case db.EncodingFLAC:
+		n, err := strconv.ParseInt(meta[metaSamples], 10, 64)
+		if !strings.EqualFold(path.Ext(cardPath), ".wav") || err != nil || n <= 0 {
+			return "", 0, "only a WAV is sent as FLAC, with the number of samples it holds"
+		}
+		return encoding, n, ""
+	default:
+		return "", 0, fmt.Sprintf("files aren't taken as %q", encoding)
+	}
 }
 
 // afterFileUpload records a file whose last byte has landed. It runs before
@@ -212,9 +250,19 @@ func (h *handlers) beforeFileUpload(hook tushandler.HookEvent) (tushandler.HTTPR
 // the card is; if it was marked but the card wasn't counted up, the card is a
 // file short until it is registered again, which recounts it -- and the
 // browser registers a card again when every file went but it isn't in.
+//
+// A file sent as FLAC is checked first, and refused if it isn't whole
+// (checkFLAC): this is the last point before the volunteer is told the file
+// is safe to erase.
 func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPResponse, error) {
 	ctx, info := hook.Context, hook.Upload
 	ref, fileID := info.MetaData[metaReference], info.MetaData[metaAudioFile]
+	encoding := info.MetaData[metaEncoding]
+	if encoding == db.EncodingFLAC {
+		if err := h.checkFLAC(ctx, info); err != nil {
+			return tushandler.HTTPResponse{}, err
+		}
+	}
 	start, now := time.Now(), h.stamp()
 	var card db.Upload
 	var counted bool
@@ -229,6 +277,7 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 		}
 		f.Status, f.StatusDetail = db.AudioUploaded, ""
 		f.UploadedAt, f.BlobName = &now, storage.Name(info.ID)
+		f.Encoding, f.StoredBytes = encoding, info.Size
 		counted, size = true, f.SizeBytes
 		return nil
 	})
@@ -244,6 +293,45 @@ func (h *handlers) afterFileUpload(hook tushandler.HookEvent) (tushandler.HTTPRe
 			"filesUploaded", card.FilesUploaded, "fileCount", card.FileCount, "dur", time.Since(start))
 	}
 	return tushandler.HTTPResponse{}, err
+}
+
+// checkFLAC reads the header of a finished upload the browser sent as FLAC,
+// and refuses one that doesn't hold exactly the samples the browser read off
+// the card's WAV: an encode cut short. It also refuses one whose header
+// doesn't say how many it holds at all -- what a stream encoder writes unless
+// the browser patches the header when the encode ends -- because libsndfile,
+// which BirdNET and clip.py read audio with, takes that for a file of endless
+// length and can't read it.
+//
+// A refused upload's bytes are deleted with the refusal: no file document
+// names them, so nothing else would.
+func (h *handlers) checkFLAC(ctx context.Context, info tushandler.FileInfo) error {
+	name := storage.Name(info.ID)
+	r, err := h.files.Open(ctx, name)
+	if err != nil {
+		return err
+	}
+	si, err := readStreamInfo(r)
+	r.Close()
+	want, _ := strconv.ParseInt(info.MetaData[metaSamples], 10, 64)
+	var problem string
+	switch {
+	case errors.Is(err, errNotFLAC):
+		problem = "that file isn't a FLAC"
+	case err != nil:
+		return err
+	case si.TotalSamples == 0:
+		problem = "that FLAC doesn't say how long it is"
+	case si.TotalSamples != want:
+		problem = fmt.Sprintf("that FLAC holds %d samples, not the %d on the card", si.TotalSamples, want)
+	default:
+		return nil
+	}
+	if err := h.files.Delete(ctx, name); err != nil {
+		h.log.Error("deleting a refused FLAC", "upload", info.ID, "err", err)
+	}
+	h.log.Warn("refused a FLAC", "card", info.MetaData[metaReference], "upload", info.ID, "path", info.MetaData[metaPath], "why", problem)
+	return tushandler.NewError("ERR_FILE_FLAC", problem, http.StatusBadRequest)
 }
 
 // received reports whether a file's audio is in storage: uploaded, and maybe

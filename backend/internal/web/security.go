@@ -15,7 +15,8 @@ import (
 // The third-party origins the frontend reaches. Each one is a decision
 // recorded in CLAUDE.md (*No build step*): Leaflet and tus-js-client from
 // jsDelivr, the webfonts from Google, map tiles from OpenStreetMap. Adding an
-// origin here is adding a dependency -- put it in that list too.
+// origin here is adding a dependency -- put it in that list too. (libflac.js,
+// the FLAC encoder, is vendored under frontend/vendor/, so it is 'self'.)
 const (
 	jsDelivr  = "https://cdn.jsdelivr.net"
 	fontsCSS  = "https://fonts.googleapis.com"
@@ -77,8 +78,10 @@ func SecurityHeaders(next http.Handler, opts SecurityOptions) http.Handler {
 //     (shared-styles.js) aren't subject to this; component <style> blocks are.
 //   - script-src names one hash, index.html's import map, and nothing else
 //     inline. Scripts are the directive worth keeping strict.
+//     'wasm-unsafe-eval' lets WebAssembly be compiled -- the FLAC encoder, in
+//     a worker that gets this same policy -- and allows no JavaScript eval.
 func contentSecurityPolicy(importMap string) string {
-	script := "script-src 'self' " + jsDelivr
+	script := "script-src 'self' " + jsDelivr + " 'wasm-unsafe-eval'"
 	if importMap != "" {
 		script += " '" + importMap + "'"
 	}
@@ -94,9 +97,11 @@ func contentSecurityPolicy(importMap string) string {
 		"img-src 'self' data: " + jsDelivr + " " + osmTiles,
 		// A clip is fetched, then played from a blob URL (bs-spectrogram).
 		"media-src 'self' blob:",
+		// 'self' is also where the FLAC encoder's worker fetches its .wasm.
 		"connect-src 'self'",
 		"object-src 'none'",
-		"worker-src 'none'",
+		// The FLAC encoder runs in a worker of our own (js/flac-worker.js).
+		"worker-src 'self'",
 		"base-uri 'self'",
 		"form-action 'self'",
 		"frame-ancestors 'none'",

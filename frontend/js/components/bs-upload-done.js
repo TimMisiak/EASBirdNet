@@ -96,7 +96,7 @@ class UploadDone extends BaseElement {
       <h1>The card is safe to erase.</h1>
       <p class="intro">
         Everything from ${escapeHTML(upload.stationName)} is in our storage, every file
-        complete at the length the card reported. Erase it and put it back in the
+        checked complete against what the card reported. Erase it and put it back in the
         rotation. We've emailed you a copy of this summary.
       </p>
 

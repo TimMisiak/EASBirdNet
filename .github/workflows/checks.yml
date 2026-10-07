@@ -50,3 +50,19 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  # The frontend's tests: plain node --test, no packages, so nothing to
+  # install (CLAUDE.md, *No build step*). They cover what can go wrong
+  # without anyone seeing it -- reading a WAV's header, and the FLAC the
+  # browser sends in its place -- with the vendored libflac.js itself.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: node --test
+        run: node --test 'test/frontend/*.test.mjs'

@@ -11,8 +11,16 @@
 // and counts it once its last byte lands, so the card's counts always come
 // from the server. This module tracks the files in this tab and the ones that
 // are moving.
+//
+// A WAV goes as FLAC when it can (flac.js): the same samples in about half the
+// bytes. It is encoded just before its turn -- the next file's encode runs
+// while the ones before it are on the line -- and a file the encoder can't
+// take, or whose FLAC the server turns down, goes as it is on the card. A
+// file's progress is shown against its size on the card, whatever goes on the
+// line; the speed is the line's.
 
 import * as api from "./api.js";
+import * as flac from "./flac.js";
 import { isUnfinished } from "./upload-status.js";
 
 /**
@@ -89,6 +97,14 @@ let elapsedMs = 0;
 let runningSince = 0;
 let lastNotify = 0;
 let tusClient = null;
+/**
+ * Each file's encode, started when the file is next to go and let go of once
+ * it is sent or the run stops (prepare, release).
+ */
+const encodes = new Map();
+/** The card's bytes of the files started in this tab, and the bytes they went as. */
+let startedCardBytes = 0;
+let startedLineBytes = 0;
 
 function initial() {
   return {
@@ -108,9 +124,11 @@ function initial() {
     upload: null,
     /**
      * The card's files in the order they are sent, once the card has been read
-     * in this tab: {path, bytes, night, file, state, sent, error}. state is
-     * "waiting", "sending", "done", "already" (the server had it before this
-     * tab sent anything) or "failed".
+     * in this tab: {path, bytes, night, file, state, sent, error, compressing}.
+     * state is "waiting", "sending", "done", "already" (the server had it
+     * before this tab sent anything) or "failed"; compressing is true while a
+     * file that is sending is still being encoded. sent is in the card's
+     * bytes, however the file goes.
      */
     files: [],
     error: null,
@@ -268,6 +286,8 @@ export function reset() {
   stop();
   elapsedMs = 0;
   sentThisTab = 0;
+  startedCardBytes = 0;
+  startedLineBytes = 0;
   sessionStorage.removeItem(KEY);
   state = initial();
   for (const listener of listeners) listener(state);
@@ -347,7 +367,10 @@ function sendWaiting(tus, reference) {
         if (!entry) break;
         sendOne(tus, reference, entry).then(fill, (error) => settle(reject, error));
       }
-      if (!inFlight.size && !nextWaiting()) settle(resolve, true);
+      // The next file's encode, so the line isn't kept waiting for it.
+      const ahead = nextWaiting();
+      if (ahead) prepare(ahead);
+      if (!inFlight.size && !ahead) settle(resolve, true);
     };
     run.fill = fill;
     sending = run;
@@ -371,6 +394,11 @@ async function sendOne(tus, reference, entry) {
     const refusal = serverReason(error);
     if (refusal?.code === "ERR_FILE_RECEIVED") {
       Object.assign(entry, { state: "already", sent: entry.bytes });
+    } else if (entry.encoding === "flac") {
+      // The server turned the FLAC down (checkFLAC): the card's own file goes instead.
+      console.warn(`Sending ${entry.path} as it is on the card: ${refusal?.message ?? error.message}`);
+      Object.assign(entry, { asIs: true, state: "waiting", sent: 0 });
+      if (running(reference)) return sendOne(tus, reference, entry);
     } else {
       Object.assign(entry, { state: "failed", sent: 0, error: refusal?.message ?? error.message });
     }
@@ -391,48 +419,94 @@ function send(tus, reference, entry) {
   let handle = null;
   return new Promise((resolve, reject) => {
     let stopped = false;
+    let upload = null;
     // The first progress report of a resumed file is what had already landed.
     let first = true;
-    const upload = new tus.Upload(entry.file, {
-      endpoint: ENDPOINT,
-      chunkSize: CHUNK_BYTES,
-      retryDelays: RETRY_DELAYS,
-      metadata: { reference, path: entry.path },
-      // Resume by card and path: a recorder names its files the same way on
-      // every card, so the file name alone would find another card's upload.
-      fingerprint: async () => `birdsense:${reference}:${entry.path}:${entry.bytes}:${entry.file.lastModified}`,
-      removeFingerprintOnSuccess: true,
-      onProgress: (sent) => {
-        progress(entry, sent, first);
-        first = false;
-      },
-      onSuccess: resolve,
-      onError: reject,
-    });
     handle = {
       stop() {
         stopped = true;
-        upload.abort();
-        entry.state = "waiting";
+        upload?.abort();
+        Object.assign(entry, { state: "waiting", compressing: false });
         reject(new Stopped());
       },
     };
     inFlight.add(handle);
-    entry.state = "sending";
+    Object.assign(entry, { state: "sending", compressing: !entry.asIs, onLine: 0 });
     set({ files: state.files });
-    upload.findPreviousUploads().then((previous) => {
-      if (stopped) return;
-      if (previous.length) upload.resumeFromPreviousUpload(previous[0]);
-      upload.start();
-    }, reject);
+    prepare(entry)
+      .then((encoded) => {
+        if (stopped) return;
+        const body = encoded?.blob ?? entry.file;
+        Object.assign(entry, { compressing: false, encoding: encoded ? "flac" : "", lineBytes: body.size });
+        startedCardBytes += entry.bytes;
+        startedLineBytes += body.size;
+        set({ files: state.files });
+        upload = new tus.Upload(body, {
+          endpoint: ENDPOINT,
+          chunkSize: CHUNK_BYTES,
+          retryDelays: RETRY_DELAYS,
+          metadata: encoded
+            ? { reference, path: entry.path, encoding: "flac", samples: String(encoded.samples) }
+            : { reference, path: entry.path },
+          // Resume by card and path: a recorder names its files the same way on
+          // every card, so the file name alone would find another card's upload.
+          // A FLAC only resumes over bytes the same encoder made the same way.
+          fingerprint: async () =>
+            `birdsense:${reference}:${entry.path}:${entry.bytes}:${entry.file.lastModified}` +
+            (encoded ? `:${flac.ENCODER}:${encoded.bytes}:${encoded.hash}` : ""),
+          removeFingerprintOnSuccess: true,
+          onProgress: (sent) => {
+            progress(entry, sent, first);
+            first = false;
+          },
+          onSuccess: resolve,
+          onError: reject,
+        });
+        return upload.findPreviousUploads().then((previous) => {
+          if (stopped) return;
+          if (previous.length) upload.resumeFromPreviousUpload(previous[0]);
+          upload.start();
+        });
+      })
+      .catch(reject);
   }).finally(() => {
     inFlight.delete(handle);
+    release(entry);
   });
 }
 
-function progress(entry, sent, first) {
-  if (!first && sent > entry.sent) sentThisTab += sent - entry.sent;
-  entry.sent = sent;
+/**
+ * A file's body, encoded as FLAC (flac.js), or null to send it as it is.
+ * Asked for when the file is sending and again when it is next in line, and
+ * started only once.
+ */
+function prepare(entry) {
+  let job = encodes.get(entry);
+  if (!job) {
+    const controller = new AbortController();
+    const result = entry.asIs ? Promise.resolve(null) : flac.encode(entry.file, controller.signal);
+    // A file stopped before its turn came has nobody waiting on its encode.
+    result.catch(() => {});
+    job = { controller, result };
+    encodes.set(entry, job);
+  }
+  return job.result;
+}
+
+/** Stop a file's encode, or remove the FLAC it made. */
+function release(entry) {
+  const job = encodes.get(entry);
+  if (!job) return;
+  encodes.delete(entry);
+  job.controller.abort();
+  job.result.then((encoded) => encoded?.discard(), () => {});
+}
+
+/** What has landed of a file's upload, `onLine` of its `lineBytes`. */
+function progress(entry, onLine, first) {
+  if (!first && onLine > entry.onLine) sentThisTab += onLine - entry.onLine;
+  entry.onLine = onLine;
+  entry.sent = entry.lineBytes ? Math.round((onLine / entry.lineBytes) * entry.bytes) : 0;
   const now = Date.now();
   samples.push([now, sentThisTab]);
   while (samples.length > 2 && now - samples[1][0] >= SPEED_WINDOW_MS) samples.shift();
@@ -461,6 +535,7 @@ function interrupt(reference, error) {
 function stop() {
   sending = null;
   for (const upload of [...inFlight]) upload.stop();
+  for (const entry of [...encodes.keys()]) release(entry);
   if (runningSince) elapsedMs += Date.now() - runningSince;
   runningSince = 0;
   samples = [];
@@ -543,9 +618,16 @@ export function bytesPerSecond() {
   return t1 - t0 >= 2_000 ? ((b1 - b0) * 1_000) / (t1 - t0) : null;
 }
 
-/** Minutes of transfer left, at the measured speed once there is one. */
-export const minutesRemaining = () =>
-  ((state.upload?.totalBytes ?? 0) - totals().bytes) / ((bytesPerSecond() ?? ASSUMED_BYTES_PER_SECOND) * 60);
+/**
+ * Minutes of transfer left, at the measured speed once there is one, for the
+ * bytes the rest of the card will go as: the share of the card's bytes the
+ * files started so far went as, about a half once WAVs go as FLAC.
+ */
+export function minutesRemaining() {
+  const share = startedCardBytes ? startedLineBytes / startedCardBytes : 1;
+  const left = ((state.upload?.totalBytes ?? 0) - totals().bytes) * share;
+  return left / ((bytesPerSecond() ?? ASSUMED_BYTES_PER_SECOND) * 60);
+}
 export const minutesElapsed = () => (elapsedMs + (runningSince ? Date.now() - runningSince : 0)) / 60_000;
 /**
  * Bytes per second over the whole time spent sending, pauses left out, or null

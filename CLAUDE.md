@@ -15,7 +15,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 
 ```
 /
-├── .github/workflows/  CI: gofmt, vet, tests and govulncheck
+├── .github/workflows/  CI: gofmt, vet, tests and govulncheck; the frontend's node --test
 ├── backend/            Go module: API + static file server
 │   ├── cmd/server/     main(): config, routing, graceful shutdown; `worker`: an analysis job replica
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
@@ -37,7 +37,8 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
 │                       (requirements-perch.txt adds TensorFlow, for Perch), which the
 │                       Dockerfile's `birdnet` stage installs: the runtime `analyzer` builds on
-├── test/               Audio fixtures (a known Osprey clip)
+├── test/               Audio fixtures (a known Osprey clip); frontend/: the
+│                       frontend's tests, plain `node --test` with no packages
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
@@ -46,6 +47,8 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │   │                   eastsideaudubon.org -- replace, don't edit)
 │   │                   barred-owl.jpg: the home and sign-in banner, CC BY
 │   │                   4.0 -- its credit on both pages must stay with it
+│   ├── vendor/          Third-party files served as they were published, with their
+│   │                    hashes in THIRD_PARTY_NOTICES.md: libflac.js (FLAC encoder)
 │   └── js/
 │       ├── main.js         Imports every component so they self-register
 │       ├── api.js          fetch wrapper for /api/v1
@@ -54,6 +57,9 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── shared-styles.js Constructable stylesheets for repeated primitives
 │       ├── format.js        Dates, sizes, counts, durations
 │       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
+│       ├── flac.js          Sends a card's WAVs as FLAC: decides, and runs the workers
+│       ├── flac-worker.js   A classic worker: libflac.js encodes, then checks, one WAV
+│       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
 │       ├── upload-status.js Card status -> chip colour and wording
@@ -111,6 +117,11 @@ breaks in a container with no outbound network:
   the attribution kept visible and light traffic; move to a paid provider or
   our own tiles before putting a map on the public landing page.
 Self-host any of these if that trade stops being worth it.
+One is self-hosted already: libflac.js, the FLAC encoder (*The browser sends
+WAVs as FLAC*), is in `frontend/vendor/` as the package published it. It runs
+in a worker, and nothing a worker loads can carry an integrity hash, so the
+repo pins it instead; its hashes are in THIRD_PARTY_NOTICES.md. Vendoring a
+published file is not a build step -- it is served byte for byte like the rest.
 
 **Response headers are set once, for everything.** `web.SecurityHeaders` wraps
 the whole mux -- API and frontend alike -- with a content security policy and
@@ -119,7 +130,7 @@ COOP, CORP, `Permissions-Policy`). HSTS follows the same "not in dev" rule the
 session cookie's `Secure` flag does. The policy is `default-src 'none'` plus
 one directive per thing the frontend actually loads, so the third-party origins
 listed under *No build step* are named in one place in Go and a new one is a
-one-line diff that says what capability it bought. Two allowances are
+one-line diff that says what capability it bought. Three allowances are
 deliberate:
 - `style-src` keeps `'unsafe-inline'`. Every component writes a `<style>` into
   its own shadow root and several set a `style` attribute, and with no build
@@ -135,6 +146,11 @@ deliberate:
   external import map would avoid the whole problem, but no browser supports
   one. `internal/web`'s test checks the shipped `index.html` has nothing else
   inline.
+- `script-src` has `'wasm-unsafe-eval'`, which lets WebAssembly be compiled
+  and allows no JavaScript `eval`: the FLAC encoder is WebAssembly, in a
+  worker of our own (`worker-src 'self'`) that gets this same policy from its
+  own response. Without it the worker fails to load and every file goes as it
+  is on the card, which works but takes twice as long.
 *Revisit when:* the frontend gains a build step -- then the component styles
 can be hashed or nonced too -- or something has to embed a Birdsense page or
 clip cross-origin, which `frame-ancestors` and CORP currently refuse.
@@ -342,7 +358,12 @@ paused file resumes from the last chunk the server has. Birdsense's rules live
 in tusd's hooks (`internal/api/tus.go`). A file can only be created if it is on
 the list its card was registered with, at that size, and not already in. When
 its last byte lands, its `audioFiles` document is marked `uploaded` and the card
-counted up, before the browser is told it succeeded. Files go in 50 MB chunks,
+counted up, before the browser is told it succeeded. A WAV usually comes as
+FLAC instead -- the same samples in about half the bytes (*The browser sends
+WAVs as FLAC*): the upload says `encoding: flac`, the document records it
+(`encoding`, `storedBytes`), and analysis names its copy `.flac`. The card's
+sizes and counts stay the card's own either way, so a card can mix the two.
+Files go in 50 MB chunks,
 so each request fits the Container Apps ingress timeout, and several files at
 once -- one per 20 Mbit/s the browser measures the line at, up to six: tusd's
 Azure store takes a chunk's whole body before staging it to Blob Storage (~2 s
@@ -371,17 +392,77 @@ would have to read all ~128 GB a second time, and the server would have to carry
 a running hash across a file's PATCHes and read the blob back to resume one.
 What length doesn't catch is a byte flipped in place by a failing reader or bad
 memory, which BirdNET then reports as a file it can't read.
+A WAV sent as FLAC has a length only the finished encode knows, so the card's
+length can't be what it is held to. Its samples are: the browser says how many
+the WAV's `data` chunk holds, and the finish hook reads the FLAC's STREAMINFO
+and refuses it -- deleting what landed, leaving the file `pending` -- unless it
+holds exactly that many (`checkFLAC`). That catches an encode cut short, and a
+STREAMINFO with no total at all, which a stream encoder leaves unless the
+browser patches the header once the encode ends, and which libsndfile reads as
+a file of endless length that neither BirdNET nor `clip.py` can open. Its
+length is only bounded, by what a FLAC of the listed WAV could be
+(`maxFLACBytes`). What the samples are is the browser's to check, and it does,
+before a byte is sent: it decodes its own FLAC against the MD5 libFLAC took of
+the samples it was given (*The browser sends WAVs as FLAC*).
 A length is the volunteer's word, so it is bounded: `cardList` refuses a file
-over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is that
-same per-file bound for a length that was never on a card's list. The numbers
-leave room for a larger card than anyone runs; what they are there for is that
+over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is a
+FLAC of that same per-file bound, for a length that was never on a card's
+list. The numbers leave room for a larger card than anyone runs; what they are there for is that
 a card is registered before a byte is sent, and every declared size is summed
 into an `int64` -- unbounded, a crafted list overflows those sums and registers
 a card whose `totalBytes` is negative.
 *Revisit when:* a real card yields files BirdNET can't read and we can't tell a
 corrupt transfer from a corrupt card. Then hash in the browser and verify in
 tusd's finish hook, before the file counts as received -- not at analysis time,
-which is a day after the card was erased.
+which is a day after the card was erased. A file sent as FLAC already carries
+the browser's half: STREAMINFO holds an MD5 of the samples, which the finish
+hook would have to decode the whole file to check.
+
+**The browser sends WAVs as FLAC.** FLAC keeps every sample of a WAV in
+about half the bytes (51-62% measured on test audio; a real card will say),
+which halves the time a volunteer's uplink spends on a card and the storage
+its originals take for their month. So
+`js/flac.js` encodes each WAV just before its turn -- and the next file's
+while the ones before it are on the line -- in up to four workers
+(`js/flac-worker.js`), running libFLAC 1.3.4 as WebAssembly (libflac.js,
+vendored: *No build step*). What it does with each file:
+- Reads the WAV's header (`js/wav.js`) and encodes only what FLAC holds
+  exactly: 16- or 24-bit integer PCM. Float, 8- or 32-bit, RF64, and a
+  recording whose header was never finished go as they are, as does every
+  file when the encoder can't load.
+- Encodes at libFLAC's default level 5 (level 8 measured 0.3% smaller at
+  2.6 times the time), into the origin private file system -- a directory
+  per tab, held by a Web Lock so a tab clears out only what closed tabs left
+  -- or into memory where there is none (a private window).
+- Patches STREAMINFO with what libFLAC only knows at the end. Gotcha: a stream
+  encoder can't seek back, so without the patch the header says the file has
+  no length, and libsndfile reads that as endless (the server refuses it).
+- Decodes the whole FLAC again with libFLAC's MD5 check, against the MD5 the
+  encoder took of the samples it was given, and sends the WAV instead if it
+  doesn't match. That covers the encoder, this code's handling of its output,
+  and the disk in between -- what libFLAC's own verify mode doesn't, which is
+  why that is off. It doesn't cover misreading the WAV, which encodes the
+  wrong samples faithfully: that is what `test/frontend/` is for.
+- Sends it with `encoding: flac` and the WAV's sample count, which the server
+  holds the FLAC to (*A file's length is the whole integrity check*). A FLAC
+  the server refuses is sent again as the WAV.
+A resumed upload carries on from the bytes the server already has, so it
+relies on the same samples encoding to the same bytes -- true of libFLAC, and
+checked in `test/frontend/` -- and doesn't take it on trust: the upload's
+fingerprint names the encoder (`ENCODER`), the FLAC's length and a hash of its
+bytes, so a FLAC that came out different starts a new upload. Progress is
+shown in the card's bytes, whatever goes on the line; the speed is the line's,
+and the time left scales what remains by the share the files so far went as.
+Two costs: the WAV's own metadata chunks -- GUANO, a recorder's tags, gain and
+battery -- aren't carried into the FLAC (libflac.js can't write the blocks
+that would hold them), which is fine while nothing reads them and originals
+go a month on; and libFLAC 1.3.4 predates a fix to its encoder
+(CVE-2020-22219), which here runs in WebAssembly's sandbox on the volunteer's
+own file.
+*Revisit when:* libflac.js moves to libFLAC 1.4 or later (its issue #51), or a
+recorder's metadata has to be kept. The check step's time estimate still
+assumes card bytes go on the line as they are; once real cards say what share
+FLAC comes to, it can use that.
 
 **Terraform owns what is deployed.** `infra/` is the whole Azure stack and
 `scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
@@ -805,6 +886,7 @@ Checks before committing:
 
 ```sh
 cd backend && gofmt -l . && go vet ./... && go test ./... && govulncheck ./...
+node --test 'test/frontend/*.test.mjs'    # from the repo root; Node 22 or later
 ```
 
 `govulncheck` needs installing once
@@ -849,6 +931,9 @@ untested -- it needs a client id, a secret, and someone to try it.
 The Cosmos DB backend and the Blob Storage backend have both run in Azure
 against a real card: documents, uploads and analysis all work there. The
 JSON-file backend and its tests still define the behaviour Cosmos must match.
+The browser sends a card's WAVs as FLAC where it can, checked against the
+samples before they go; the server checks each one again when its last byte
+lands, and analyzes it as FLAC.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
 and the analysis queue -- the job's workers in Azure, the server's own
 process in development -- runs BirdNET over it, writing

@@ -317,7 +317,7 @@ func TestACardIsAnalyzedFileByFile(t *testing.T) {
 	}
 	for _, c := range f.bird.calls {
 		if filepath.Ext(c.path) != strings.ToLower(path.Ext(c.audio)) {
-			t.Errorf("%s was analyzed as %s; the extension picks the decoder", c.audio, c.path)
+			t.Errorf("%s was analyzed as %s; birdnet takes a file by its extension", c.audio, c.path)
 		}
 		if l := c.opts.Location; l == nil || l.Latitude != 47.66021 || l.Week != 34 {
 			t.Errorf("%s location = %+v, want the recorder in week 34", c.audio, l)
@@ -975,5 +975,31 @@ func TestStoringFailingIsRetriedThenTheFileFails(t *testing.T) {
 				t.Errorf("card = %s, %d failed; want needs_attention", u.Status, u.FilesFailed)
 			}
 		})
+	}
+}
+
+// A WAV the browser sent as FLAC is stored as FLAC, so that is what BirdNET is
+// given; its time still comes from its name on the card.
+func TestAWAVSentAsFLACIsAnalyzedAsFLAC(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile)
+	if _, err := f.store.UpdateAudioFile(t.Context(), ref, db.AudioFileID(ref, owlFile), func(a *db.AudioFile) error {
+		a.Encoding = db.EncodingFLAC
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.bird.calls) != 1 || filepath.Ext(f.bird.calls[0].path) != ".flac" {
+		t.Fatalf("BirdNET was given %+v, want one .flac", f.bird.calls)
+	}
+	owl := f.file(owlFile)
+	start := time.Date(2026, time.September, 13, 6, 0, 0, 0, time.UTC)
+	if owl.Status != db.AudioAnalyzed || owl.DetectionCount != 2 || owl.RecordedAt == nil || !owl.RecordedAt.Equal(start) {
+		t.Errorf("file sent as FLAC = %+v; want analyzed with 2 detections, recorded at %v", owl, start)
 	}
 }

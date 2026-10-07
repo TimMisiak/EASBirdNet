@@ -127,10 +127,14 @@ type Analysis struct {
 // AudioFile is one file on a card as a coordinator sees it: where it is in
 // being sent and analyzed.
 type AudioFile struct {
-	ID           string     `json:"id"`
-	Path         string     `json:"path"`
-	Night        string     `json:"night"` // YYYY-MM-DD
-	Bytes        int64      `json:"bytes"`
+	ID    string `json:"id"`
+	Path  string `json:"path"`
+	Night string `json:"night"` // YYYY-MM-DD
+	Bytes int64  `json:"bytes"`
+	// Encoding is how the browser sent it: "" as it was on the card, or
+	// db.EncodingFLAC. StoredBytes is what that came to in storage.
+	Encoding     string     `json:"encoding,omitempty"`
+	StoredBytes  int64      `json:"storedBytes,omitempty"`
 	Status       string     `json:"status"` // db.AudioPending, db.AudioUploaded, db.AudioAnalyzing, ...
 	StatusDetail string     `json:"statusDetail,omitempty"`
 	RecordedAt   *time.Time `json:"recordedAt,omitempty"`
@@ -285,6 +289,7 @@ func analysisOf(a *db.Analysis) *Analysis {
 func audioFileOf(f db.AudioFile) AudioFile {
 	out := AudioFile{
 		ID: f.ID, Path: f.Path, Night: f.Night, Bytes: f.SizeBytes,
+		Encoding: f.Encoding, StoredBytes: f.StoredBytes,
 		Status: f.Status, StatusDetail: f.StatusDetail,
 		RecordedAt: f.RecordedAt, UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
 		AudioDeletedAt: f.AudioDeletedAt, DetectionCount: f.DetectionCount,

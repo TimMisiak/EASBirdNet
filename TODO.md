@@ -446,10 +446,11 @@ being rediscovered.
   `gofmt`, `go vet`, `go test` and `govulncheck`). Nothing runs
   `terraform fmt -check` or `terraform validate` on `infra/`, so formatting
   drift and a syntax error both wait until someone deploys.
-- **No frontend tests at all** — 7,120 lines of JavaScript, zero. Mostly fine
-  (UI regressions show themselves), but there is no harness at all should a
-  piece of frontend logic ever warrant one — `upload-flow.js`'s state machine
-  and `format.js` are the candidates.
+- **Most of the frontend has no tests.** There is a harness now --
+  `test/frontend/`, plain `node --test`, run in CI -- but it covers only the
+  FLAC path (`wav.js`, `flac-worker.js`). Mostly fine (UI regressions show
+  themselves); `upload-flow.js`'s state machine and `format.js` are the next
+  candidates.
 - **`${HOST_PORT}` has no default** (`docker-compose.yml:9`). Unset, compose
   publishes on a random host port, contradicting README.md and CLAUDE.md's
   `http://localhost:8080`. Use `${HOST_PORT:-8080}`.

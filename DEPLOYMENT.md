@@ -130,9 +130,10 @@ reading or writing documents. The app needs no control-plane role at all.
 
 ### 7. Storage account — `azurerm_storage_account`
 
-Holds the audio. At ~5.5 GB per recorder-day this is where the money goes,
-which is why originals are kept for only a month (see *Audio retention* and
-*Cost*).
+Holds the audio. At ~5.5 GB of WAV per recorder-day -- about half that once
+it arrives as FLAC (CLAUDE.md, *The browser sends WAVs as FLAC*) -- this is
+where the money goes, which is why originals are kept for only a month (see
+*Audio retention* and *Cost*).
 
 | Setting | Value | Why |
 |---------|-------|-----|
@@ -1035,7 +1036,7 @@ before relying on any of this.
 
 | Item | Volume | Cost driver |
 |------|--------|-------------|
-| Audio in blob storage | 5 recorders × ~5.5 GB a day, held a month ≈ **830 GB**, flat | Originals are deleted a month after a card is received (*Audio retention*), so this doesn't grow: tens of dollars a month of hot LRS. Without the policy it would be ~10 TB by the end of a year, several hundred dollars a month. |
+| Audio in blob storage | 5 recorders × ~5.5 GB a day, held a month ≈ **830 GB**, flat | Originals are deleted a month after a card is received (*Audio retention*), so this doesn't grow: tens of dollars a month of hot LRS. Without the policy it would be ~10 TB by the end of a year, several hundred dollars a month. The browser now sends WAVs as FLAC, which on test audio came to 51-62% of these figures; `storedBytes` on a real card's files will say what it is. |
 | Clips in blob storage | ~0.7 GB per recorder-day ≈ **1.3 TB a year**, and kept for good | The only line that only ever grows. It passes the entire originals footprint after about eight months, and adds roughly $25 a month to the bill for every further year the program runs. What halves it is a higher detection threshold or a lossy clip format; see TODO.md 3.4. |
 | Cosmos DB, serverless | ~175k audio-file docs; **~7.7M detection docs a year, ~4.6 GB**, kept as long as their clips | Cheap per unit -- a few dollars a year in request units, plus storage per GB-month. The document count matters more for the detections list than for the bill: see `db.MaxDetectionScan`. |
 | Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |

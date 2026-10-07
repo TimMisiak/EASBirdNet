@@ -13,7 +13,7 @@ import "./bs-progress-bar.js";
  * bars that aren't moving alone. While the volunteer hasn't scrolled away, the
  * list follows the file being sent.
  *
- * Property: files -- [{path, bytes, state, sent, error}], see upload-flow.js.
+ * Property: files -- [{path, bytes, state, sent, error, compressing}], see upload-flow.js.
  */
 const LABELS = {
   waiting: "Waiting",
@@ -72,7 +72,7 @@ class UploadFileList extends HTMLElement {
     const whole = file.state === "done" || file.state === "already";
     const value = String(whole ? 100 : pct);
     let text = LABELS[file.state] ?? "";
-    if (file.state === "sending") text = `${pct}%`;
+    if (file.state === "sending") text = file.compressing ? "Compressing" : `${pct}%`;
     else if (file.state === "waiting" && file.sent) text = `${pct}% sent`;
 
     // Only touch what changed: a bar re-renders on every attribute write.

@@ -1098,8 +1098,9 @@ func (q *Queue) taskRecord(card db.Upload, f db.AudioFile, wait float64, size in
 var errSkip = errors.New("analysis: file is no longer queued")
 
 // fetch copies a file's audio to a temporary file BirdNET can read, and
-// returns its path and a func that removes it. The copy keeps the extension
-// the file had on the card, because BirdNET picks a decoder by it.
+// returns its path and a func that removes it. The copy is named for what is
+// stored (storedExt), because birdnet won't take a file whose extension it
+// doesn't list as audio.
 func (q *Queue) fetch(ctx context.Context, f db.AudioFile) (string, func(), error) {
 	noop := func() {}
 	if f.BlobName == "" {
@@ -1116,7 +1117,7 @@ func (q *Queue) fetch(ctx context.Context, f db.AudioFile) (string, func(), erro
 		return "", cleanup, err
 	}
 	defer src.Close()
-	local := filepath.Join(dir, f.ID+strings.ToLower(path.Ext(f.Path)))
+	local := filepath.Join(dir, f.ID+storedExt(f))
 	dst, err := os.Create(local)
 	if err != nil {
 		return "", cleanup, err
@@ -1126,6 +1127,16 @@ func (q *Queue) fetch(ctx context.Context, f db.AudioFile) (string, func(), erro
 		return "", cleanup, err
 	}
 	return local, cleanup, dst.Close()
+}
+
+// storedExt is the extension of the audio stored for a file: the one it had
+// on the card, unless the browser sent it in another encoding. A WAV sent as
+// FLAC is a FLAC, whatever its path on the card says.
+func storedExt(f db.AudioFile) string {
+	if f.Encoding == db.EncodingFLAC {
+		return ".flac"
+	}
+	return strings.ToLower(path.Ext(f.Path))
 }
 
 // putFile copies a file from local disk into file storage.
