@@ -8,11 +8,12 @@
 // For each job it reads the WAV's samples off the card a few MB at a time,
 // encodes them, and writes the FLAC to the origin private file system (OPFS)
 // -- or to memory where there is none -- then patches the header with what
-// libFLAC only knows at the end, and decodes the whole file again with
-// libFLAC's MD5 check before handing it back. That check is of the bytes that
-// will be uploaded, against the MD5 the encoder took of the samples it was
-// given: it covers the encoder, this file's handling of its output, and the
-// storage in between.
+// libFLAC only knows at the end. When flac.js asks, which is until a file in
+// the tab has passed, it then decodes the whole file again with libFLAC's MD5
+// check before handing it back. That check is of the bytes that will be
+// uploaded, against the MD5 the encoder took of the samples it was given: it
+// covers the encoder, this file's handling of its output, and the storage in
+// between, which go wrong for every file alike if they go wrong at all.
 
 "use strict";
 
@@ -67,18 +68,22 @@ self.onmessage = async ({ data }) => {
 };
 
 /**
- * One file: {file, format (wav.js), spool: {tab, name} or null}. Answers the
- * FLAC as a File (OPFS) or Blob (memory), its length, and a hash of its bytes
- * for the upload's fingerprint. `onRead` hears how many of the WAV's sample
- * bytes have been read and encoded so far, after each read: what flac.js
- * measures the encoder's speed by.
+ * One file: {file, format (wav.js), spool: {tab, name} or null, check}. Answers
+ * the FLAC as a File (OPFS) or Blob (memory), its length, and a hash of its
+ * bytes for the upload's fingerprint. `check` decodes it again before it is
+ * handed back. `onRead` hears how many of the WAV's sample bytes have been
+ * read and encoded so far, after each read: what flac.js measures the
+ * encoder's speed by.
  */
-async function encode({ file, format, spool }, isCancelled, onRead = () => {}) {
+async function encode({ file, format, spool, check: checking }, isCancelled, onRead = () => {}) {
   if (!littleEndian) throw new Error("this machine's byte order isn't a WAV's");
   const { channels, sampleRate, bitsPerSample, dataStart, samples } = format;
   const sink = await openSink(spool);
   try {
     const head = new Uint8Array(HEADER_BYTES);
+    // FNV-1a over the bytes as they are written, the header last: it is only
+    // final once the encode is.
+    let hash = 0x811c9dc5;
     let metadata = null;
     let sinkError = null;
     const encoder = Flac.create_libflac_encoder(sampleRate, channels, bitsPerSample, LEVEL, samples, false, 0);
@@ -89,7 +94,9 @@ async function encode({ file, format, spool }, isCancelled, onRead = () => {}) {
         (data) => {
           // Thrown here, libFLAC stops with a fatal error.
           try {
-            if (sink.size < HEADER_BYTES) head.set(data.subarray(0, HEADER_BYTES - sink.size), sink.size);
+            const toHead = HEADER_BYTES - sink.size;
+            if (toHead > 0) head.set(data.subarray(0, toHead), sink.size);
+            hash = fnv(hash, toHead > 0 ? data.subarray(toHead) : data);
             sink.append(data);
           } catch (error) {
             sinkError = error;
@@ -126,11 +133,13 @@ async function encode({ file, format, spool }, isCancelled, onRead = () => {}) {
     if (metadata?.total_samples !== samples || !/^[0-9a-f]{32}$/.test(metadata.md5sum) || /^0+$/.test(metadata.md5sum)) {
       throw new Error("the encoder didn't account for every sample");
     }
-    sink.writeAt(patchStreamInfo(head, metadata), 0);
+    const patched = patchStreamInfo(head, metadata);
+    sink.writeAt(patched, 0);
+    hash = fnv(hash, patched);
     if (isCancelled()) throw new Cancelled();
-    const hash = check(sink);
+    if (checking) check(sink);
     const size = sink.size;
-    return { blob: await sink.finish(), bytes: size, hash };
+    return { blob: await sink.finish(), bytes: size, hash: (hash >>> 0).toString(16).padStart(8, "0") };
   } catch (error) {
     await sink.discard();
     throw error;
@@ -173,17 +182,20 @@ function patchStreamInfo(head, m) {
   return out;
 }
 
+/** FNV-1a, carried on from `hash` over `bytes`: a resumed upload only carries on from bytes this same. */
+function fnv(hash, bytes) {
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 0x01000193);
+  return hash;
+}
+
 /**
  * Decode the whole FLAC as it will be uploaded, with libFLAC's MD5 check on,
- * and throw unless it comes back as the samples that went in. Answers an
- * FNV-1a hash of the bytes, read on the way: a resumed upload only carries on
- * from bytes this same.
+ * and throw unless it comes back as the samples that went in.
  */
 function check(sink) {
   const chunks = sink.chunks();
   let chunk = new Uint8Array(0);
   let pos = 0;
-  let hash = 0x811c9dc5;
   let errors = 0;
   const decoder = Flac.create_libflac_decoder(true);
   try {
@@ -199,7 +211,6 @@ function check(sink) {
         }
         const buffer = chunk.subarray(pos, pos + wanted);
         pos += buffer.length;
-        for (let i = 0; i < buffer.length; i++) hash = Math.imul(hash ^ buffer[i], 0x01000193);
         return { buffer, readDataLength: buffer.length, error: false };
       },
       () => {},
@@ -214,7 +225,6 @@ function check(sink) {
   } finally {
     Flac.FLAC__stream_decoder_delete(decoder);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 /** Where the FLAC is written: OPFS when flac.js has a spool for this tab, memory otherwise. */

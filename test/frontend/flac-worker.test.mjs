@@ -12,8 +12,10 @@ import vm from "node:vm";
 const frontend = new URL("../../frontend/", import.meta.url);
 
 /**
- * The worker in a global of its own, and a function that sends it a job and
- * waits for the answer, with the progress it reported on the way as `reads`.
+ * The worker in a global of its own, a function that sends it a job and waits
+ * for the answer, with the progress it reported on the way as `reads`, and the
+ * worker's own check, of a FLAC's bytes: it throws unless they decode back to
+ * the samples their header's MD5 is of.
  */
 function startWorker() {
   const answers = new Map();
@@ -47,7 +49,12 @@ function startWorker() {
       reads.set(id, []);
       context.onmessage({ data: { id, ...job } });
     });
-  return { send, context };
+  const check = (bytes) => {
+    const sink = context.memorySink();
+    sink.append(bytes);
+    context.check(sink);
+  };
+  return { send, context, check };
 }
 
 /** A WAV of `frames` sample frames of noise-like samples, and its format as wav.js reports it. */
@@ -81,6 +88,15 @@ function wav({ channels, bits, frames, rate = 48000 }) {
   return { file: new Blob([bytes]), format, data: bytes.subarray(header) };
 }
 
+/** FNV-1a over a FLAC's bytes after its header, then the header: the hash in an upload's fingerprint. */
+function fingerprintHash(flac) {
+  let hash = 0x811c9dc5;
+  for (const part of [flac.subarray(42), flac.subarray(0, 42)]) {
+    for (const byte of part) hash = Math.imul(hash ^ byte, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /** STREAMINFO's sample rate, channels, bits per sample, total samples and MD5. */
 function streamInfo(flac) {
   assert.equal(new TextDecoder().decode(flac.subarray(0, 4)), "fLaC");
@@ -101,7 +117,7 @@ for (const shape of [
   { channels: 2, bits: 24, frames: 777_777 },
 ]) {
   test(`encodes ${shape.channels}-channel ${shape.bits}-bit as FLAC that holds the same samples`, async () => {
-    const { send } = startWorker();
+    const { send, check } = startWorker();
     const { file, format, data } = wav(shape);
     const got = await send({ file, format, spool: null });
     assert.ok(got.ok, got.error);
@@ -109,13 +125,14 @@ for (const shape of [
     assert.equal(got.bytes, flac.length);
     assert.ok(flac.length < data.length, "smaller than the samples");
     // FLAC's MD5 is of the samples as little-endian integers at their own
-    // width: for 16- and 24-bit PCM, exactly the WAV's data chunk. The worker
-    // has already decoded the file against it.
+    // width: for 16- and 24-bit PCM, exactly the WAV's data chunk. The file
+    // decodes back to samples with that MD5, so to the WAV's.
     assert.deepEqual(streamInfo(flac), {
       sampleRate: 48000, channels: shape.channels, bitsPerSample: shape.bits,
       total: shape.frames, md5: createHash("md5").update(data).digest("hex"),
     });
-    assert.match(got.hash, /^[0-9a-f]{8}$/);
+    check(flac);
+    assert.equal(got.hash, fingerprintHash(flac));
   });
 }
 
@@ -126,6 +143,28 @@ test("reports how much of the WAV it has read, as it goes", async () => {
   const got = await send({ file, format, spool: null });
   assert.ok(got.ok, got.error);
   assert.deepEqual(got.reads, [4 << 20, data.length]);
+});
+
+test("decodes the FLAC again only when it is asked to, as for a tab's first file", async () => {
+  const { send, context } = startWorker();
+  const { file, format } = wav({ channels: 1, bits: 16, frames: 200_000 });
+  const real = context.check;
+  let checks = 0;
+  context.check = (sink) => {
+    checks += 1;
+    return real(sink);
+  };
+  assert.ok((await send({ file, format, spool: null })).ok);
+  assert.equal(checks, 0);
+  assert.ok((await send({ file, format, spool: null, check: true })).ok);
+  assert.equal(checks, 1);
+  // A file that fails its check isn't handed back, so it goes as the WAV.
+  context.check = () => {
+    throw new Error("the FLAC didn't decode back to the card's samples");
+  };
+  const failed = await send({ file, format, spool: null, check: true });
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /didn't decode back/);
 });
 
 test("the same samples encode to the same bytes, which a resumed upload relies on", async () => {
@@ -144,20 +183,15 @@ test("a file shorter than its header says fails rather than encoding what there 
 });
 
 test("the check refuses a FLAC with any byte changed", async () => {
-  const { send, context } = startWorker();
+  const { send, check } = startWorker();
   const { file, format } = wav({ channels: 1, bits: 16, frames: 200_000 });
   const got = await send({ file, format, spool: null });
   const flac = new Uint8Array(await got.blob.arrayBuffer());
-  const sinkOf = (bytes) => {
-    const sink = context.memorySink();
-    sink.append(bytes);
-    return sink;
-  };
-  assert.equal(context.check(sinkOf(flac)), got.hash);
+  check(flac);
   for (const at of [100, Math.floor(flac.length / 2), flac.length - 3]) {
     const bad = flac.slice();
     bad[at] ^= 0x10;
-    assert.throws(() => context.check(sinkOf(bad)), /didn't decode back/, `byte ${at} flipped`);
+    assert.throws(() => check(bad), /didn't decode back/, `byte ${at} flipped`);
   }
-  assert.throws(() => context.check(sinkOf(flac.subarray(0, flac.length - 500))), /didn't decode back/, "cut short");
+  assert.throws(() => check(flac.subarray(0, flac.length - 500)), /didn't decode back/, "cut short");
 });

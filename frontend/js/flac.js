@@ -1,10 +1,16 @@
 // Sending a card's WAVs as FLAC: the same samples in about half the bytes, so
 // about half the time on a volunteer's uplink. The upload (upload-flow.js)
 // asks for each file just before it goes; this reads the WAV's header
-// (wav.js) and has a worker (flac-worker.js) encode and check it. Whatever
+// (wav.js) and has a worker (flac-worker.js) encode it. Whatever
 // can't be encoded -- not a WAV FLAC can hold, a browser that can't run the
 // encoder, an encode that fails its check -- answers null and is sent as it
 // is on the card, so nothing here can stop a card going.
+//
+// Only the first file is decoded again to check it (flac-worker.js): what that
+// catches -- this browser's OPFS or WebAssembly, the code around the encoder
+// -- goes wrong for every file alike, and checking every file took the encoder
+// 1.7 times as long, for what the WAVs sent as they are go without (CLAUDE.md,
+// *The browser sends WAVs as FLAC*).
 //
 // The server holds a FLAC to the WAV's sample count when it lands (checkFLAC,
 // backend/internal/api/tus.go), and refuses one that doesn't match; the upload
@@ -20,7 +26,7 @@ import { readWavFormat } from "./wav.js";
  */
 export const ENCODER = "libflacjs-5.6.0/5";
 
-/** Workers encoding at once. Each does ~25 MB of WAV a second, encode and check together. */
+/** Workers encoding at once. Each does ~30 MB of WAV a second (Chrome, into OPFS); a file's check takes about as long again. */
 const WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 /** Where encoded files wait for their upload, in the origin private file system. */
 const SPOOL = "birdsense-flac";
@@ -32,8 +38,8 @@ const SPEED_WINDOW_MS = 15_000;
  * against the time at least one worker was at it. Time the workers spend
  * waiting for the line doesn't count against them, and workers running at
  * once add up, so on a line the encoders can't keep up with this is the speed
- * they cap the upload at, in the card's bytes. A file's check, after its
- * encode, is time with no bytes, so it counts in the speed too.
+ * they cap the upload at, in the card's bytes. The first file's check, after
+ * its encode, is time with no bytes, so it counts in the speed too.
  */
 const meter = { bytes: 0, busyMs: 0, since: 0, samples: [] };
 
@@ -43,6 +49,8 @@ let nextId = 0;
 let nextName = 0;
 /** Set once the encoder has failed to load: every file then goes as it is. */
 let broken = false;
+/** Set once a file has passed its check. Until then every file is checked, so if none can pass, none goes as FLAC. */
+let checked = false;
 let spool;
 
 /**
@@ -66,9 +74,10 @@ export async function encode(file, signal) {
 
   const dir = await spoolDir();
   const name = `${nextName++}.flac`;
-  const job = { file, format, spool: dir && { tab: dir.tab, name } };
+  const job = { file, format, spool: dir && { tab: dir.tab, name }, check: !checked };
   try {
     const { blob, bytes, hash } = await run(job, signal);
+    if (job.check) checked = true;
     return {
       blob, bytes, hash, samples: format.samples,
       discard: () => dir?.handle.removeEntry(name).catch(() => {}),

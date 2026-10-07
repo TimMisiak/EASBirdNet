@@ -58,7 +58,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── format.js        Dates, sizes, counts, durations
 │       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
 │       ├── flac.js          Sends a card's WAVs as FLAC: decides, and runs the workers
-│       ├── flac-worker.js   A classic worker: libflac.js encodes, then checks, one WAV
+│       ├── flac-worker.js   A classic worker: libflac.js encodes one WAV, and checks a tab's first
 │       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
 │       ├── card-scan.js     Reads a card folder into a night-by-night manifest
@@ -401,9 +401,10 @@ STREAMINFO with no total at all, which a stream encoder leaves unless the
 browser patches the header once the encode ends, and which libsndfile reads as
 a file of endless length that neither BirdNET nor `clip.py` can open. Its
 length is only bounded, by what a FLAC of the listed WAV could be
-(`maxFLACBytes`). What the samples are is the browser's to check, and it does,
-before a byte is sent: it decodes its own FLAC against the MD5 libFLAC took of
-the samples it was given (*The browser sends WAVs as FLAC*).
+(`maxFLACBytes`). What the samples are is the encoder's word, as a WAV's bytes
+are the card reader's: the browser decodes the first FLAC a tab makes against
+the MD5 libFLAC took of the samples it was given, which catches what would
+spoil every file, and trusts the rest (*The browser sends WAVs as FLAC*).
 A length is the volunteer's word, so it is bounded: `cardList` refuses a file
 over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is a
 FLAC of that same per-file bound, for a length that was never on a card's
@@ -437,12 +438,20 @@ vendored: *No build step*). What it does with each file:
 - Patches STREAMINFO with what libFLAC only knows at the end. Gotcha: a stream
   encoder can't seek back, so without the patch the header says the file has
   no length, and libsndfile reads that as endless (the server refuses it).
-- Decodes the whole FLAC again with libFLAC's MD5 check, against the MD5 the
-  encoder took of the samples it was given, and sends the WAV instead if it
-  doesn't match. That covers the encoder, this code's handling of its output,
-  and the disk in between -- what libFLAC's own verify mode doesn't, which is
-  why that is off. It doesn't cover misreading the WAV, which encodes the
-  wrong samples faithfully: that is what `test/frontend/` is for.
+- Decodes the first FLAC a tab makes again, with libFLAC's MD5 check, against
+  the MD5 the encoder took of the samples it was given, and sends the WAV
+  instead if it doesn't match. Until a file passes, every file is checked, so
+  a browser where none can pass sends none as FLAC. That covers the encoder,
+  this code's handling of its output and the disk in between, as they behave
+  in this browser -- what goes wrong for every file alike. Checking every file
+  took the encoder 1.7 times as long (measured in Chrome: the decode costs
+  more than the encode, because libflac.js hands each decoded frame to
+  JavaScript), for what the WAVs sent as they are go without: a bit flipped by
+  bad memory, or a libFLAC bug only some audio sets off (*A file's length is
+  the whole integrity check*). libFLAC's own verify mode would catch the
+  second, inside WebAssembly, at about a quarter more time per file; it is
+  off. Neither covers misreading the WAV, which encodes the wrong samples
+  faithfully: that is what `test/frontend/` is for.
 - Sends it with `encoding: flac` and the WAV's sample count, which the server
   holds the FLAC to (*A file's length is the whole integrity check*). A FLAC
   the server refuses is sent again as the WAV.
@@ -464,9 +473,10 @@ go a month on; and libFLAC 1.3.4 predates a fix to its encoder
 (CVE-2020-22219), which here runs in WebAssembly's sandbox on the volunteer's
 own file.
 *Revisit when:* libflac.js moves to libFLAC 1.4 or later (its issue #51), or a
-recorder's metadata has to be kept. The check step's time estimate still
-assumes card bytes go on the line as they are; once real cards say what share
-FLAC comes to, it can use that.
+recorder's metadata has to be kept. A card with a FLAC BirdNET can't read is
+the time to check every file again, or to turn libFLAC's verify on. The check
+step's time estimate still assumes card bytes go on the line as they are; once
+real cards say what share FLAC comes to, it can use that.
 
 **Terraform owns what is deployed.** `infra/` is the whole Azure stack and
 `scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
