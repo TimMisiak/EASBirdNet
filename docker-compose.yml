@@ -37,10 +37,26 @@ services:
       # BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID: ""
       # BIRDSENSE_OIDC_MICROSOFT_CLIENT_SECRET: ""
     volumes:
-      - birdsense-data2:/app/data
-      - birdsense-audio2:/app/audio
+      - birdsense-data:/app/data
+      - birdsense-audio:/app/audio
+    # The server runs as `birdsense` (uid 10001), and a named volume is only
+    # that user's if the runtime makes it so: Docker copies the image's owner
+    # onto an empty volume the first time it is mounted, but Podman can leave
+    # a new volume root's, and once a volume has been mounted root-owned
+    # nothing changes it back -- so the database can't be written, and
+    # deleting the volume doesn't reliably help. So the container starts as
+    # root, hands anything in the two volumes that isn't `birdsense`'s to it,
+    # and runs the server as `birdsense`, as the image does. Compose only: the
+    # image itself never runs as root.
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        find /app/data /app/audio ! -user birdsense -exec chown birdsense:birdsense {} +
+        && HOME=/home/birdsense exec setpriv --reuid=birdsense --regid=birdsense --init-groups /app/birdsense
     restart: unless-stopped
 
 volumes:
-  birdsense-data2:
-  birdsense-audio2:
+  birdsense-data:
+  birdsense-audio:
