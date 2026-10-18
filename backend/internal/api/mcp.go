@@ -23,13 +23,17 @@ import (
 )
 
 // The MCP endpoint is how an LLM tool reads Birdsense, as whoever connected
-// it (oauth.go). It has three tools, all read-only:
+// it (oauth.go). It has four tools, all read-only:
 //
 //   - list_recorders: the recorders, and when each one last recorded.
 //   - detection_summary: a span of time, aggregated here -- by species, by
 //     day and recorder, by hour -- small enough to go into a model's context
 //     whole. A week of five recorders is ~140,000 detections, which no
 //     context holds; its summary is a few thousand tokens.
+//   - find_detections: the rows themselves, for a question narrow enough to
+//     have few -- one species, one recorder, some hours of the night -- as
+//     CSV in the answer, at most maxFindRows of them, and says so when more
+//     matched.
 //   - detections_export: a link to the same span as CSV, one row per
 //     detection, for a client that can fetch it and work on it in code.
 //
@@ -38,7 +42,7 @@ import (
 // time zone the caller names is only how the answer counts days and hours
 // and writes its times.
 //
-// Both range tools take the same filters (mcpFilter) and read the span
+// The range tools take the same filters (mcpFilter) and read the span
 // through once with db.EachDetection, a page at a time: no ceiling, because
 // nothing holds the span. What bounds the read is maxMCPSpan and mcpScans.
 
@@ -72,7 +76,7 @@ Cards are collected from the recorders every week or two, so recent times often 
 
 Each detection has a review status: unreviewed (BirdNET's word alone), confirmed (a volunteer listened and agreed), or rejected (a volunteer listened and it wasn't that species). A reviewer's correction replaces BirdNET's species. Confidence is BirdNET's score, 0 to 1; low-confidence detections are often wrong.
 
-Start with list_recorders, then detection_summary for the span you want. Use detections_export when you need every row and can fetch a URL and process CSV in code.`
+Start with list_recorders, then detection_summary for the span you want. To look at individual detections -- one species, one recorder, certain hours -- use find_detections, which puts up to 500 rows in its answer: scope it with the filters detection_summary showed you need, so what matches fits. Use detections_export only when you need every row and can fetch a URL from code; if that fetch is refused, don't retry it -- tell the user what its answer says to change, and carry on with the other tools.`
 
 // mcpFilter is the span and filters both range tools take.
 type mcpFilter struct {
@@ -192,10 +196,21 @@ func (h *handlers) mcpHandler() http.Handler {
 		Annotations: readOnly,
 	}, h.toolDetectionSummary)
 	mcp.AddTool(server, &mcp.Tool{
+		Name:  "find_detections",
+		Title: "Find detections",
+		Description: "Individual BirdNET detections, as CSV rows in the answer, for a narrow question such as \"the Barred Owl detections at Marymoor last week\" or \"the most confident detections after midnight\". " +
+			"Takes the same range and filters as detection_summary, plus species (common or scientific names), reviewStatuses, hours of the day, a sort, which columns to return, and a limit (100 by default, at most 500). Rejected detections are left out unless reviewStatuses asks for them. " +
+			"Scope it before you call it: use detection_summary first to see how many detections your filters cover, and narrow by species, recorders, hours or a shorter range until that is a few hundred or fewer. " +
+			"The answer always says how many matched; when that is more than were returned, the rows are only the first by the sort -- say so rather than treating them as all of them, or narrow and ask again. " +
+			"Columns: " + strings.Join(exportColumns, ", ") + "; by default " + strings.Join(findColumns, ", ") + ". Ask for url to give a person links where they can hear each detection.",
+		Annotations: readOnly,
+	}, h.toolFindDetections)
+	mcp.AddTool(server, &mcp.Tool{
 		Name:  "detections_export",
 		Title: "Export detections as CSV",
 		Description: "A link to every BirdNET detection between two timestamps as CSV, one row per detection, rejected ones included -- for analysis in code, when you can fetch a URL. It doesn't put the rows in this conversation: a week can be over 100,000 rows. " +
-			"The link works for 30 minutes and needs no other credentials. Columns: " + strings.Join(exportColumns, ", ") + ".",
+			"The link works for 30 minutes and needs no other credentials, but code in a sandbox can only fetch it if the sandbox may reach this server's domain; the answer says what to tell the user if it can't. " +
+			"For a few hundred rows, find_detections answers directly. Columns: " + strings.Join(exportColumns, ", ") + ".",
 		Annotations: readOnly,
 	}, h.toolDetectionsExport)
 
@@ -596,6 +611,245 @@ func detectionURL(publicURL string, d db.Detection) string {
 
 func round3(x float64) float64 { return math.Round(x*1000) / 1000 }
 
+// --- find_detections ---
+
+const (
+	// defaultFindRows and maxFindRows bound what find_detections puts in a
+	// conversation: a row of the default columns is ~25 tokens, so the most
+	// it answers is ~12,000 -- a share of a context, not all of it.
+	defaultFindRows = 100
+	maxFindRows     = 500
+)
+
+// findColumns is what find_detections returns when it isn't asked for
+// particular columns: enough to read the rows, without the ids and links
+// that take most of a row's tokens.
+var findColumns = []string{"heardAt", "recorderId", "commonName", "confidence", "reviewStatus"}
+
+// findInput is find_detections' arguments: a range, and what to narrow it to.
+type findInput struct {
+	mcpFilter
+	Species        []string `json:"species,omitempty" jsonschema:"species to include, by common or scientific name (either matches, ignoring case), e.g. Barred Owl or Strix varia; after review, so a corrected detection is its corrected species. Omit for every species."`
+	ReviewStatuses []string `json:"reviewStatuses,omitempty" jsonschema:"review statuses to include: unreviewed, confirmed, rejected. Defaults to unreviewed and confirmed."`
+	Hours          []int    `json:"hours,omitempty" jsonschema:"hours of the day to include, 0 to 23 in timeZone; 0 is midnight to 1 a.m. E.g. [22,23,0,1,2,3,4] for 10 p.m. to 5 a.m. Omit for every hour."`
+	Sort           string   `json:"sort,omitempty" jsonschema:"which rows come first, and so which are returned when more match than limit: time (the earliest first, the default) or confidence (the most confident first)."`
+	Columns        []string `json:"columns,omitempty" jsonschema:"the columns to return, in this order. Defaults to heardAt, recorderId, commonName, confidence, reviewStatus. Others: id, card, recorderName, startSec, endSec, scientificName, birdnetScientificName, birdnetCommonName, url (the detection's page, where a person can hear it)."`
+	Limit          int      `json:"limit,omitempty" jsonschema:"the most rows to return, from 1 to 500. Defaults to 100."`
+}
+
+// findQuery is a findInput read and checked.
+type findQuery struct {
+	rng      mcpRange
+	species  []string
+	statuses []string
+	hours    [24]bool
+	anyHour  bool
+	byConf   bool
+	columns  []int // indexes into exportColumns
+	limit    int
+}
+
+// resolve checks the arguments beyond the range, which mcpFilter checks.
+func (in findInput) resolve(now time.Time, recorders []db.Recorder) (findQuery, error) {
+	rng, err := in.mcpFilter.resolve(now, recorders)
+	if err != nil {
+		return findQuery{}, err
+	}
+	q := findQuery{rng: rng, limit: cmp.Or(in.Limit, defaultFindRows), anyHour: len(in.Hours) == 0}
+	if q.limit < 1 || q.limit > maxFindRows {
+		return findQuery{}, errMCP{fmt.Sprintf("limit must be from 1 to %d; for more rows than that, narrow the question, or use detection_summary or detections_export", maxFindRows)}
+	}
+	for _, name := range in.Species {
+		if name = strings.TrimSpace(name); name != "" {
+			q.species = append(q.species, name)
+		}
+	}
+	q.statuses = in.ReviewStatuses
+	if len(q.statuses) == 0 {
+		q.statuses = []string{db.ReviewUnreviewed, db.ReviewConfirmed}
+	}
+	for _, s := range q.statuses {
+		if s != db.ReviewUnreviewed && s != db.ReviewConfirmed && s != db.ReviewRejected {
+			return findQuery{}, errMCP{fmt.Sprintf("there is no review status %q; use unreviewed, confirmed or rejected", s)}
+		}
+	}
+	for _, hour := range in.Hours {
+		if hour < 0 || hour > 23 {
+			return findQuery{}, errMCP{"hours must be from 0 to 23"}
+		}
+		q.hours[hour] = true
+	}
+	switch in.Sort {
+	case "", "time":
+	case "confidence":
+		q.byConf = true
+	default:
+		return findQuery{}, errMCP{fmt.Sprintf("there is no sort %q; use time or confidence", in.Sort)}
+	}
+	columns := in.Columns
+	if len(columns) == 0 {
+		columns = findColumns
+	}
+	for _, c := range columns {
+		i := slices.Index(exportColumns, c)
+		if i < 0 {
+			return findQuery{}, errMCP{fmt.Sprintf("there is no column %q; the columns are %s", c, strings.Join(exportColumns, ", "))}
+		}
+		if !slices.Contains(q.columns, i) {
+			q.columns = append(q.columns, i)
+		}
+	}
+	return q, nil
+}
+
+// match says whether a detection the range's read turned up is one asked for.
+func (q findQuery) match(d db.Detection, loc *time.Location) bool {
+	if !slices.Contains(q.statuses, d.ReviewStatus) {
+		return false
+	}
+	if !q.anyHour && !q.hours[d.DetectedAt.In(loc).Hour()] {
+		return false
+	}
+	if len(q.species) == 0 {
+		return true
+	}
+	scientific, common := d.Species()
+	return slices.ContainsFunc(q.species, func(name string) bool {
+		return strings.EqualFold(name, scientific) || strings.EqualFold(name, common)
+	})
+}
+
+// compare orders detections as the query sorts them, so the rows kept when
+// more match than the limit are the same every time.
+func (q findQuery) compare(a, b db.Detection) int {
+	byTime := cmp.Or(a.DetectedAt.Compare(b.DetectedAt), cmp.Compare(a.ID, b.ID))
+	if q.byConf {
+		return cmp.Or(cmp.Compare(b.Confidence, a.Confidence), byTime)
+	}
+	return byTime
+}
+
+func (h *handlers) toolFindDetections(ctx context.Context, req *mcp.CallToolRequest, in findInput) (*mcp.CallToolResult, any, error) {
+	recorders, err := h.store.ListRecorders(ctx)
+	if err != nil {
+		return nil, nil, h.toolFailed("find_detections", req, err)
+	}
+	q, err := in.resolve(h.now(), recorders)
+	if err != nil {
+		return nil, nil, err
+	}
+	uploads, err := h.store.ListUploads(ctx, db.UploadFilter{})
+	if err != nil {
+		return nil, nil, h.toolFailed("find_detections", req, err)
+	}
+	release, err := h.scan(ctx)
+	if err != nil {
+		return nil, nil, h.toolFailed("find_detections", req, err)
+	}
+	defer release()
+
+	// The span is read whole, as the summary reads it, and only the first
+	// limit rows by the sort are held: the kept slice is trimmed back to the
+	// limit whenever it reaches twice that, so a broad question costs a few
+	// hundred detections of memory however many match.
+	started := time.Now()
+	loc := q.rng.zone()
+	going := deletingCards(uploads)
+	var kept []db.Detection
+	matched := 0
+	trim := func() {
+		slices.SortFunc(kept, q.compare)
+		kept = kept[:min(len(kept), q.limit)]
+	}
+	// Every species name the range holds, to tell a name that matched
+	// nothing in it from one that isn't a species at all.
+	heard := map[string]bool{}
+	err = h.store.EachDetection(ctx, q.rng.filter(), func(d db.Detection) error {
+		if going[d.UploadID] {
+			return nil
+		}
+		if len(q.species) > 0 {
+			scientific, common := d.Species()
+			heard[strings.ToLower(scientific)], heard[strings.ToLower(common)] = true, true
+		}
+		if !q.match(d, loc) {
+			return nil
+		}
+		matched++
+		kept = append(kept, d)
+		if len(kept) >= 2*q.limit {
+			trim()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, h.toolFailed("find_detections", req, err)
+	}
+	trim()
+
+	text := q.describe(matched, len(kept), heard) + "\n\n" + h.findCSV(q, kept, stationNames(uploads), loc)
+	h.log.Info("MCP find detections", "email", mcpUser(req), "since", q.rng.Since, "until", q.rng.Until,
+		"recorders", len(q.rng.Recorders), "species", len(q.species), "matched", matched, "returned", len(kept),
+		"took", time.Since(started).Round(time.Millisecond))
+	// The rows go back as CSV text alone, with no structured copy beside
+	// them: a client may hand a model both, and the rows are the cost.
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
+}
+
+// describe is the line above the rows: what was asked, how much matched, and
+// -- when that is more than came back -- that these aren't all of them.
+func (q findQuery) describe(matched, returned int, heard map[string]bool) string {
+	var b strings.Builder
+	order := "earliest first"
+	if q.byConf {
+		order = "most confident first"
+	}
+	fmt.Fprintf(&b, "%d BirdNET detections match from %s until %s", matched, q.rng.Since.Format(time.RFC3339), q.rng.Until.Format(time.RFC3339))
+	if len(q.species) > 0 {
+		fmt.Fprintf(&b, " (species: %s)", strings.Join(q.species, ", "))
+	}
+	fmt.Fprintf(&b, "; times are in %s. ", q.rng.TimeZone)
+	switch {
+	case matched == 0:
+		b.WriteString("No rows.")
+	case returned < matched:
+		fmt.Fprintf(&b, "The %d rows below are only the first by the sort (%s), NOT all of them: don't count or generalize from them. "+
+			"To see the rest, narrow by species, recorders, hours, reviewStatuses, minConfidence or a shorter range; "+
+			"for counts, use detection_summary.", returned, order)
+	default:
+		fmt.Fprintf(&b, "All %d are below, %s.", returned, order)
+	}
+	var unheard []string
+	for _, name := range q.species {
+		if !heard[strings.ToLower(name)] {
+			unheard = append(unheard, name)
+		}
+	}
+	if len(unheard) > 0 {
+		fmt.Fprintf(&b, " Nothing in this range is named %s; detection_summary lists the species heard, by their names here.", strings.Join(unheard, " or "))
+	}
+	return b.String()
+}
+
+// findCSV is the rows, with a header, in the columns asked for.
+func (h *handlers) findCSV(q findQuery, rows []db.Detection, station map[string]string, loc *time.Location) string {
+	var b strings.Builder
+	out := csv.NewWriter(&b)
+	pick := func(values []string) []string {
+		picked := make([]string, len(q.columns))
+		for i, c := range q.columns {
+			picked[i] = values[c]
+		}
+		return picked
+	}
+	out.Write(pick(exportColumns))
+	for _, d := range rows {
+		out.Write(pick(h.detectionRow(d, station[d.UploadID], loc)))
+	}
+	out.Flush()
+	return b.String()
+}
+
 // --- detections_export ---
 
 // ExportOut is detections_export's answer.
@@ -616,6 +870,28 @@ var exportColumns = []string{
 	"id", "card", "recorderId", "recorderName", "heardAt", "startSec", "endSec",
 	"scientificName", "commonName", "birdnetScientificName", "birdnetCommonName",
 	"confidence", "reviewStatus", "url",
+}
+
+// detectionRow is a detection's values, one per exportColumns.
+func (h *handlers) detectionRow(d db.Detection, station string, loc *time.Location) []string {
+	scientific, common := d.Species()
+	return []string{
+		d.ID, d.UploadID, d.RecorderID, cmp.Or(station, d.RecorderID),
+		d.DetectedAt.In(loc).Format(time.RFC3339),
+		strconv.FormatFloat(d.StartSec, 'f', -1, 64), strconv.FormatFloat(d.EndSec, 'f', -1, 64),
+		scientific, common, d.ScientificName, d.CommonName,
+		strconv.FormatFloat(round3(d.Confidence), 'f', -1, 64), d.ReviewStatus,
+		detectionURL(h.oauth.issuer, d),
+	}
+}
+
+// stationNames is each card's recorder name, as the card has it.
+func stationNames(uploads []db.Upload) map[string]string {
+	names := make(map[string]string, len(uploads))
+	for _, u := range uploads {
+		names[u.ID] = u.Recorder.Name
+	}
+	return names
 }
 
 func (h *handlers) toolDetectionsExport(ctx context.Context, req *mcp.CallToolRequest, in mcpFilter) (*mcp.CallToolResult, ExportOut, error) {
@@ -641,12 +917,33 @@ func (h *handlers) toolDetectionsExport(ctx context.Context, req *mcp.CallToolRe
 			"Every BirdNET detection from %s until %s is at the link below, as CSV with a header row (columns: %s). "+
 				"Fetch it with an HTTP GET -- in code, e.g. curl -o %s '<url>' -- within 30 minutes; it needs no other credentials. "+
 				"heardAt is in %s, with its offset. scientificName and commonName are after review; birdnet* are BirdNET's own label. "+
-				"Rows are in no particular order.\n\n%s",
-			rng.Since.Format(time.RFC3339), rng.Until.Format(time.RFC3339), strings.Join(exportColumns, ", "), name, rng.TimeZone, out.URL)},
+				"Rows are in no particular order.\n\n"+
+				"%s\n\n%s",
+			rng.Since.Format(time.RFC3339), rng.Until.Format(time.RFC3339), strings.Join(exportColumns, ", "), name, rng.TimeZone,
+			exportBlocked(h.oauth.issuer), out.URL)},
 		&mcp.ResourceLink{URI: out.URL, Name: name, Title: "Detections, " + rng.Since.Format(time.RFC3339) + " to " + rng.Until.Format(time.RFC3339), MIMEType: "text/csv"},
 	}}
 	h.log.Info("MCP export link issued", "email", mcpUser(req), "since", rng.Since, "until", rng.Until, "recorders", len(rng.Recorders))
 	return res, out, nil
+}
+
+// exportBlocked is what an export's answer says to do when the fetch can't
+// reach Birdsense. Code in claude.ai's sandbox reaches only the domains its
+// network settings allow, and the refusal comes from the sandbox's proxy, not
+// from here -- a CONNECT answered 403, which looks like Birdsense refusing
+// the link. So the answer says it isn't, and what the person has to change,
+// rather than leaving a model to retry or to guess (CLAUDE.md, *LLM tools
+// connect over MCP*).
+func exportBlocked(publicURL string) string {
+	host := publicURL
+	if u, err := url.Parse(publicURL); err == nil && u.Host != "" {
+		host = u.Hostname()
+	}
+	return fmt.Sprintf("If the fetch fails before it reaches Birdsense -- a proxy refuses the connection, e.g. \"CONNECT tunnel failed, response 403\" -- "+
+		"the code sandbox isn't allowed to reach %[1]s, and fetching again won't help. Tell the user: on claude.ai, add %[1]s to the allowed domains "+
+		"under Settings > Capabilities (on a Team or Enterprise plan, an admin does it under Organization settings > Capabilities; the Free plan can't), "+
+		"then start a new conversation so the sandbox picks it up. Meanwhile, detection_summary answers counts, and find_detections returns up to 500 rows "+
+		"of a narrower question directly. A 401 from Birdsense itself means the link expired; ask for a new one.", host)
 }
 
 // exportName is the file an export saves as.
@@ -688,10 +985,7 @@ func (h *handlers) serveMCPExport(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	going := deletingCards(uploads)
-	station := map[string]string{}
-	for _, u := range uploads {
-		station[u.ID] = u.Recorder.Name
-	}
+	station := stationNames(uploads)
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, exportName(rng)))
@@ -712,16 +1006,8 @@ func (h *handlers) serveMCPExport(w http.ResponseWriter, r *http.Request) {
 		if going[d.UploadID] {
 			return nil
 		}
-		scientific, common := d.Species()
 		rows++
-		out.Write([]string{
-			d.ID, d.UploadID, d.RecorderID, cmp.Or(station[d.UploadID], d.RecorderID),
-			d.DetectedAt.In(loc).Format(time.RFC3339),
-			strconv.FormatFloat(d.StartSec, 'f', -1, 64), strconv.FormatFloat(d.EndSec, 'f', -1, 64),
-			scientific, common, d.ScientificName, d.CommonName,
-			strconv.FormatFloat(round3(d.Confidence), 'f', -1, 64), d.ReviewStatus,
-			detectionURL(h.oauth.issuer, d),
-		})
+		out.Write(h.detectionRow(d, station[d.UploadID], loc))
 		return out.Error()
 	})
 	out.Flush()

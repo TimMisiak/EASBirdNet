@@ -405,7 +405,7 @@ removing someone ends their connections, and rotating the session key ends
 everyone's. A connection lasts 90 days from Allow, as a session does;
 refreshing doesn't extend it. Redirect URIs must be https, or http on
 loopback (any port, RFC 8252); custom schemes aren't taken.
-Three read-only tools, sized for a week at a time:
+Four read-only tools, sized for a week at a time:
 - `list_recorders`: ids, names, positions, and when each one's most recent
   recording started.
 - `detection_summary`: the detections between two RFC 3339 instants the
@@ -421,6 +421,17 @@ Three read-only tools, sized for a week at a time:
   model reading counts without it reports a quiet recorder as fewer birds.
   Rejected detections count only in `totals.rejected`; a reviewer's
   correction replaces BirdNET's species. BirdNET's alone, never Perch's.
+- `find_detections`: the rows themselves, for a question narrow enough to
+  have few ("the Barred Owl detections at Marymoor"): the same range and
+  filters, plus species (either name), review statuses, hours of the day,
+  a sort and the columns, answered as CSV text in the conversation -- 100
+  rows by default, `maxFindRows` (500) at most, ~25 tokens a row. It reads
+  the whole span as the summary does and holds only the first rows by the
+  sort; the answer always says how many matched, and when that is more than
+  it returned, says in capitals that these aren't all of them. Its
+  description tells a model to scope with `detection_summary` first. No
+  structured copy of the rows goes beside the text, since a client may hand
+  a model both.
 - `detections_export`: the same span as CSV, one row per detection, behind a
   link the tool returns rather than rows in the conversation -- a week is
   ~140,000 rows, ~4M tokens, which no context holds. The link is signed with
@@ -428,13 +439,20 @@ Three read-only tools, sized for a week at a time:
   fetch needs, because what fetches it (code in a model's sandbox) holds no
   token. It is streamed (gzip if asked), and a read that fails part way
   aborts the response rather than leaving a short file that looks whole.
-Both range tools read through `Store.EachDetection`, two at a time at most
+The range tools read through `Store.EachDetection`, two at a time at most
 (`mcpScans`), so memory is a page and Cosmos sees two cross-partition reads.
 Gotchas: the link is a credential in a URL, so it must stay out of logs --
 `fail()` logs the path, not the query, which is why the token is a query
 parameter. And claude.ai's code sandbox only reaches domains its network
 egress settings allow, so the export works there only once the Birdsense
-domain is added; the summary needs nothing.
+domain is added (Settings > Capabilities; an admin's on Team and Enterprise,
+impossible on Free); the other tools need nothing. The sandbox's proxy
+refuses the CONNECT with a 403 that looks like Birdsense refusing the link, so
+the export's answer says so, names the setting, and points at
+`find_detections` (`exportBlocked`).
+The Detections tab's "Add to Claude" opens claude.ai's Add custom connector
+dialog with this origin's MCP URL filled in (its documented
+`modal=add-custom-connector` link); it only fills in the form.
 *Revisit when:* someone needs to end one connection without ending the rest
 (a stored grant per connection, listed under the person), a client registers
 with a Client ID Metadata Document instead of DCR, or the same ranges are

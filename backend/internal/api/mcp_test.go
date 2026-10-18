@@ -323,6 +323,12 @@ func TestDetectionsExport(t *testing.T) {
 	if len(res.Content) != 2 || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, out.URL) || res.Content[1].(*mcp.ResourceLink).URI != out.URL {
 		t.Errorf("export content = %+v, want the link in words and as a resource link", res.Content)
 	}
+	// A sandbox that can't reach the link is told what the person has to
+	// change, naming the host, rather than left to retry.
+	if text := res.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "add birdsense.example to the allowed domains") ||
+		!strings.Contains(text, "Settings > Capabilities") || !strings.Contains(text, "find_detections") {
+		t.Errorf("export text = %q, want what to do when the sandbox can't fetch it", text)
+	}
 	link := strings.TrimPrefix(out.URL, testPublicURL)
 
 	fetch := func(gz bool) [][]string {
@@ -401,6 +407,103 @@ func TestDetectionsExport(t *testing.T) {
 	*clock = clock.Add(exportLinkLife + time.Second)
 	if rec := do(t, mux, http.MethodGet, link, "", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("an export link past its life = %d, want 401", rec.Code)
+	}
+}
+
+// find runs find_detections and splits its answer into the line above the
+// rows and the rows.
+func find(t *testing.T, h *handlers, in findInput) (string, [][]string) {
+	t.Helper()
+	res, out, err := h.toolFindDetections(t.Context(), callAs("jane@example.com"), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != nil || len(res.Content) != 1 {
+		t.Fatalf("find_detections = %+v, %v; want the rows as text alone, with no structured copy", res.Content, out)
+	}
+	note, body, _ := strings.Cut(res.Content[0].(*mcp.TextContent).Text, "\n\n")
+	rows, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return note, rows
+}
+
+func TestFindDetections(t *testing.T) {
+	h, _ := toolHandlers(t)
+
+	// The barred owls of the week, by either name in any case: the two on
+	// the 15th-16th and the one a reviewer corrected to it. Not the rejected
+	// one, Perch's, the deleting card's, or the one before the range.
+	owls := findInput{mcpFilter: theWeek, Species: []string{"barred owl"}}
+	note, rows := find(t, h, owls)
+	if !slices.Equal(rows[0], findColumns) {
+		t.Errorf("header = %v, want the default columns %v", rows[0], findColumns)
+	}
+	var heard []string
+	for _, r := range rows[1:] {
+		heard = append(heard, r[0])
+	}
+	if !slices.Equal(heard, []string{"2026-09-15T22:30:00-07:00", "2026-09-16T03:10:00-07:00", "2026-09-17T21:00:00-07:00"}) {
+		t.Errorf("barred owls heard at %v, want the three of the week, earliest first, in Pacific", heard)
+	}
+	if !strings.HasPrefix(note, "3 BirdNET detections match") || !strings.Contains(note, "All 3 are below") {
+		t.Errorf("note = %q, want it to say all three matches are there", note)
+	}
+	if _, again := find(t, h, findInput{mcpFilter: theWeek, Species: []string{"STRIX VARIA"}}); len(again) != len(rows) {
+		t.Errorf("by scientific name = %d rows, want the same %d", len(again)-1, len(rows)-1)
+	}
+
+	// More match than the limit: the most confident one, and a note that
+	// says these aren't all of them.
+	top := owls
+	top.Sort, top.Limit = "confidence", 1
+	top.Columns = []string{"confidence", "url", "confidence"}
+	note, rows = find(t, h, top)
+	if len(rows) != 2 || !slices.Equal(rows[0], []string{"confidence", "url"}) || rows[1][0] != "0.91" ||
+		!strings.HasPrefix(rows[1][1], testPublicURL+"/app/detections/OWL-20260920-SR02/") {
+		t.Errorf("the most confident owl = %v, want the 0.91 one with its link, in the columns asked for", rows)
+	}
+	if !strings.Contains(note, "3 BirdNET detections match") || !strings.Contains(note, "NOT all of them") {
+		t.Errorf("note = %q, want it to say one of three came back", note)
+	}
+
+	// Rejected ones only when asked for.
+	rejected := owls
+	rejected.ReviewStatuses = []string{db.ReviewRejected}
+	if _, rows = find(t, h, rejected); len(rows) != 2 || rows[1][0] != "2026-09-17T01:00:00-07:00" {
+		t.Errorf("rejected owls = %v, want the one a reviewer said no to", rows)
+	}
+
+	// Hours are the range's zone's: 3 a.m. Pacific is the owl at 03:10, and
+	// the screech-owl at 02:00 is outside it.
+	if _, rows = find(t, h, findInput{mcpFilter: theWeek, Hours: []int{3}}); len(rows) != 2 || rows[1][0] != "2026-09-16T03:10:00-07:00" {
+		t.Errorf("3 a.m. = %v, want the one owl", rows)
+	}
+
+	// A name nothing in the range has is told apart from an empty answer.
+	note, rows = find(t, h, findInput{mcpFilter: theWeek, Species: []string{"Spotted Owl"}})
+	if len(rows) != 1 || !strings.Contains(note, "Nothing in this range is named Spotted Owl") {
+		t.Errorf("spotted owl = %q, %v; want no rows and a note that no species has that name", note, rows)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   findInput
+		says string
+	}{
+		{"too many rows", findInput{Limit: maxFindRows + 1}, "from 1 to 500"},
+		{"an unknown sort", findInput{Sort: "species"}, "time or confidence"},
+		{"an unknown column", findInput{Columns: []string{"heardAt", "station"}}, "no column \"station\""},
+		{"an unknown review status", findInput{ReviewStatuses: []string{"maybe"}}, "unreviewed, confirmed or rejected"},
+		{"an hour past 23", findInput{Hours: []int{24}}, "0 to 23"},
+		{"a bad range", findInput{mcpFilter: mcpFilter{Until: "2026-09-19"}}, "RFC 3339"},
+	} {
+		_, _, err := h.toolFindDetections(t.Context(), callAs("jane@example.com"), tc.in)
+		var refused errMCP
+		if !errors.As(err, &refused) || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("find with %s = %v, want an error saying %q", tc.name, err, tc.says)
+		}
 	}
 }
 
@@ -516,7 +619,7 @@ func TestMCPWithTheSDKClient(t *testing.T) {
 		}
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"detection_summary", "detections_export", "list_recorders"}) {
+	if !slices.Equal(names, []string{"detection_summary", "detections_export", "find_detections", "list_recorders"}) {
 		t.Errorf("tools = %v", names)
 	}
 
@@ -538,6 +641,15 @@ func TestMCPWithTheSDKClient(t *testing.T) {
 	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "detection_summary", Arguments: map[string]any{"recorders": []string{"nope"}}})
 	if err != nil || !res.IsError {
 		t.Errorf("a summary for an unknown recorder = %v, %+v; want a tool error the model can read", err, res)
+	}
+
+	// The range's fields sit beside find_detections' own, not under a key.
+	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "find_detections", Arguments: map[string]any{"since": theWeek.Since, "until": theWeek.Until, "species": []string{"Barred Owl"}, "columns": []string{"heardAt"}},
+	})
+	if err != nil || res.IsError || res.StructuredContent != nil || len(res.Content) != 1 ||
+		!strings.Contains(res.Content[0].(*mcp.TextContent).Text, "heardAt\n2026-09-15T22:30:00-07:00\n") {
+		t.Errorf("find_detections over the SDK = %v, %+v; want the owls as CSV text", err, res)
 	}
 
 	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "detections_export", Arguments: map[string]any{"since": theWeek.Since, "until": theWeek.Until}})
