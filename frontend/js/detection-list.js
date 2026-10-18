@@ -124,13 +124,36 @@ function startOfDay(date, addDays = 0) {
 
 /** What GET /detections is asked for one page of a view. */
 function queryFor(view) {
-  const params = { sort: view.sort, order: view.order, limit: PAGE_SIZE, offset: (view.page - 1) * PAGE_SIZE };
+  return { ...filtersFor(view), limit: PAGE_SIZE, offset: (view.page - 1) * PAGE_SIZE };
+}
+
+/** What GET /detections is asked for a view, whichever page of it. */
+function filtersFor(view) {
+  const params = { sort: view.sort, order: view.order };
   if (view.status) params.status = view.status;
   if (view.species) params.species = view.species;
   if (view.min) params.minConfidence = view.min / 100;
   if (view.from) params.since = startOfDay(view.from).toISOString();
   if (view.to) params.until = startOfDay(view.to, 1).toISOString();
   return params;
+}
+
+/**
+ * Every detection in a view, not a page of it, as a JSON file to save:
+ * {blob, name}. The name says the dates the view covers, or that it covered
+ * the server's own window when "Heard from" was cleared.
+ */
+export async function exportView(view) {
+  const blob = await api.exportDetections(filtersFor(view));
+  return { blob, name: exportName(view) };
+}
+
+/** The file an export of a view is saved as. */
+export function exportName(view) {
+  const parts = ["detections"];
+  if (view.from) parts.push(view.from);
+  if (view.to) parts.push(view.from ? "to" : "until", view.to);
+  return `${parts.join("-")}.json`;
 }
 
 /** The filters and the sort of a view, without which page of it. */

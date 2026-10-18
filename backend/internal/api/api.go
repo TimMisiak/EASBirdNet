@@ -112,6 +112,9 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/speedtest", h.requireSession(h.speedTest))
 	// Detections are anyone's to hear and review once signed in, on every card.
 	mux.HandleFunc("GET /api/v1/detections", h.requireSession(h.listDetections))
+	// A literal beside {reference}, which is more specific and so wins; no
+	// card's reference can be "export" (db.UploadID).
+	mux.HandleFunc("GET /api/v1/detections/export", h.requireSession(h.exportDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}", h.requireSession(h.listCardDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", h.requireSession(h.getDetection))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", h.requireSession(h.getClip))

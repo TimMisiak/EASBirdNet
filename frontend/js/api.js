@@ -113,6 +113,22 @@ export const fetchDetections = (params) => {
   return get(`/detections${search ? `?${search}` : ""}`);
 };
 /**
+ * Every detection fetchDetections' params match, not a page of them, as a
+ * JSON file to save: a Blob of {exportedAt, ...what was asked, total,
+ * detections}. limit and offset don't apply. A file, not JSON to parse, so it
+ * doesn't go through request; a 401 still signs the app out the same way.
+ */
+export async function exportDetections(params) {
+  const search = new URLSearchParams(params).toString();
+  const res = await fetch(`${BASE}/detections/export${search ? `?${search}` : ""}`);
+  if (!res.ok) {
+    if (res.status === 401) signedOut();
+    const payload = await res.json().catch(() => null);
+    throw new ApiError(res.status, payload?.error ?? `GET /detections/export failed (${res.status})`);
+  }
+  return res.blob();
+}
+/**
  * What BirdNET heard in one file of a card, in the order it was heard, at most
  * limit of them: {detections, total}. total is how many there are in all.
  * Without a limit the server's own page size applies -- a caller that wants a

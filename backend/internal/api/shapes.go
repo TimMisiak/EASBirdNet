@@ -195,6 +195,24 @@ type DetectionWindow struct {
 	Days  int       `json:"days"`
 }
 
+// DetectionExport is the head of the file GET /detections/export answers:
+// what was asked for, and how many detections matched it. The detections
+// themselves follow it in the same object, as "detections", a ListedDetection
+// each. Since is always set, as the request's own or the window's.
+type DetectionExport struct {
+	ExportedAt    time.Time        `json:"exportedAt"`
+	Model         string           `json:"model"`
+	Since         time.Time        `json:"since"`
+	Until         *time.Time       `json:"until,omitempty"`
+	Status        string           `json:"status,omitempty"`
+	MinConfidence float64          `json:"minConfidence,omitempty"`
+	Species       string           `json:"species,omitempty"`
+	Sort          string           `json:"sort"`
+	Order         string           `json:"order"`
+	Window        *DetectionWindow `json:"window,omitempty"`
+	Total         int              `json:"total"`
+}
+
 // SpeciesCount is one species BirdNET labelled detections with, and how many.
 type SpeciesCount struct {
 	ScientificName string `json:"scientificName"`

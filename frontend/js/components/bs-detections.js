@@ -10,6 +10,7 @@ import {
   SORTS,
   STATUSES,
   defaultDates,
+  exportView,
   loadPage,
   paramsFor,
   viewFrom,
@@ -42,6 +43,10 @@ import "./bs-chip.js";
  *
  * The filter fields are rendered once and only the results are redrawn, so a
  * date half typed in keeps its focus while the list catches up.
+ *
+ * “Export as JSON” saves every detection the list holds, not the page shown:
+ * the same filters and order, asked of the server whole (GET
+ * /detections/export), so a list of 11,201 is a file of 11,201.
  */
 
 class Detections extends BaseElement {
@@ -57,6 +62,8 @@ class Detections extends BaseElement {
    */
   #state = { status: "loading", detections: [], total: 0, species: [], window: null, error: null };
   #busy = false;
+  /** An export is being fetched; one at a time. */
+  #exporting = false;
   /** Only the latest request's answer is shown. */
   #asked = 0;
 
@@ -83,6 +90,7 @@ class Detections extends BaseElement {
       min: (el) => this.#change({ min: Number(el.value) }),
       from: (el) => this.#change({ from: el.value }),
       to: (el) => this.#change({ to: el.value }),
+      export: () => this.#export(),
     };
   }
 
@@ -117,6 +125,31 @@ class Detections extends BaseElement {
     if (next.status === "ready" && view.page > last) return this.#change({ page: last });
 
     if (this.isConnected) this.#update();
+  }
+
+  /** Save every detection in the view as it stands as a JSON file. */
+  async #export() {
+    if (this.#exporting) return;
+    this.#exporting = true;
+    const problem = this.$(".export-error");
+    problem.hidden = true;
+    this.#update();
+    try {
+      const { blob, name } = await exportView(this.#view);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      // The click only starts the save; let it take the blob before letting go.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      problem.textContent = `Couldn't export the detections: ${error.message}`;
+      problem.hidden = false;
+    } finally {
+      this.#exporting = false;
+      if (this.isConnected) this.#update();
+    }
   }
 
   render() {
@@ -176,6 +209,7 @@ class Detections extends BaseElement {
         .pager .btn { padding: 0.5rem 0.875rem; font-size: 0.8125rem; }
         .quiet { font-size: 0.8125rem; color: var(--bs-text-muted); }
         .window { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-4); }
+        .export-error { margin: calc(-1 * var(--bs-space-2)) 0 var(--bs-space-4); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
         h1 { margin-bottom: var(--bs-space-5); }
       </style>
@@ -187,7 +221,9 @@ class Detections extends BaseElement {
           (s) => `<button class="filter" data-action="status" data-status="${s.id}" aria-pressed="false">${s.label}</button>`,
         ).join("")}
         <span class="tally" aria-live="polite"></span>
+        <button type="button" class="btn btn--quiet btn--tiny export" data-action="export">Export as JSON</button>
       </div>
+      <p class="error export-error" role="alert" hidden></p>
 
       <div class="fields">
         <label>
@@ -240,6 +276,10 @@ class Detections extends BaseElement {
       pill.setAttribute("aria-pressed", String(pill.dataset.status === v.status));
     }
     this.$(".clear").hidden = !filtered;
+    // What it saves is the list as last shown, so only once there is one.
+    const exporter = this.$(".export");
+    exporter.disabled = this.#exporting || this.#busy || status !== "ready" || total === 0;
+    exporter.textContent = this.#exporting ? "Exporting…" : "Export as JSON";
     this.$(".tally").textContent =
       status === "ready" ? `${count(total)} ${total === 1 ? "detection" : "detections"}` : "";
     this.#speciesOptions(species);

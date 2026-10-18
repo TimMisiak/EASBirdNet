@@ -262,6 +262,80 @@ func TestTooManyDetectionsIsAskedAgain(t *testing.T) {
 	}
 }
 
+// TestExportDetections holds GET /detections/export to the list it saves: the
+// same rows the same parameters list, in the same order, all of them rather
+// than a page, under a head that says what was asked for.
+func TestExportDetections(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	type exportBody struct {
+		DetectionExport
+		Detections []ListedDetection `json:"detections"`
+	}
+	export := func(query string) exportBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET detections/export?%s = %d %s", query, rec.Code, rec.Body)
+		}
+		if got := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment; filename=") {
+			t.Errorf("Content-Disposition = %q, want an attachment", got)
+		}
+		return decodeInto[exportBody](t, rec)
+	}
+	ids := func(rows []ListedDetection) string {
+		out := make([]string, len(rows))
+		for i, d := range rows {
+			out[i] = d.Reference + "/" + d.ID
+		}
+		return strings.Join(out, ", ")
+	}
+
+	// Whole, where the list is a page: limit and offset don't apply.
+	const query = "since=2026-01-01T00:00:00Z&sort=confidence&order=asc"
+	listed := do(t, mux, http.MethodGet, "/api/v1/detections?"+query, "", admin)
+	list := decodeInto[listedBody](t, listed)
+	got := export(query + "&limit=2&offset=1")
+	if got.Total != list.Total || len(got.Detections) != list.Total || ids(got.Detections) != ids(list.Detections) {
+		t.Errorf("export = %d rows (%s), want the list's %d in its order (%s)",
+			len(got.Detections), ids(got.Detections), list.Total, ids(list.Detections))
+	}
+	if d := got.Detections[0]; d.StationName == "" || d.Night == "" || d.Reference == "" {
+		t.Errorf("exported row = %+v, want its card, station and night as the list has them", d)
+	}
+	if got.Sort != sortConfidence || got.Order != "asc" || got.Model != db.ModelBirdNET || got.Window != nil ||
+		got.Until != nil || !got.ExportedAt.Equal(testNow) {
+		t.Errorf("head = %+v, want what was asked for", got.DetectionExport)
+	}
+
+	// Filtered as the list is, and bounded the same way when it names no dates.
+	if got := export("since=2026-01-01T00:00:00Z&species=Strix+varia"); got.Total != 3 || got.Species != "Strix varia" ||
+		len(got.Detections) != 3 {
+		t.Errorf("barred owls = %d (%s), want 3", got.Total, ids(got.Detections))
+	}
+	if got := export(""); got.Window == nil || got.Window.Days != defaultDetectionsDays || got.Order != "desc" {
+		t.Errorf("no dates = window %+v, order %q; want the default window, newest first", got.Window, got.Order)
+	}
+
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?status=maybe", "", admin); rec.Code != http.StatusBadRequest {
+		t.Errorf("export with a bad status = %d, want 400", rec.Code)
+	}
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export", "", vol); rec.Code != http.StatusOK {
+		t.Errorf("volunteer export = %d, want 200", rec.Code)
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous export = %d, want 401", rec.Code)
+	}
+
+	// Too wide to read is the list's 400, not a file.
+	wide := muxFor(tooManyStore{newTestStore(t)}, testFiles(t), false)
+	rec := do(t, wide, http.MethodGet, "/api/v1/detections/export?since=2020-01-01T00:00:00Z", "", admin)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "narrow the dates") {
+		t.Errorf("an export too wide to read = %d %s, want 400 saying how to narrow it", rec.Code, rec.Body)
+	}
+}
+
 // Perch's detections are a second list, not more rows in BirdNET's: each list
 // is one model's, BirdNET's unless the request asks for Perch's, and the
 // public page counts BirdNET's alone.

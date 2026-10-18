@@ -190,6 +190,7 @@ POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 POST   /api/v1/speedtest                  a body read and thrown away: the upload speed test
 GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one model's: ?model=perch)
+GET    /api/v1/detections/export      the same, every row rather than a page: a JSON file to save
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
@@ -242,6 +243,12 @@ BirdNET -- which has 2 GiB for that, BirdNET and tusd's buffers together. So:
   which is the replica. A window keeps the ordinary request cheap; the ceiling
   is what makes a careless one a message instead of a restart.
 
+The tab's "Export as JSON" is `GET /detections/export`: the same parameters,
+answered with every row they match rather than a page, as one file, so the
+count above the list is the count in the file. It is bounded exactly as the
+list is and costs what one page of it does, since the list reads every match
+to sort it anyway; the rows are encoded as they are written, not built up
+first.
 `GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
 beside the page. `js/detection-list.js` is the browser's side of this: it reads
 the tab's filters and sort off the query string, asks for a page, and *holds*

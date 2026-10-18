@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"cmp"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -78,7 +81,7 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 		return
 	}
 	ctx := r.Context()
-	found, err := h.store.ListDetections(ctx, q.filter)
+	matched, species, err := h.matchDetections(ctx, q)
 	switch {
 	case errors.Is(err, db.ErrTooMany):
 		h.problem(w, http.StatusBadRequest, msgTooManyDetections)
@@ -87,13 +90,39 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 		h.fail(w, r, err)
 		return
 	}
+	page := matched[min(q.offset, len(matched)):min(q.offset+q.limit, len(matched))]
+	stations, err := h.stationsOf(ctx, page)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	rows := make([]ListedDetection, len(page))
+	for i, d := range page {
+		rows[i] = listedOf(d, stations)
+	}
+
+	body := map[string]any{"detections": rows, "total": len(matched), "species": species}
+	if q.windowed {
+		body["window"] = DetectionWindow{Since: q.filter.Since, Days: defaultDetectionsDays}
+	}
+	h.json(w, http.StatusOK, body)
+}
+
+// matchDetections is every detection a query matches, sorted, and the species
+// heard among them before the species filter. GET /detections pages it and
+// GET /detections/export writes it whole, so the two can't disagree about
+// what the list holds.
+func (h *handlers) matchDetections(ctx context.Context, q detectionQuery) ([]db.Detection, []SpeciesCount, error) {
+	found, err := h.store.ListDetections(ctx, q.filter)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// What was heard on a card being deleted is left out, counts and all.
 	// There is rarely such a card, so this is usually an empty query.
 	deleting, err := h.store.ListUploads(ctx, db.UploadFilter{Status: db.StatusDeleting})
 	if err != nil {
-		h.fail(w, r, err)
-		return
+		return nil, nil, err
 	}
 	going := make(map[string]bool, len(deleting))
 	for _, u := range deleting {
@@ -127,36 +156,122 @@ func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.U
 	})
 
 	sortListed(matched, q.sort, q.desc)
-	page := matched[min(q.offset, len(matched)):min(q.offset+q.limit, len(matched))]
+	return matched, species, nil
+}
 
-	// Where each row was recorded comes from the cards on this page alone: a
-	// point read each, and a page is usually one or two cards. Reading every
-	// card to name a few was a second cross-partition query on every request.
+// stationsOf is where the cards these detections are on were recorded, by
+// card, for listedOf to name each row's station.
+//
+// It reads the cards these rows are on alone: a point read each, and a page is
+// usually one or two cards. Reading every card to name a few was a second
+// cross-partition query on every request.
+func (h *handlers) stationsOf(ctx context.Context, ds []db.Detection) (map[string]string, error) {
 	name := map[string]string{}
-	rows := make([]ListedDetection, len(page))
-	for i, d := range page {
-		station, known := name[d.UploadID]
-		if !known {
-			u, err := h.store.GetUpload(ctx, d.UploadID)
-			// A detection whose card has gone keeps its recorder id.
-			if err != nil && !errors.Is(err, db.ErrNotFound) {
-				h.fail(w, r, err)
-				return
-			}
-			station = u.Recorder.Name
-			name[d.UploadID] = station
+	for _, d := range ds {
+		if _, known := name[d.UploadID]; known {
+			continue
 		}
-		rows[i] = ListedDetection{
-			Detection: detectionOf(d), Reference: d.UploadID,
-			StationName: cmp.Or(station, d.RecorderID), Night: d.Night,
+		u, err := h.store.GetUpload(ctx, d.UploadID)
+		// A detection whose card has gone keeps its recorder id (listedOf).
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return nil, err
 		}
+		name[d.UploadID] = u.Recorder.Name
+	}
+	return name, nil
+}
+
+// listedOf is a detection as the list shows it, with its card and where that
+// card was recorded.
+func listedOf(d db.Detection, stations map[string]string) ListedDetection {
+	return ListedDetection{
+		Detection: detectionOf(d), Reference: d.UploadID,
+		StationName: cmp.Or(stations[d.UploadID], d.RecorderID), Night: d.Night,
+	}
+}
+
+// exportDetections is GET /detections' whole list as a file to save: every
+// detection the same parameters match, in the same order, rather than a page
+// of them. limit and offset are ignored.
+//
+// It costs what one page of the list costs -- the list already reads every
+// match to sort and count it -- plus a point read of each card in it, and is
+// bounded the same way, by the window and db.MaxDetectionScan. The rows are
+// encoded one at a time as they are written, so the answer is never held
+// whole a second time beside the detections it is made from.
+//
+// The file is one object, as every answer is: what was asked for, how many
+// matched, and then the detections, as the list's rows.
+func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
+	q, problem := parseDetectionQuery(r, h.now())
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
+	ctx := r.Context()
+	matched, _, err := h.matchDetections(ctx, q)
+	switch {
+	case errors.Is(err, db.ErrTooMany):
+		h.problem(w, http.StatusBadRequest, msgTooManyDetections)
+		return
+	case err != nil:
+		h.fail(w, r, err)
+		return
+	}
+	// Every read happens before the first byte, so a failure is still an
+	// error the browser can show rather than a file cut short.
+	stations, err := h.stationsOf(ctx, matched)
+	if err != nil {
+		h.fail(w, r, err)
+		return
 	}
 
-	body := map[string]any{"detections": rows, "total": len(matched), "species": species}
-	if q.windowed {
-		body["window"] = DetectionWindow{Since: q.filter.Since, Days: defaultDetectionsDays}
+	now := h.now().UTC()
+	head := DetectionExport{
+		ExportedAt: now, Model: q.filter.Model, Since: q.filter.Since,
+		Status: q.filter.ReviewStatus, MinConfidence: q.filter.MinConfidence, Species: q.species,
+		Sort: q.sort, Order: "asc", Total: len(matched),
 	}
-	h.json(w, http.StatusOK, body)
+	if q.desc {
+		head.Order = "desc"
+	}
+	if !q.filter.Until.IsZero() {
+		head.Until = &q.filter.Until
+	}
+	if q.windowed {
+		head.Window = &DetectionWindow{Since: q.filter.Since, Days: defaultDetectionsDays}
+	}
+	opening, err := json.Marshal(head)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="detections-%s.json"`, now.Format("2006-01-02")))
+	out := bufio.NewWriterSize(w, 64<<10)
+	// The head's own fields, then the detections as its last.
+	out.Write(opening[:len(opening)-1])
+	out.WriteString(`,"detections":[`)
+	for i, d := range matched {
+		row, err := json.Marshal(listedOf(d, stations))
+		if err != nil {
+			h.log.Error("encode exported detection", "id", d.ID, "err", err)
+			return
+		}
+		if i > 0 {
+			out.WriteByte(',')
+		}
+		out.WriteString("\n")
+		if _, err := out.Write(row); err != nil {
+			// The browser went away; there is no one to tell.
+			return
+		}
+	}
+	out.WriteString("\n]}\n")
+	if err := out.Flush(); err != nil {
+		h.log.Warn("export detections", "err", err)
+	}
 }
 
 // parseDetectionQuery reads GET /detections' parameters, or says what is
