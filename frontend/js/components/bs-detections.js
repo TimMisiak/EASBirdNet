@@ -54,7 +54,19 @@ import "./bs-chip.js";
  * “Export as JSON” saves every detection the list holds, not the page shown:
  * the same filters and order, asked of the server whole (GET
  * /detections/export), so a list of 11,201 is a file of 11,201.
+ *
+ * “Add to Claude” opens claude.ai's Add custom connector dialog with this
+ * site's MCP endpoint filled in (CLAUDE.md, *LLM tools connect over MCP*). The
+ * URL is this page's own origin, so it is right on any deployment and on
+ * localhost alike -- though a claude.ai connector only works against https.
  */
+
+/** claude.ai's custom connector dialog, prefilled with this site's MCP endpoint. */
+const CLAUDE_CONNECTOR = `https://claude.ai/customize/connectors?${new URLSearchParams({
+  modal: "add-custom-connector",
+  connectorName: "Birdsense",
+  connectorUrl: `${location.origin}/api/v1/mcp`,
+})}`;
 
 class Detections extends BaseElement {
   static styles = [typography, controls, forms, tables, filters];
@@ -232,6 +244,8 @@ class Detections extends BaseElement {
         .quiet { font-size: 0.8125rem; color: var(--bs-text-muted); }
         .window { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-4); }
         .export-error { margin: calc(-1 * var(--bs-space-2)) 0 var(--bs-space-4); }
+        /* A link dressed as the button beside it; controls' button rules don't reach an <a>. */
+        a.btn { color: inherit; text-decoration: none; border-radius: var(--bs-radius); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
         h1 { margin-bottom: var(--bs-space-5); }
         .scope { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-5); font-size: 0.90625rem; color: var(--bs-text-body); }
@@ -248,6 +262,8 @@ class Detections extends BaseElement {
         ).join("")}
         <span class="tally" aria-live="polite"></span>
         <button type="button" class="btn btn--quiet btn--tiny export" data-action="export">Export as JSON</button>
+        <a class="btn btn--quiet btn--tiny" href="${escapeHTML(CLAUDE_CONNECTOR)}" target="_blank" rel="noreferrer"
+           title="Read these detections from Claude: adds Birdsense to claude.ai as a connector">Add to Claude</a>
       </div>
       <p class="error export-error" role="alert" hidden></p>
 
