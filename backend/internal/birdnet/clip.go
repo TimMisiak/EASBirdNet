@@ -63,7 +63,7 @@ func (a Analyzer) Cut(ctx context.Context, source string, clips []Clip) (Recordi
 	killProcessGroupOnCancel(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
-	if err := cmd.Run(); err != nil {
+	if err := run(ctx, cmd); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Recording{}, fmt.Errorf("birdnet: %w", ctxErr)
 		}

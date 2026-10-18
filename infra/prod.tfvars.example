@@ -31,13 +31,32 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 # put a short suffix here and update DEPLOYMENT.md's naming table.
 # name_suffix = ""
 
-# Sized for the analysis queue. Container Apps only allows particular pairs.
-# cpu    = 1.0
-# memory = "2Gi"
+# The web app. With the analysis job (the default) it only serves pages and
+# uploads. Container Apps only allows particular pairs.
+# cpu    = 0.5
+# memory = "1Gi"
+
+# Analysis runs as a job the web app starts (ANALYSIS.md). Each worker replica
+# is this size; with Perch on, 2.0/4Gi at least, and 4.0/8Gi packs more per
+# replica. analysis_job_enabled = false puts analysis back in the web app,
+# which then needs cpu/memory sized for it.
+# analysis_job_enabled = true
+# analysis_cpu         = 2.0
+# analysis_memory      = "4Gi"
+# analysis_max_workers = 10
+#
+# Starting the job needs a role for the web app on it. Empty defines a narrow
+# custom one, which needs Owner or User Access Administrator to apply; with
+# only the right to assign roles, name a built-in one (DEPLOYMENT.md, 12b).
+# analysis_job_starter_role = "Contributor"
 
 # Perch as a second model after BirdNET (DEPLOYMENT.md, Perch). It needs the
 # next size up, cpu 2.0 with 4Gi, which terraform plan checks.
 # perch_enabled = false
+
+# How much analysis runs at once (ANALYSIS.md, Packing). Empty uses a task per
+# core and each model's measured memory; set keys to override.
+# analysis_tuning = { perch_threads = "1" }
 
 # How long a card's original recordings are kept after the card is received,
 # and when the storage lifecycle rule sweeps whatever is left under
@@ -56,6 +75,12 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 # URI `terraform output -raw app_url` + /api/v1/auth/microsoft/callback.
 oidc_microsoft_client_id     = "00000000-0000-0000-0000-000000000000"
 oidc_microsoft_client_secret = "the client secret's *value*, not its id"
+
+# Optional: a Google OAuth client (Web application) as a second way in. Its
+# redirect URI is `terraform output -raw app_url` + /api/v1/auth/google/callback.
+# Leave both out to offer Microsoft only. DEPLOYMENT.md, "Adding Google".
+# oidc_google_client_id     = "123456789012-abc123.apps.googleusercontent.com"
+# oidc_google_client_secret = "GOCSPX-..."
 
 # Signs the session cookie: any long random string, kept the same across
 # deploys so a new revision doesn't sign everyone out.

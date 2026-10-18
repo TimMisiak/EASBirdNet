@@ -340,6 +340,22 @@ func (s *jsonFile) ListDetections(_ context.Context, f DetectionFilter) ([]Detec
 	return s.listDetections(f, MaxDetectionScan)
 }
 
+// EachDetection copies the matches out under the lock and hands them over
+// after it, so fn can call back into the store. Holding them all is fine
+// here: this is the development database.
+func (s *jsonFile) EachDetection(_ context.Context, f DetectionFilter, fn func(Detection) error) error {
+	found, err := s.listDetections(f, 0)
+	if err != nil {
+		return err
+	}
+	for _, d := range found {
+		if err := fn(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // listDetections is ListDetections with the ceiling passed in, so a test can
 // exercise ErrTooMany without storing MaxDetectionScan documents to do it.
 func (s *jsonFile) listDetections(f DetectionFilter, max int) ([]Detection, error) {
@@ -501,7 +517,7 @@ func (s *jsonFile) save() error {
 }
 
 // clone deep-copies a document, so nothing a caller does to a returned value
-// (appending to Nights, say) reaches the stored copy. A JSON round trip is the
+// (through a pointer field, say) reaches the stored copy. A JSON round trip is the
 // same copy Cosmos DB makes, which keeps the two backends honest.
 func clone[T any](v T) T {
 	b, err := json.Marshal(v)

@@ -31,14 +31,14 @@ class SpeciesTable extends BaseElement {
         .latin { font-size: 0.78125rem; color: var(--bs-text-muted); font-style: italic; margin-top: 0.125rem; }
         td { padding-top: 1.125rem; padding-bottom: 1.125rem; }
         .count { font-size: 1rem; }
-        .nights { color: var(--bs-text-muted); }
+        .days { color: var(--bs-text-muted); }
         .stations, .last { font-size: 0.875rem; color: var(--bs-text-soft); }
         .last { white-space: nowrap; }
         .sub { display: none; }
         .empty { color: var(--bs-text-muted); }
 
         @media (max-width: 760px) {
-          thead, .nights, .stations, .last { display: none; }
+          thead, .days, .stations, .last { display: none; }
           table, tbody, tr, td { display: block; }
           tr {
             display: grid;
@@ -61,7 +61,7 @@ class SpeciesTable extends BaseElement {
             <tr>
               <th scope="col">Species</th>
               <th scope="col" style="text-align: right;">Detections</th>
-              <th scope="col" style="text-align: right;">Nights heard</th>
+              <th scope="col" style="text-align: right;">Days heard</th>
               <th scope="col">Stations</th>
               <th scope="col">Most recent</th>
             </tr>
@@ -70,7 +70,7 @@ class SpeciesTable extends BaseElement {
             ${
               this.#species.length
                 ? this.#species.map(row).join("")
-                : `<tr><td colspan="5" class="empty">Nothing confirmed in these nights yet.</td></tr>`
+                : `<tr><td colspan="5" class="empty">Nothing confirmed in these days yet.</td></tr>`
             }
           </tbody>
         </table>
@@ -86,10 +86,10 @@ function row(s) {
       <td>
         <div class="name">${escapeHTML(s.commonName)}</div>
         <div class="latin">${escapeHTML(s.scientificName)}</div>
-        <div class="sub">${escapeHTML(`${s.nights} nights · ${stations.join(", ")}`)}</div>
+        <div class="sub">${escapeHTML(`${s.days} ${s.days === 1 ? "day" : "days"} · ${stations.join(", ")}`)}</div>
       </td>
       <td class="num count">${count(s.detections)}</td>
-      <td class="num nights">${count(s.nights)}</td>
+      <td class="num days">${count(s.days)}</td>
       <td class="stations">${escapeHTML(stations.join(", "))}</td>
       <td class="last">${escapeHTML(dateAtTime(s.lastDetectedAt))}</td>
     </tr>

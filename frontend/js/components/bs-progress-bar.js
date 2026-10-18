@@ -3,7 +3,7 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 /**
  * <bs-progress-bar value="64"> -- the copper bar used for card progress. It fills
  * navy once complete, which is the same "confirmed" navy used for a finished
- * night in the upload checklist.
+ * day in the upload checklist.
  *
  * Attributes: value (0-100), size ("thin" | default), label (accessible name).
  *

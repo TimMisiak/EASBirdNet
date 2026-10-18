@@ -1,0 +1,597 @@
+# Analysis off the web app — design
+
+Moving BirdNET and Perch out of the web container into a Container Apps job
+that packs both models onto each replica, and recording enough about every run
+to size that replica from measurements rather than guesses.
+
+M0 to M3 are built -- measuring, claims, packing, and the job -- and M0 to M2
+have run on real cards; M3 awaits its first deploy (*To verify on the first
+deploy of M3*). The **Status** table at the end is where to resume; update it as
+milestones land. Where this and the code disagree, the code is what runs --
+fix whichever is wrong.
+
+## Why
+
+Today `internal/analysis` runs inside the web app (CLAUDE.md, *The analysis
+queue is the database*), one file at a time. That ties three things together
+that don't belong together:
+
+- **The web app is sized for Perch.** Serving pages and tus needs ~0.25 vCPU;
+  Perch needs 2 vCPU / 4 GiB (DEPLOYMENT.md, *Perch*), so with it on the
+  always-on replica is eight times the size the site needs.
+- **A card is slow.** One file at a time on one replica: measured, a card's
+  BirdNET takes about half a day and its Perch about four more (below), and
+  new cards queue behind it.
+- **The probes are loose on purpose** because a health response waits behind
+  hours of BirdNET (DEPLOYMENT.md, *Liveness and readiness*).
+
+### Measured
+
+The first real card with Perch on (image `7495b6a`, 2 vCPU / 4 GiB replica on
+a Xeon Platinum 8370C, ~15-minute files; 38 BirdNET and 5 Perch tasks, with
+the slowest tenth within a few percent of the median for both):
+
+| | BirdNET | Perch |
+|---|---|---|
+| Audio per CPU-second | 33.7 s | 1.99 s |
+| **CPU per hour of audio** | **~107 s** | **~1,810 s** (~0.5 vCPU-h) |
+| Cores in use | 0.96 -- LiteRT is single-threaded | 1.92 -- TensorFlow took both |
+| Speed on that replica | 31.5x real time | 3.8x real time |
+| Peak memory (PSS) | 261 MB | 1.95 GB |
+| Wall time outside the model | store 9%, clip 3%, download 2% | ~1% |
+
+**Perch is ~17x BirdNET's CPU, not the ~3x the 10-minute test clip
+suggested**, and it is the whole cost of analysis. Scaled up, still
+**assuming ~16 hours of audio per recorder-day** (5.5 GB/day as 48 kHz 16-bit
+mono -- the `audioSec` totals in the records will say what it really is):
+
+| | BirdNET | Perch | Both |
+|---|---|---|---|
+| One card (~370 h of audio) | ~11 vCPU-h | ~186 vCPU-h | **~197 vCPU-h** |
+| One recorder, a month | ~14 vCPU-h | ~240 vCPU-h | ~255 vCPU-h |
+| Five recorders, a month | ~71 vCPU-h | ~1,200 vCPU-h | **~1,280 vCPU-h** |
+
+Consumption billing is per vCPU-second and GiB-second, so **parallelism is
+free**: twenty replicas for ten hours cost what one costs for two hundred.
+Moving analysis off the always-on replica makes a card take hours instead of
+days, and the web app stops being sized for Perch; what it costs is set by how
+much audio Perch is run over (*Open: how much audio Perch hears*).
+
+## Decisions
+
+**A Container Apps job, not Azure Batch -- for now.** Batch on spot VMs is
+several times cheaper per vCPU-hour. At the ~400 vCPU-hours a month first
+estimated, the difference was ~$30/month, not worth a second compute platform
+with its own pool, image, autoscale formula, eviction handling and spot quota.
+The worker below is a container that claims files from Cosmos and exits when
+there are none, which runs unchanged on either; moving to Batch later is a new
+launcher, not a redesign. *Revisit when:* the analysis line is where
+$30+/month matters. **Measured, Perch over every file at five recorders puts
+the difference near $125/month -- this trigger is met** unless Perch runs over
+less audio (below). Decide that first: it changes the bill by more than the
+platform does.
+
+**One replica runs both models, packed by memory.** Rather than a BirdNET job
+and a Perch job, each replica runs a scheduler that starts as many analysis
+processes as fit, mixing the two. The models are opposite shapes -- Perch is
+heavy in both CPU and memory (~2 GB a process), BirdNET is light in both
+(~0.26 GB) -- so on one box BirdNET fills whatever Perch leaves. It also means
+one download of a file serves both models (below).
+
+**Memory is a hard budget; CPU is a target.** Running more processes than
+cores only slows them down; running more than fit in memory gets the replica
+OOM-killed and every file on it restarted. So the scheduler admits a task only
+if its memory estimate fits under the container's limit minus headroom, and
+treats cores as a soft limit: it aims to keep them all busy.
+
+**The queue stays the database.** No Storage Queue or Service Bus. A replica
+claims a file by moving its step to `analyzing` with a replace-if-unchanged
+update -- the Store's mutate funcs already do this race-free -- and records a
+lease. What changes is that "found in `analyzing`" no longer means "cut off by
+a restart", because other replicas are running. See *Claims and leases*.
+
+**BirdNET still comes first.** Today's rule -- a new card's first opinion
+never waits behind an old card's second (CLAUDE.md, *Perch is a second
+opinion*) -- becomes the scheduler's priority: when a slot opens, a BirdNET
+task anywhere in the queue beats a Perch task. Within a model, oldest card
+first, as now.
+
+**Every run records how it used the box.** See *Performance data*. The
+figures above come from it; the per-model estimates the scheduler uses should
+too, and be revised when the records say they've moved.
+
+### Open: how much audio Perch hears
+
+Perch is a second opinion on BirdNET, and it costs ~17x BirdNET to run over
+every second of every file. The largest saving available is running it over
+less: only the stretches where BirdNET heard something (with a margin), or
+only BirdNET's low-confidence ones. How much that saves depends on how much
+of a night BirdNET's detections cover -- ~4,000 detections a recorder-day, but
+merged and overlapping -- and what Perch hears outside those stretches.
+`cmd/perchcover` measures both on real card files, locally: it runs both
+models over them, then reports the share of the audio Perch would still hear
+running only around BirdNET's detections (all of them, birds only, or only
+low-confidence birds; with 0, 2 and 5 s of margin, on Perch's 5 s windows),
+and the share of Perch's detections -- and which species -- that would fall
+outside it:
+
+```sh
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/perchcover -lat LAT -lon LON -date YYYY-MM-DD -out cover.json FILES...
+go run ./cmd/perchcover -in cover.json -v     # report again, without re-running
+```
+
+This is a product decision as much as a cost one: a second opinion only over
+what BirdNET heard can't find what BirdNET missed, and the report's "cost"
+columns are exactly that.
+
+## Where the Consumption plan boxes us in
+
+These are Azure's rules, not ours (verify against current docs before M3):
+
+- A Consumption replica is at most **4 vCPU / 8 GiB**, and memory is always
+  **2 GiB per vCPU**. There is no 16-vCPU replica and no buying less RAM per
+  core.
+- That ratio fits Perch: 1.95 GB measured, single process. On 4 vCPU / 8 GiB
+  with ~1 GiB of headroom, three Perch processes fit, and BirdNET's 0.26 GB
+  fits beside them. **Whether Perch uses a core better on one thread or
+  several decides how many Perch processes a replica should run**: it used
+  both of the replica's cores on TensorFlow's default threading, which the
+  benchmark (`-threads 1,2,4`) has yet to compare against one thread each.
+  - If one thread is as efficient per CPU-second, run three or four
+    single-threaded Perch processes on a 4/8 replica.
+  - If several threads are better, fewer processes with more threads each --
+    and memory is then spare, not short.
+- Container Apps doesn't let a replica read its own limits: in production
+  there was no cgroup to read, and the process saw the 4-CPU, 5.9 GB machine
+  under it rather than its 2 vCPU / 4 GiB. So the replica's size is passed in
+  (`BIRDSENSE_REPLICA_CPU`, `BIRDSENSE_REPLICA_MEMORY`), and the scheduler
+  must budget from those, not from what it can see.
+- A job has **one trigger type**: manual, schedule, or event. See *Starting
+  the job*.
+
+## Architecture
+
+```
+ browser ──tus──▶ Web app  (Container App: 0.25–0.5 vCPU, min 1 / max 1 replica)
+                   │  API, tusd, retention sweep; Alpine image, no Python
+                   │  card's last file lands → start an execution (managed identity)
+                   │  every few minutes: work queued and nothing running → start one
+                   ▼
+          Job "analyze"  (Container Apps job, manual trigger; analyzer image)
+            execution: parallelism N, each replica 4 vCPU / 8 GiB
+            replica:  check models → loop { claim, pack, run } → exit 0 when idle
+                   │                          │
+     Cosmos: uploads, audioFiles,      Blob: audio/uploads/ (read)
+     detections, analysisStatus        audio/clips/ (write), perf/ (write)
+```
+
+### The two images
+
+Built in M3. `Dockerfile` has two targets from the same stages:
+
+- **web** -- the server binary and `frontend/` on Alpine. No Python, no
+  models, tens of MB, so new revisions pull fast.
+- **analyzer** -- the same binary with the venv, BirdNET, TensorFlow and the
+  models: the ~2 GB image that used to be the only one. The worker is not a
+  second program but `birdsense worker` (`cmd/server/worker.go`), so it reads
+  the same configuration the same way. It is the last stage, so compose and a
+  plain `docker build` still get the everything-image, in one build. It starts
+  `FROM` the BirdNET runtime (the `birdnet` stage: the venv and the models, no
+  Birdsense code), which deploys build on their own and only when the
+  requirements change (DEPLOYMENT.md, *Deploying a new version*).
+
+`scripts/deploy.ps1` builds both at the same git sha (`birdsense` and
+`birdsense-analyzer`), and Terraform applies both together, so a web app and
+a worker never disagree about a document shape. ROLLBACK.md, *Where analysis
+runs, across the job*, covers rolling back to a tag from before the split.
+
+### Starting the job
+
+Built in M3 (`analysis.Dispatcher`, `internal/azjob`, `infra/job.tf`). The
+job's trigger is **manual**, and each execution is **one worker** (parallelism
+1): Container Apps can't change an execution's parallelism when it is
+started, so the web app sizes the work by how many executions it starts. It
+does so through the ARM API with its managed identity, which a custom role
+allows to start the job, read it and list its executions -- nothing else --
+in two places:
+
+1. **When a card's last file lands**, where `Enqueue` was always called.
+2. **As a backstop**, every five minutes. This covers a start that failed, a
+   worker that died, work waiting on a `retryAfter` longer than a worker's
+   idle time, and cards that were waiting when the job was deployed.
+
+Each time, it counts the steps still to do on processing cards (`Pending`)
+and wants one worker per 25 of them (`BIRDSENSE_ANALYSIS_STEPS_PER_WORKER`),
+up to `analysis_max_workers`, less those running. The job's execution list can
+lag a start, so starts from the last three minutes are counted on top: that
+errs towards too few workers for a few minutes, which the backstop makes up,
+rather than too many. A failure to count or start workers is what the
+coordinator's screens show, over anything a worker said.
+
+The web app keeps `min_replicas = 1` for the backstop and the retention sweep,
+at 0.5 vCPU / 1 GiB. (0.25 vCPU might do; measure a real card upload first.)
+
+**Why not an event or schedule trigger?** An event trigger needs a queue for
+KEDA to watch, and the queue here is Cosmos. A schedule trigger would pull the
+2 GB image every few minutes to find nothing to do. Manual plus a backstop in
+a process that is always up anyway costs neither.
+
+### One replica's life
+
+Built in M3 (`Queue.RunUntilIdle`, `cmd/server/worker.go`):
+
+1. **Check.** Run `Check` (and `CheckPerch` if Perch is on) once. If the
+   models can't run, publish that (below), log the line the *BirdNET
+   unavailable* alert matches, and **exit 1** -- a failed execution -- rather
+   than hold a replica checking for good.
+2. **Read its limits**: the container's own (cgroup v2 or v1) where it can see
+   them, and otherwise the size Terraform passes in (`BIRDSENSE_REPLICA_CPU`,
+   `BIRDSENSE_REPLICA_MEMORY`, the job's `analysis_cpu`/`analysis_memory`) --
+   which is what production has, since a Container Apps replica can't see its
+   own (*Where the Consumption plan boxes us in*).
+3. **Drain** as *Packing* describes, again and again. When nothing has been
+   claimable for `BIRDSENSE_ANALYSIS_IDLE` (two minutes), **exit 0**. A file
+   whose `retryAfter` falls inside that is waited for; one held by another
+   worker, or waiting longer, is left to the backstop. A pass that fails as a
+   whole five times in a row (the store unreachable) exits 1.
+4. **Stopped** -- the replica timeout, or an execution stopped by hand -- it
+   lets go of the files it holds and exits.
+
+A task is one model over one file: download (or reuse, below), analyze, merge,
+cut clips, upsert detections, mark the step done, recount the card. That is
+`Queue.run` / `analyzeFile` / `perchFile` as they are today, called
+concurrently instead of in a loop.
+
+### Packing
+
+Built in M2 (`internal/analysis`: `drain`, `fill`, `Capacity`, `Cost`), and
+running in today's in-process queue already. The queue is given a
+**capacity** -- cores, a memory budget, a most tasks at once -- and a
+**cost** per model, and `drain` keeps as many tasks running as fit:
+
+- **Capacity** comes from the replica's limits (`perf.Limits`: the cgroup's,
+  else `BIRDSENSE_REPLICA_CPU`/`_MEMORY`, else the host's): memory less a
+  headroom for the server, and a task per core. Where only the host is known
+  -- a development machine -- it is two tasks on two cores, so running the
+  server doesn't take a laptop over.
+- **Costs** are the measured peaks with a margin (`analysis.DefaultCosts`).
+- All of it can be overridden without a rebuild, as `BIRDSENSE_ANALYSIS_*`,
+  which Terraform sets from the `analysis_tuning` map variable:
+
+```
+MAX_TASKS       default: a task per core (two on a bare host)
+MEM_HEADROOM    default 1Gi     kept for the server, tusd's buffers, clips
+BIRDNET_MEM     default 350Mi   measured ~260 MB PSS
+PERCH_MEM       default 2300Mi  measured ~1.95 GB PSS
+PERCH_THREADS   default 0       the cores free when the task starts, at least 1
+```
+
+On every change -- a task finishing, a card arriving -- `fill` scans the
+processing cards and starts, in order:
+
+1. The oldest cards' claimable BirdNET files, while there are slots and each
+   one's memory fits beside the running tasks.
+2. Then their Perch files, the same way. So no Perch file starts while a
+   BirdNET file is waiting for a slot, but Perch does start beside the BirdNET
+   still running when its memory fits.
+3. A Perch task gets `PERCH_THREADS` threads, or with 0 the cores the running
+   tasks leave free, at least one. Threads are fixed when the process starts,
+   so this is where a replica that has run out of BirdNET work hands all its
+   cores to Perch. BirdNET's interpreter is single-threaded, so a BirdNET task
+   counts as one core.
+4. Memory is a limit, cores and slots a target: a task that doesn't fit
+   waits, except that a task bigger than the whole budget still runs when
+   nothing else is, rather than never.
+
+Checked for real on a 2 vCPU / 4 GiB budget (3 GiB after headroom) with six
+copies of the Osprey clip and Perch on: two BirdNET files at a time, the first
+Perch file started beside the last BirdNET one on 1 thread, and the rest --
+which don't fit two to a replica -- one at a time on both cores.
+
+**A file that fails** waits for its own `retryAfter` (30 s, then 60 s) while
+everything else goes on; only a failure no file is to blame for (the store
+unreachable) pauses the queue, on a delay that grows while it lasts.
+
+**Not built: sharing a download between the two models.** Perch runs on a
+file only after its BirdNET step, and BirdNET goes first across every card, so
+sharing would mean holding each file on disk until Perch got to it -- a whole
+card, for hours. Downloads are ~2% of a task's time (*Measured*), so it isn't
+worth it; if the two steps ever run back to back on one file, it becomes
+cheap.
+
+### Claims and leases
+
+Built in M1 (`internal/analysis`: `take`, `hold`, `release`; SCHEMA.md,
+*Claims*). Each step -- the file's own status for BirdNET, `perch` for Perch --
+carries a `db.Claim`, whose fields sit beside the step's status:
+
+| Field | Meaning |
+|---|---|
+| `claimedBy` | the worker holding the step: its process (`perf.Instance()` and pid), which is the replica in Azure |
+| `leaseUntil` | when the claim lapses if not renewed |
+| `attempts` | failed tries so far, stored rather than in memory, so a fleet of short-lived replicas can't reset it |
+
+- Claiming is `uploaded`/`queued` → `analyzing` with `claimedBy` and
+  `leaseUntil = now + 5 min`, in one replace-if-unchanged write (both
+  backends re-run the mutation on a conflict). Losing the race means another
+  worker has it; the queue moves on to the next file.
+- A running step renews its lease every minute. If the claim turns out to be
+  someone else's, or renewing fails twice in a row, the run is cancelled and
+  the file left to whoever has it, with no attempt counted.
+- An `analyzing` step whose lease has lapsed is claimable, and taking it
+  counts an attempt: a file whose worker was OOM-killed comes back this way,
+  and one that keeps killing its worker fails on the third. One with no
+  `claimedBy` is from before claims -- cut off by a restart, as it always was
+  -- and is taken without counting.
+- A worker that is stopped (a deploy, a scale-in) lets go of its file, so the
+  next start takes it up at once rather than waiting out the lease, and that
+  isn't counted either.
+- The in-process queue claims the same way, as the only claimant, so there is
+  one code path. When the only queued files are held by someone else, `Run`
+  looks again when the soonest lease lapses; nothing else would wake it.
+- **`retryAfter`** (M2) is the step's "not claimable before" after a
+  failure: 30 s after the first, 60 s after the second. It spaces one file's
+  tries without pausing anything else, which matters once several replicas
+  share the queue. `Run` wakes for the soonest one.
+
+### Where the queue's status lives
+
+Built in M3. `Queue.Status` is in-process state, so a worker publishes it --
+on every change -- to `status/analysis.json` in file storage
+(`analysis.PublishStatus`), and the web app reads it back every 30 seconds
+(`ReadStatus`) and serves it where it served `Queue.Status()`: `/health` and
+the coordinator's card routes. A blob rather than a Cosmos document, because
+it is operational state rather than data, and it needs no container, schema
+or role. With several workers the last to report wins, which is the most
+recent thing that happened. Before any worker has reported, the state is
+`idle`, which the card screens show nothing for.
+
+### Dev and compose
+
+`BIRDSENSE_ANALYSIS_JOB` -- the job's resource id -- is what switches the web
+app to starting workers. Unset, which is development, compose, and
+`analysis_job_enabled = false`, the server runs the queue in its own process
+exactly as before: packed, claiming, the same code a worker runs. Compose
+builds the analyzer image, so it can. `birdsense worker` runs one worker
+against whatever the environment names, which is how to try one locally:
+
+```sh
+cd backend && BIRDSENSE_DB=local BIRDSENSE_ANALYSIS_IDLE=10s go run ./cmd/server worker
+```
+
+## Performance data
+
+The goal: after any real card, you can download one set of files, hand them
+over, and we can answer *what size of replica, how many of them, and how many
+threads per model*.
+
+### What is recorded
+
+`internal/perf` writes **JSON Lines**, three record types. They are written by
+today's in-process queue already, so production data starts with the next
+real card (M0), and the worker will write the same records in M3.
+
+**`run`** -- when the process starts, and again at the top of every segment
+(below), so any one file says what it measured: the instance (the Container
+Apps replica name, or the hostname), the image tag (`BIRDSENSE_IMAGE_TAG`), the
+CPU model, the cgroup limits (`cpu.max`, `memory.max`, or the host's when there
+are none), and the analysis settings (Perch on or off; the scheduler's once
+there is one).
+
+**`sample`** -- every 5 seconds while anything is being analyzed, and once
+more when it stops; an idle server writes nothing:
+
+```json
+{"type":"sample","t":"2026-10-03T14:02:05Z",
+ "cpu":{"usedCores":3.71,"limitCores":4,"throttledMs":120},
+ "mem":{"current":6.42e9,"anon":5.90e9,"file":0.48e9,"limit":8.59e9,"oomKills":0},
+ "tasks":[{"id":"…","model":"perch","phase":"analyze","cores":0.98,"pss":2.61e9,"procs":3},
+          {"id":"…","model":"birdnet","phase":"clip","cores":1.02,"pss":0.31e9,"procs":1}]}
+```
+
+Container figures come from cgroup v2 (`cpu.stat`, `memory.current`,
+`memory.stat`, `memory.events`), else cgroup v1, else the whole machine from
+`/proc/stat` and `/proc/meminfo` -- which is what Container Apps gives, where
+the machine is a small VM around the replica; the `run` record's `source` says
+which. The limits are the cgroup's, else the replica size Terraform passes in,
+else the machine's (`limitsFrom`). A task's figures sum its scripts' process
+groups from `/proc` -- `internal/birdnet` starts each script in a group of its
+own and reports it through `birdnet.WithObserver` -- with CPU from `stat` and
+memory as **PSS** from `smaps_rollup`, not RSS: birdnet's worker processes
+share pages with the script, and RSS counts those twice. `anon` vs `file`
+separates real memory from page cache, which the kernel reclaims before it
+OOM-kills.
+
+**`task`** -- once per model's pass over a file:
+
+```json
+{"type":"task","t":"…","id":"…","model":"perch","card":"…","file":"…","path":"DATA/…/x.WAV",
+ "workers":1,"threads":0,"result":"ok","audioSec":3600,"bytes":345600000,"detections":212,
+ "waitSec":840,"wallSec":468.3,
+ "phases":{"download":6.1,"analyze":437,"clip":22.4,"store":2.8},
+ "cpuSec":431,"peakPss":2.63e9,"maxRss":2.1e9,
+ "runningAtStart":{"birdnet":2,"perch":1}}
+```
+
+`cpuSec` and `maxRss` are the kernel's own accounting of each script when it
+exits (`wait4`'s rusage, which includes the workers the script joined), so
+they are exact where the samples are not; `peakPss` is the highest a sample
+saw, and a task shorter than one interval has none. `audioSec / cpuSec` is the
+number that matters most: how much audio a core gets through, per model and
+setting, while sharing the box. `phases` says whether a file is compute-bound
+or waiting on storage. `result` is `ok`, `unreadable` or `error`.
+
+### Where it goes
+
+- **File storage**, under `perf/` in the `audio` container, beside the audio
+  rather than in a container of its own, so it needs no new role or container:
+  `perf/{yyyy-mm-dd}/{instance}/{segmentStart}.jsonl`. `storage.Store` can't
+  append to a blob, so each file is a **segment** that is rewritten whole
+  every 30 seconds and rolled after ten minutes (or 1 MB); a replica killed
+  without warning loses at most 30 seconds. In dev the same names are under
+  `backend/data/audio/perf/`. About 200 KB per busy replica-hour; a lifecycle
+  rule deletes them after 180 days (`infra/storage.tf`). `BIRDSENSE_PERF=off`
+  turns it all off.
+- **Log Analytics**, for the `task` records, as a structured log line
+  (`msg="analysis: task"`, with `audio_per_cpu_sec`), so a quick KQL query
+  answers "how long is Perch taking this week" without downloading anything.
+
+### Bringing it back
+
+```sh
+az storage blob download-batch --auth-mode login \
+  --account-name <account> -s audio -d ./perf-data --pattern 'perf/2026-10-*'
+```
+
+(`grant_operator_blob_access` gives the operator read access.) Then either hand
+over the `.jsonl` files as they are, or run the summary first:
+
+```sh
+cd backend && go run ./cmd/perf ../perf-data
+```
+
+`cmd/perf` prints three tables: what it was measured on (CPU, limits, image,
+settings); per model, workers and threads -- audio per CPU-second (median and
+slowest tenth), times real time, cores used, peak PSS (p50, p95, max), max RSS
+and how wall time split across the phases; and per instance, while it had
+work -- mean cores, the share of time at <25/<50/<75/≥75% of the CPU limit,
+throttling, peak memory and anon against the limit, and OOM kills. It is text
+to paste; the raw files are there when it doesn't answer the question.
+
+### The benchmark
+
+Production data shows the replica as it runs; it can't show a setting we
+haven't deployed. So `cmd/analyze -bench` runs the model over a file once per
+combination of `-workers` and `-threads` (each a comma-separated list, with
+`-repeat`), one run at a time, samples it the same way, writes the same records
+to `bench-MODEL-TIME.jsonl`, and prints a line per run:
+
+```sh
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/analyze -bench -model perch -threads 1,2,4,8 card-file.wav
+```
+
+What the two settings actually control, from reading birdnet 1.1.1:
+
+- **BirdNET's LiteRT interpreter is hard-coded to one thread**
+  (`num_threads=1` in `birdnet/core/backends.py`). It uses more cores only
+  through `-workers`, which are processes, each with its own model copy.
+- **Perch's TensorFlow uses TensorFlow's default threading: every core the
+  process can see.** So DEPLOYMENT.md's "73 s on one worker" may already have
+  been spread over several cores, and on a shared replica several Perch
+  processes would contend for all of them. `analyze.py --threads N`
+  (`birdnet.Options.Threads`) caps it by setting `TF_NUM_INTRAOP_THREADS` and
+  `OMP_NUM_THREADS` to N and `TF_NUM_INTEROP_THREADS` to 1 before anything
+  loads -- environment variables because birdnet's workers are child
+  processes, which `tf.config` calls in the script wouldn't reach.
+- Starting either model is not single-threaded: on the 14-second Osprey clip,
+  BirdNET with 2 workers used 12.6 CPU-seconds in 3.1 s of wall time, most of
+  it Python, numpy and the model loading. That is why the benchmark wants a
+  real hour-long card file: on a short clip, startup is the measurement.
+
+### What the numbers decide
+### What the numbers decide
+
+| Question | Read it from |
+|---|---|
+| Does Perch use more than one thread well? | bench: `audioSec/cpuSec` flat as threads rise = yes |
+| What memory to budget per model | `task.peakPss`, p95 plus margin |
+| Is the replica full? | `sample.cpu.usedCores / limitCores` over the execution |
+| Is memory, not CPU, what stops it packing more? | CPU below the limit while `mem.anon` is near the budget |
+| Consumption 4/8, Dedicated D-series, or Batch | the two rows above, together |
+| How many replicas per execution | the tail, and vCPU-hours per card |
+| Is storage a bottleneck? | `phases.downloadSec` against `analyzeSec` |
+
+## Cost
+
+List prices, pay-as-you-go, rough -- check the calculator. Consumption bills
+~$0.086 per vCPU-hour and ~$0.011 per GiB-hour while active, so a 2 GiB/vCPU
+replica is **~$0.11 per vCPU-hour**, less a monthly free grant.
+
+With the measured figures, Perch over every file, five recorders:
+
+| | Today, Perch on | This design |
+|---|---|---|
+| Web app | 2 vCPU / 4 GiB, always on, and Perch keeps it ~90% busy: **~$150/month** -- about as much as it can do, so any more audio and the backlog grows | 0.25 vCPU / 0.5 GiB, mostly idle: **~$5/month** |
+| Analysis | included above | ~1,280 vCPU-h × $0.11 ≈ **~$140/month**, if packed well |
+| Per recorder | | ~$28/month, of which BirdNET ~$1.50 |
+| One card | ~12 h of BirdNET, then ~4 days of Perch | ~5 hours at 10 replicas of 4 vCPU |
+
+So the job doesn't make Perch much cheaper -- it is billed for the same CPU --
+it makes cards fast and stops the backlog. What makes it cheaper is Perch
+hearing less audio (*Open: how much audio Perch hears*), and after that Batch
+on spot VMs, which would bring ~1,280 vCPU-hours to roughly $10–15.
+
+## Milestones
+
+**M0 -- Measure, in today's architecture.** The sampler, the `run`/`sample`/
+`task` records, the `perf/` prefix and its lifecycle rule, `cmd/analyze -bench`,
+`analyze.py --threads`, `cmd/perf`. This runs inside today's in-process queue,
+so the next real card in production produces data before anything else
+changes. Then: bench Perch and BirdNET at 1/2/4/8 threads on a real card file.
+
+**M1 -- Claims, leases, stored attempts.** Schema fields and SCHEMA.md, the
+lease-renewal loop, letting go on the way out. Still in-process and still one
+task at a time; the existing tests keep passing, plus two workers racing over
+one card in the JSON backend.
+
+**M2 -- The packing scheduler.** Memory budget from the replica's limits
+(cgroups, else `BIRDSENSE_REPLICA_*`), per-model estimates from M0,
+BirdNET-first, thread handoff, and `retryAfter` in place of `Run`'s pause as
+what spaces a file's retries. (The shared download cache was dropped; see
+*Packing*.)
+In-process, so it can run in the current web app with Perch on and be measured
+there.
+
+**M3 -- The job.** `birdsense worker`, the two Dockerfile targets,
+`deploy.ps1` building both, the published status, the web app's dispatcher
+and backstop, Terraform (the job, a custom role for the web identity,
+`analysis_job_enabled`, `analysis_cpu`, `analysis_memory`,
+`analysis_max_workers`, `analysis_replica_timeout_seconds`), the *BirdNET
+unavailable* alert reading the job's logs, the web app down to 0.5 vCPU /
+1 GiB, and DEPLOYMENT.md, CLAUDE.md and ROLLBACK.md updated. No separate
+failed-execution alert: the one way a worker fails that no one would
+otherwise notice is its models not running, which that alert already
+catches; add one if executions turn out to fail other ways.
+
+**M4 -- Tune.** A month of real cards, then the table in *What the numbers
+decide*: settle the per-model estimates and threads, the replica count, and
+whether Consumption 4/8 is the right shape or it is time for a Dedicated
+profile or Batch.
+
+## To verify on the first deploy of M3
+
+Things that can only be checked in Azure. Each has a place it would show:
+
+- **The images build in ACR** (`--target web` and `--target analyzer`); no
+  Docker here to try them. `deploy.ps1` stops if either fails.
+- **The role is enough.** The web app's log says `analysis: started workers`
+  when a card lands; a 403 instead shows on the coordinator's card screens as
+  "counting the running analysis workers" or "starting an analysis worker".
+  `Microsoft.App/jobs/executions/read` is the action least sure to be spelled
+  right. Creating the role needs Owner or User Access Administrator.
+- **The start call.** `POST …/start` with an empty `{}` body at API version
+  `2024-03-01`; `az containerapp job execution list` should show one
+  execution per start.
+- **A worker's limits and packing.** Its first performance records should say
+  `limitsFrom: config` at `analysis_cpu`/`analysis_memory`; read them with
+  `cmd/perf` as before.
+- **Cold starts.** How long the ~2 GB analyzer image takes to pull on a fresh
+  replica: the gap between an execution starting and its first `analysis:
+  task` log line.
+- **Ephemeral storage** on a 2- or 4-vCPU replica: a few concurrent files
+  and their clips have to fit.
+- **Job limits:** the longest replica timeout allowed, and the environment's
+  Consumption core quota -- `analysis_max_workers` × `analysis_cpu` cores
+  have to fit in it.
+
+## Status
+
+| Milestone | State | Notes |
+|---|---|---|
+| M0 Measure | done 2026-09-28, but for the benchmark | First real card measured (*Measured*). Production had no readable cgroup, so the container figures now fall back to cgroup v1 and `/proc`, and Terraform passes the replica's size in. Still to run: `cmd/analyze -bench -model perch -threads 1,2,4` on a real card file. |
+| M1 Claims and leases | done 2026-09-28 | `db.Claim` on both steps; `take`/`hold`/`release` in `internal/analysis`; tests for two workers sharing a card, a lapsed claim, a lost claim, and stopping (race detector clean). `retryAfter` moved to M2. Not yet run against Cosmos. |
+| M2 Packing scheduler | done 2026-09-28 | In-process: `drain`/`fill` pack BirdNET and Perch by memory and slots, BirdNET first, Perch threads from free cores, `retryAfter` per file. Tests with a fake analyzer (race detector clean), and a real run of both models in a dev server. Tunable through `analysis_tuning`. Next: M3, the job. |
+| M3 The job | code landed 2026-09-28; not yet deployed | `birdsense worker`, `analysis.Dispatcher`, `internal/azjob`, the `web`/`analyzer` images, `infra/job.tf` with its custom role; the web app down to 0.5 vCPU / 1 GiB. A real worker ran a card with both models in a dev environment and exited when idle; `azjob` is tested against a fake ARM server; `terraform validate` passes. Not yet run in Azure: the first deploy is the test of the role, the start call and the images (*To verify*). |
+| M4 Tune | not started | |

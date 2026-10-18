@@ -53,7 +53,7 @@ class AdminUploads extends UploadsTable {
       CELLS.referenceLink,
       CELLS.volunteer,
       CELLS.station,
-      CELLS.nights,
+      CELLS.recorded,
       CELLS.files,
       CELLS.detections,
       CELLS.status,
@@ -182,6 +182,8 @@ const BIN = `
   </svg>`;
 
 function binCell(upload) {
+  // Already on its way out: deleting it again would change nothing.
+  if (upload.status === "deleting") return `<td class="actions"></td>`;
   const reference = escapeHTML(upload.reference);
   return `
     <td class="actions">

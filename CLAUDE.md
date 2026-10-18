@@ -2,31 +2,43 @@
 
 Birdsense is the Eastside Audubon web app for bird-call detections (BirdNET)
 from local listening stations. One Go binary serves the JSON API *and* the
-static frontend, so the whole app is one container with no reverse proxy, no
-Node runtime, and no separate deploy for the UI.
+static frontend, so the web app is one container with no reverse proxy, no
+Node runtime, and no separate deploy for the UI. The same binary, as
+`birdsense worker` in a second image with BirdNET in it, is the analysis job
+the web app starts (*Analysis runs as a job*).
 
 What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
 runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md),
 and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
+How analysis runs as a job -- the design, what was measured, and where it
+stands -- is [ANALYSIS.md](ANALYSIS.md).
 
 ```
 /
-├── .github/workflows/  CI: gofmt, vet, tests and govulncheck
+├── .github/workflows/  CI: gofmt, vet, tests and govulncheck; the frontend's node --test
 ├── backend/            Go module: API + static file server
-│   ├── cmd/server/     main(): config, routing, graceful shutdown
-│   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server)
+│   ├── cmd/server/     main(): config, routing, graceful shutdown; `worker`: an analysis job replica
+│   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
+│   ├── cmd/perf/       CLI: summarizes internal/perf's records for sizing analysis
+│   ├── cmd/perchcover/ CLI: what running Perch only around BirdNET's detections saves and misses
 │   └── internal/
-│       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections
-│       ├── api/        JSON handlers under /api/v1/
+│       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections;
+│       │               and the Dispatcher that starts the job's workers
+│       ├── azjob/      Starts and counts the analysis job's executions (ARM REST)
+│       ├── api/        JSON handlers under /api/v1/; the MCP endpoint and its OAuth server
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
+│       ├── deletion/   Removes the cards a coordinator deletes, in the background
+│       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
-│                       (requirements-perch.txt adds TensorFlow, for Perch)
-├── test/               Audio fixtures (a known Osprey clip)
+│                       (requirements-perch.txt adds TensorFlow, for Perch), which the
+│                       Dockerfile's `birdnet` stage installs: the runtime `analyzer` builds on
+├── test/               Audio fixtures (a known Osprey clip); frontend/: the
+│                       frontend's tests, plain `node --test` with no packages
 ├── frontend/           Shipped as-is; no build step, no bundler
 │   ├── index.html      Loads /js/main.js as a module; body is just <bs-app>
 │   ├── styles/app.css  Design tokens (--bs-*) + document styles
@@ -35,6 +47,8 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 │   │                   eastsideaudubon.org -- replace, don't edit)
 │   │                   barred-owl.jpg: the home and sign-in banner, CC BY
 │   │                   4.0 -- its credit on both pages must stay with it
+│   ├── vendor/          Third-party files served as they were published, with their
+│   │                    hashes in THIRD_PARTY_NOTICES.md: libflac.js (FLAC encoder)
 │   └── js/
 │       ├── main.js         Imports every component so they self-register
 │       ├── api.js          fetch wrapper for /api/v1
@@ -43,8 +57,11 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 │       ├── shared-styles.js Constructable stylesheets for repeated primitives
 │       ├── format.js        Dates, sizes, counts, durations
 │       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
+│       ├── flac.js          Sends a card's WAVs as FLAC: decides, and runs the workers
+│       ├── flac-worker.js   A classic worker: libflac.js encodes one WAV, and checks a tab's first
+│       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
-│       ├── card-scan.js     Reads a card folder into a night-by-night manifest
+│       ├── card-scan.js     Reads a card folder into a day-by-day manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
 │                            and uploads-table.js (the two card lists' base class)
@@ -57,7 +74,8 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 ├── LICENSES/           Full licence texts the notices refer to
 ├── DEPLOYMENT.md       Azure resources and settings: the why behind infra/
 ├── ROLLBACK.md         Going back to an earlier image, and what it doesn't undo
-├── Dockerfile          Multi-stage: build Go, ship binary + frontend/
+├── Dockerfile          Two images: `web` (Alpine: binary + frontend/) and `analyzer` (+ BirdNET,
+│                    from the `birdnet` stage: one build locally, its own image in deploys)
 └── docker-compose.yml
 ```
 
@@ -99,6 +117,11 @@ breaks in a container with no outbound network:
   the attribution kept visible and light traffic; move to a paid provider or
   our own tiles before putting a map on the public landing page.
 Self-host any of these if that trade stops being worth it.
+One is self-hosted already: libflac.js, the FLAC encoder (*The browser sends
+WAVs as FLAC*), is in `frontend/vendor/` as the package published it. It runs
+in a worker, and nothing a worker loads can carry an integrity hash, so the
+repo pins it instead; its hashes are in THIRD_PARTY_NOTICES.md. Vendoring a
+published file is not a build step -- it is served byte for byte like the rest.
 
 **Response headers are set once, for everything.** `web.SecurityHeaders` wraps
 the whole mux -- API and frontend alike -- with a content security policy and
@@ -107,7 +130,7 @@ COOP, CORP, `Permissions-Policy`). HSTS follows the same "not in dev" rule the
 session cookie's `Secure` flag does. The policy is `default-src 'none'` plus
 one directive per thing the frontend actually loads, so the third-party origins
 listed under *No build step* are named in one place in Go and a new one is a
-one-line diff that says what capability it bought. Two allowances are
+one-line diff that says what capability it bought. Three allowances are
 deliberate:
 - `style-src` keeps `'unsafe-inline'`. Every component writes a `<style>` into
   its own shadow root and several set a `style` attribute, and with no build
@@ -117,10 +140,17 @@ deliberate:
   hash. Gotcha: it is hashed out of the file at startup rather than written
   down as a constant, because nothing keeps a constant in step with a file that
   has no build step -- and a blocked import map fails *silently*, so the
-  mistake would surface only as the recorders map quietly not loading. An
+  mistake would surface only as the recorders map quietly not loading. The
+  file's line endings are normalized to LF before hashing, as the browser's
+  HTML parser does, so a Windows checkout (autocrlf) hashes the same. An
   external import map would avoid the whole problem, but no browser supports
   one. `internal/web`'s test checks the shipped `index.html` has nothing else
   inline.
+- `script-src` has `'wasm-unsafe-eval'`, which lets WebAssembly be compiled
+  and allows no JavaScript `eval`: the FLAC encoder is WebAssembly, in a
+  worker of our own (`worker-src 'self'`) that gets this same policy from its
+  own response. Without it the worker fails to load and every file goes as it
+  is on the card, which works but takes twice as long.
 *Revisit when:* the frontend gains a build step -- then the component styles
 can be hashed or nonced too -- or something has to embed a Birdsense page or
 clip cross-origin, which `frame-ancestors` and CORP currently refuse.
@@ -158,19 +188,30 @@ GET    POST /api/v1/uploads               your cards; register a card and its fi
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
-GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one model's: ?model=perch)
+POST   /api/v1/speedtest                  a body read and thrown away: the upload speed test
+GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one card's: ?card=, all of it; one model's: ?model=perch)
+GET    /api/v1/detections/export      the same, every row rather than a page: a JSON file to save
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
 PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
 GET    /api/v1/admin/uploads              every card, admin only
-GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it
+GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it (202: it goes in the background)
 GET    POST /api/v1/admin/people          the roster
 PUT    DELETE /api/v1/admin/people/{id}   edit or remove someone
 POST   /api/v1/admin/stations
 PUT    DELETE /api/v1/admin/stations/{id} rename, move or remove a recorder
 GET    /api/v1/dev/people                 the roster, dev mode only
 POST   /api/v1/session                    sign in as anyone on it, dev mode only
+
+POST   /api/v1/mcp                        MCP, for an LLM tool: a bearer token from the OAuth routes below
+GET    /api/v1/mcp/export?token=          a detections_export link: a range as CSV
+GET    /.well-known/oauth-protected-resource[/api/v1/mcp]   which authorization server the MCP endpoint trusts
+GET    /.well-known/oauth-authorization-server              where the OAuth endpoints are
+POST   /api/v1/oauth/register             an MCP client registers itself
+GET    POST /api/v1/oauth/authorize       to the consent page; Allow or Cancel from it
+GET    /api/v1/oauth/request?request=     what the consent page shows
+POST   /api/v1/oauth/token                a code or a refresh token for tokens
 ```
 
 Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
@@ -183,9 +224,13 @@ A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
 anyone else, and the `/admin/*` routes 403 for a volunteer.
 Detections are not a card's: anyone signed in hears and reviews every card's,
 under `/detections`. A card's counts are
-the server's own tally of the files it has received (`tallyFiles`), never
-reported by the client, so a retried chunk can't count twice, and a card moves
-to `processing` only once every file on its list is in. The roster always keeps an admin: removing or
+the server's own count of the files it has received, never reported by the
+client: a file is counted (`countFile`) by the write that marks it received, so
+a retried chunk can't count twice, and the card is recounted from its files
+(`tallyFiles`) only when it is registered and when that count reaches its last
+file -- recounting as each file landed made a card cost the square of its files
+(CARD-COUNTS.md). A card moves to `processing` only from that recount, once
+every file on its list is in. The roster always keeps an admin: removing or
 demoting the last one is a 409, and so is an admin removing themselves.
 
 **A list of detections is bounded twice: by a window, and by a ceiling.** A
@@ -207,6 +252,12 @@ BirdNET -- which has 2 GiB for that, BirdNET and tusd's buffers together. So:
   which is the replica. A window keeps the ordinary request cheap; the ceiling
   is what makes a careless one a message instead of a restart.
 
+The tab's "Export as JSON" is `GET /detections/export`: the same parameters,
+answered with every row they match rather than a page, as one file, so the
+count above the list is the count in the file. It is bounded exactly as the
+list is and costs what one page of it does, since the list reads every match
+to sort it anyway; the rows are encoded as they are written, not built up
+first.
 `GET /detections/{ref}` takes the same `limit` and `offset` and reports `total`
 beside the page. `js/detection-list.js` is the browser's side of this: it reads
 the tab's filters and sort off the query string, asks for a page, and *holds*
@@ -214,15 +265,26 @@ the few pages it has fetched. That is what lets a detection opened from the
 list have Previous and Next step through the list -- in its order, across
 cards, and on into the next page when a reviewer reaches the end of one --
 without re-running the search on every step. A detection opened from anywhere
-else (a card, a link that carries no list) steps through its file instead.
+else (a link that carries no list) steps through its file instead.
 Neither is a nicety: it is the same read, and holding the page is what keeps a
 reviewer from re-running it on every step. A page's station names are point
 reads of the cards on that page, for the same reason.
+The tab is the one list of detections. A card's page doesn't list what was
+heard on it -- a list there, file by file, was a second way to read the same
+thing with none of the filters -- it links to the tab narrowed to the card,
+`/app/detections?card={reference}`, as does the count in the card lists. One
+card's is the exception to the window: it is a read of the card's own
+partition, so with no dates it answers for the whole card, and the tab opens it
+with its date fields empty and a line saying which card, with a way back to
+every card's.
 *Revisit when:* a reviewer meets the ceiling in ordinary work rather than by
 widening the dates -- more recorders will do it, and so will a whole season on
 one screen or a species tally that has to count what the window leaves out.
 Then the answer is a precomputed summary document and a query the database
 pages itself, not a wider window and a higher ceiling.
+The MCP tools (*LLM tools connect over MCP*) are the one reader with no
+ceiling, because they hold nothing: `Store.EachDetection` hands over a page
+at a time, and the summary keeps tallies, the export writes rows as they come.
 
 **The landing page is answered a minute at a time.** `GET /public/overview`
 needs no session, and answering it reads every recorder, every card and every
@@ -260,6 +322,12 @@ whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
 routes for a path with an id on the end) and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
+The sign-in guard sends someone to `/signin?next=<where they were going>`, and
+both sign-ins go there afterwards -- the dev picker by navigating, the OIDC
+flow by carrying it in its state cookie -- so a link into the app survives
+signing in, and so does `/connect`, the MCP consent page. `next` is held to a
+path on this site on both sides (`localPath` in Go), or sign-in would be an
+open redirect.
 A route may `redirect` instead of naming a page, as a path or as a function of
 the path; the detections tab was two tabs once, so `/admin/detections` and
 `/admin/detections/{reference}/{id}` redirect to the `/app` ones, filters and
@@ -314,6 +382,103 @@ startup -- so a page that makes no API call won't notice.
 *Revisit when:* a provider has to be something other than Google or Microsoft,
 or sessions need to be listed and revoked one at a time.
 
+**LLM tools connect over MCP, and Birdsense is the OAuth server.** The weekly
+report is written by an LLM tool reading the data as someone on the roster, so
+`POST /api/v1/mcp` serves MCP (the official Go SDK, `modelcontextprotocol/go-sdk`,
+stateless and plain JSON) behind a bearer token, and `internal/api/oauth.go`
+is the OAuth 2.1 authorization server that issues it -- a claude.ai custom
+connector, or anything else that follows the MCP authorization spec, needs
+only the URL. It can't be Microsoft or Google: neither lets a client register
+itself, and what lets anyone in is the roster. So the authorization endpoint
+checks the client, then hands a signed request to `/connect`
+(`<bs-connect-page>`), which is behind ordinary sign-in and asks "let this app
+read Birdsense as you?"; Allow mints a code, and the token endpoint swaps it,
+with PKCE (S256, required), for an hour's access token and a refresh token.
+Like the session cookie, nothing is stored. A client's registration *is* its
+`client_id` (signed, with a random id so two alike are two); a client that
+registers with a secret gets a MAC of its id; a code is single-use by an
+in-memory list of the spent ones, which only has to outlast the code's minute
+(one replica); and tokens are signed values, each kind under its own key
+derived from `BIRDSENSE_SESSION_KEY` (`keyset.derive`), so no token passes for
+a cookie or for another kind of token. Every token use checks the roster, so
+removing someone ends their connections, and rotating the session key ends
+everyone's. A connection lasts 90 days from Allow, as a session does;
+refreshing doesn't extend it. Redirect URIs must be https, or http on
+loopback (any port, RFC 8252); custom schemes aren't taken.
+Four read-only tools, sized for a week at a time:
+- `list_recorders`: ids, names, positions, and when each one's most recent
+  recording started.
+- `detection_summary`: the detections between two RFC 3339 instants the
+  caller names (`since` inclusive, `until` exclusive; at most 31 days apart,
+  the last 7 by default), filtered by minimum confidence and recorders,
+  aggregated in Go into a few thousand tokens -- totals, per-day counts per
+  recorder, per species (count, days, recorders, confidence, reviews, by
+  hour, its best detection's link) and *coverage*: per recorder, the cards
+  with recordings in the range, each with when its first and last recordings
+  started and whether BirdNET has finished with it. Days and hours are
+  counted, and times written, in the `timeZone` the caller names (Pacific by
+  default). Coverage matters because cards arrive a week or two late, and a
+  model reading counts without it reports a quiet recorder as fewer birds.
+  Rejected detections count only in `totals.rejected`; a reviewer's
+  correction replaces BirdNET's species. BirdNET's alone, never Perch's.
+- `find_detections`: the rows themselves, for a question narrow enough to
+  have few ("the Barred Owl detections at Marymoor"): the same range and
+  filters, plus species (either name), review statuses, hours of the day,
+  a sort and the columns, answered as CSV text in the conversation -- 100
+  rows by default, `maxFindRows` (500) at most, ~25 tokens a row. It reads
+  the whole span as the summary does and holds only the first rows by the
+  sort; the answer always says how many matched, and when that is more than
+  it returned, says in capitals that these aren't all of them. Its
+  description tells a model to scope with `detection_summary` first. No
+  structured copy of the rows goes beside the text, since a client may hand
+  a model both.
+- `detections_export`: the same span as CSV, one row per detection, behind a
+  link the tool returns rather than rows in the conversation -- a week is
+  ~140,000 rows, ~4M tokens, which no context holds. The link is signed with
+  who asked and for what, lasts 30 minutes, and is the only credential the
+  fetch needs, because what fetches it (code in a model's sandbox) holds no
+  token. It is streamed (gzip if asked), and a read that fails part way
+  aborts the response rather than leaving a short file that looks whole.
+The range tools read through `Store.EachDetection`, two at a time at most
+(`mcpScans`), so memory is a page and Cosmos sees two cross-partition reads.
+Gotchas: the link is a credential in a URL, so it must stay out of logs --
+`fail()` logs the path, not the query, which is why the token is a query
+parameter. And claude.ai's code sandbox only reaches domains its network
+egress settings allow, so the export works there only once the Birdsense
+domain is added (Settings > Capabilities; an admin's on Team and Enterprise,
+impossible on Free); the other tools need nothing. The sandbox's proxy
+refuses the CONNECT with a 403 that looks like Birdsense refusing the link, so
+the export's answer says so, names the setting, and points at
+`find_detections` (`exportBlocked`).
+The Detections tab's "Add to Claude" opens claude.ai's Add custom connector
+dialog with this origin's MCP URL filled in (its documented
+`modal=add-custom-connector` link); it only fills in the form.
+*Revisit when:* someone needs to end one connection without ending the rest
+(a stored grant per connection, listed under the person), a client registers
+with a Client ID Metadata Document instead of DCR, or the same ranges are
+asked for often enough that a cached per-week summary is worth its
+invalidation.
+
+**There are no nights: when is a time, and a span is the reader's to choose.**
+Recorders run dusk to dawn, and Birdsense once grouped a card's files into
+*nights* -- the evening a night began, so a 3 a.m. file belonged to the day
+before -- and showed, counted and filtered by them. Read beside the
+Detections tab's calendar dates, that was two meanings of "Sep 15" in one app.
+So everything is dated by when it was recorded: a card by its first and last
+recordings (`firstRecordingAt`, `lastRecordingAt`, from the file names at
+registration), a file by `recordedAt`, a detection by `detectedAt`. Screens
+show dates and times in the browser's time zone; the upload check groups a
+card's files by the date in their names, and flags a day with far fewer files
+than the others, the first and last days being partial by nature. Anything
+that filters takes instants, and anything that counts by day says which time
+zone it counted in. Which instants make up "last week's owl activity" is the
+caller's to decide -- noon to noon, dusk to dawn -- not the server's.
+Gotcha: a card registered before this has no recording times until the
+server starts and reads them from its files' names (`backfillRecordingTimes`);
+the old `night` fields stay in those documents, unread (SCHEMA.md).
+*Revisit when:* a recorder's file names carry no time -- then a card can't be
+dated except by when it was pulled, and analysis already falls back to that.
+
 **Card audio goes over tus, through the app.** A card is ~128 GB in files of a
 few hundred MB, sent over home connections that drop. The browser sends each
 file as its own tus upload (tus-js-client) to `/api/v1/tus/`, where tusd, used
@@ -323,8 +488,19 @@ paused file resumes from the last chunk the server has. Birdsense's rules live
 in tusd's hooks (`internal/api/tus.go`). A file can only be created if it is on
 the list its card was registered with, at that size, and not already in. When
 its last byte lands, its `audioFiles` document is marked `uploaded` and the card
-recounted, before the browser is told it succeeded. Files go one at a time, in
-50 MB chunks, so each request fits the Container Apps ingress timeout.
+counted up, before the browser is told it succeeded. A WAV usually comes as
+FLAC instead -- the same samples in about half the bytes (*The browser sends
+WAVs as FLAC*): the upload says `encoding: flac`, the document records it
+(`encoding`, `storedBytes`), and analysis names its copy `.flac`. The card's
+sizes and counts stay the card's own either way, so a card can mix the two.
+Files go in 50 MB chunks,
+so each request fits the Container Apps ingress timeout, and several files at
+once -- one per 20 Mbit/s the browser measures the line at, up to six: tusd's
+Azure store takes a chunk's whole body before staging it to Blob Storage (~2 s
+per 50 MB, measured), and one file at a time leaves the line idle while it does
+(PARALLEL-UPLOADS.md). Each chunk's
+staging, each file's finish and every request's status and body size are
+logged, so a slow card can be put down to the line or to the server.
 Going through the app rather than straight to Blob Storage with SAS URLs keeps
 one upload path for dev and prod and the card rules in Go, at the cost of every
 byte passing through the container.
@@ -346,17 +522,91 @@ would have to read all ~128 GB a second time, and the server would have to carry
 a running hash across a file's PATCHes and read the blob back to resume one.
 What length doesn't catch is a byte flipped in place by a failing reader or bad
 memory, which BirdNET then reports as a file it can't read.
+A WAV sent as FLAC has a length only the finished encode knows, so the card's
+length can't be what it is held to. Its samples are: the browser says how many
+the WAV's `data` chunk holds, and the finish hook reads the FLAC's STREAMINFO
+and refuses it -- deleting what landed, leaving the file `pending` -- unless it
+holds exactly that many (`checkFLAC`). That catches an encode cut short, and a
+STREAMINFO with no total at all, which a stream encoder leaves unless the
+browser patches the header once the encode ends, and which libsndfile reads as
+a file of endless length that neither BirdNET nor `clip.py` can open. Its
+length is only bounded, by what a FLAC of the listed WAV could be
+(`maxFLACBytes`). What the samples are is the encoder's word, as a WAV's bytes
+are the card reader's: the browser decodes the first FLAC a tab makes against
+the MD5 libFLAC took of the samples it was given, which catches what would
+spoil every file, and trusts the rest (*The browser sends WAVs as FLAC*).
 A length is the volunteer's word, so it is bounded: `cardList` refuses a file
-over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is that
-same per-file bound for a length that was never on a card's list. The numbers
-leave room for a larger card than anyone runs; what they are there for is that
+over 32 GiB, or a card over 1 TiB or 50,000 files, and tusd's `MaxSize` is a
+FLAC of that same per-file bound, for a length that was never on a card's
+list. The numbers leave room for a larger card than anyone runs; what they are there for is that
 a card is registered before a byte is sent, and every declared size is summed
 into an `int64` -- unbounded, a crafted list overflows those sums and registers
 a card whose `totalBytes` is negative.
 *Revisit when:* a real card yields files BirdNET can't read and we can't tell a
 corrupt transfer from a corrupt card. Then hash in the browser and verify in
 tusd's finish hook, before the file counts as received -- not at analysis time,
-which is a day after the card was erased.
+which is a day after the card was erased. A file sent as FLAC already carries
+the browser's half: STREAMINFO holds an MD5 of the samples, which the finish
+hook would have to decode the whole file to check.
+
+**The browser sends WAVs as FLAC.** FLAC keeps every sample of a WAV in
+about half the bytes (51-62% measured on test audio; a real card will say),
+which halves the time a volunteer's uplink spends on a card and the storage
+its originals take for their month. So
+`js/flac.js` encodes each WAV just before its turn -- and the next file's
+while the ones before it are on the line -- in up to four workers
+(`js/flac-worker.js`), running libFLAC 1.3.4 as WebAssembly (libflac.js,
+vendored: *No build step*). What it does with each file:
+- Reads the WAV's header (`js/wav.js`) and encodes only what FLAC holds
+  exactly: 16- or 24-bit integer PCM. Float, 8- or 32-bit, RF64, and a
+  recording whose header was never finished go as they are, as does every
+  file when the encoder can't load.
+- Encodes at libFLAC's default level 5 (level 8 measured 0.3% smaller at
+  2.6 times the time), into the origin private file system -- a directory
+  per tab, held by a Web Lock so a tab clears out only what closed tabs left
+  -- or into memory where there is none (a private window).
+- Patches STREAMINFO with what libFLAC only knows at the end. Gotcha: a stream
+  encoder can't seek back, so without the patch the header says the file has
+  no length, and libsndfile reads that as endless (the server refuses it).
+- Decodes the first FLAC a tab makes again, with libFLAC's MD5 check, against
+  the MD5 the encoder took of the samples it was given, and sends the WAV
+  instead if it doesn't match. Until a file passes, every file is checked, so
+  a browser where none can pass sends none as FLAC. That covers the encoder,
+  this code's handling of its output and the disk in between, as they behave
+  in this browser -- what goes wrong for every file alike. Checking every file
+  took the encoder 1.7 times as long (measured in Chrome: the decode costs
+  more than the encode, because libflac.js hands each decoded frame to
+  JavaScript), for what the WAVs sent as they are go without: a bit flipped by
+  bad memory, or a libFLAC bug only some audio sets off (*A file's length is
+  the whole integrity check*). libFLAC's own verify mode would catch the
+  second, inside WebAssembly, at about a quarter more time per file; it is
+  off. Neither covers misreading the WAV, which encodes the wrong samples
+  faithfully: that is what `test/frontend/` is for.
+- Sends it with `encoding: flac` and the WAV's sample count, which the server
+  holds the FLAC to (*A file's length is the whole integrity check*). A FLAC
+  the server refuses is sent again as the WAV.
+A resumed upload carries on from the bytes the server already has, so it
+relies on the same samples encoding to the same bytes -- true of libFLAC, and
+checked in `test/frontend/` -- and doesn't take it on trust: the upload's
+fingerprint names the encoder (`ENCODER`), the FLAC's length and a hash of its
+bytes, so a FLAC that came out different starts a new upload. Progress is
+shown in the card's bytes, whatever goes on the line; the speed is the line's,
+and the time left scales what remains by the share the files so far went as.
+Beside the line's speed is the encoders', in the card's bytes and counting
+only the time they are working (`flac.js`'s meter), and the done page gives
+the share the card went as and that speed's average -- so a fast line the
+encoders can't keep up with shows as one, at about their speed times the share.
+Two costs: the WAV's own metadata chunks -- GUANO, a recorder's tags, gain and
+battery -- aren't carried into the FLAC (libflac.js can't write the blocks
+that would hold them), which is fine while nothing reads them and originals
+go a month on; and libFLAC 1.3.4 predates a fix to its encoder
+(CVE-2020-22219), which here runs in WebAssembly's sandbox on the volunteer's
+own file.
+*Revisit when:* libflac.js moves to libFLAC 1.4 or later (its issue #51), or a
+recorder's metadata has to be kept. A card with a FLAC BirdNET can't read is
+the time to check every file again, or to turn libFLAC's verify on. The check
+step's time estimate still assumes card bytes go on the line as they are; once
+real cards say what share FLAC comes to, it can use that.
 
 **Terraform owns what is deployed.** `infra/` is the whole Azure stack and
 `scripts/deploy.ps1` is the whole deploy: build this commit in ACR, then
@@ -450,7 +700,7 @@ with a batch of files and parses the one JSON object it prints, rather than
 binding a TFLite runtime into Go through cgo. Clips are cut the same way, by
 `analyzer/clip.py` with soundfile, which is what birdnet reads audio with, so a
 file BirdNET could analyze can be cut. The model loads once per batch, so
-hand it a night of files, not one at a time. The package uses BirdNET v2.4 on
+hand it a batch of files, not one at a time. The package uses BirdNET v2.4 on
 LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 - The runtime image is Debian (`python:3.12-slim-bookworm`), not Alpine,
   because the LiteRT and numpy wheels are glibc builds. The venv and the models
@@ -463,7 +713,11 @@ LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 **The analysis queue is the database.** `internal/analysis` runs in the server
 process. A card in `processing` with files in `uploaded` status is queued work;
 there is no separate queue to keep in step with the documents, and nothing in
-memory to lose. `Queue.Run` takes one file at a time, oldest card first: it
+memory to lose. `Queue.Run` runs as many files at once as the replica holds
+-- its limits less a gigabyte for the server, each model's measured memory,
+a task per core; `Queue.Capacity` and `Costs`, set from `BIRDSENSE_REPLICA_*`
+and `BIRDSENSE_ANALYSIS_*` (ANALYSIS.md, *Packing*) -- BirdNET's files before
+Perch's, oldest card first. For each file it
 copies the file out of `internal/storage` to a temp file (keeping its
 extension, which birdnet picks a decoder by), runs BirdNET with the recorder's
 position and week, merges each species' consecutive windows into one detection
@@ -471,21 +725,50 @@ at the highest confidence (`merge.go`), cuts a clip of each with `clip.py` (the
 run and 1 s either side, at most 30 s around its best window) into storage at
 `clips/{card}/{detection}.flac`, upserts the detections, marks the file
 `analyzed`, and recounts the card. The API only calls `Enqueue` to wake it when a card's last
-file lands. At startup it resumes whatever was left, including a file cut off
-mid-run (`analyzing`); detection ids are deterministic, so a re-run overwrites.
-A file BirdNET can't read fails at once; any other failure on a file -- a
-crashed run of either script, or storing its clips, its detections or its
-result -- is retried twice, 30 s apart and growing, and then fails the file, so
-nothing that keeps failing can wedge the queue. The last file moves the card to
+file lands. A file is *claimed* before it is run: `analyzing`, with the worker's
+name and a five-minute lease it renews every minute, in one
+replace-if-unchanged write, so more than one worker can share the queue without
+running a file twice -- the groundwork for moving analysis to a job
+(ANALYSIS.md; SCHEMA.md, *Claims*). A worker that is stopped lets go of its
+file; one that dies holding it holds it until the lease lapses. At startup it
+resumes whatever was left; detection ids are deterministic, so a re-run
+overwrites. A file BirdNET can't read fails at once; any other failure on a
+file -- a crashed run of either script, storing its clips, its detections or
+its result, or a worker dying with it claimed -- counts in the file's stored
+`attempts` and waits for its `retryAfter` (30 s, then 60 s) while every other
+file goes on, and the third fails the file, so nothing that keeps failing can
+wedge the queue. Only a failure no one file is to blame for -- the store
+unreachable -- pauses the queue, on a delay that grows while it lasts. The last file moves the card to
 `in_review`, or `needs_attention` if any failed.
-One file per run, not a night per run: measured on the Osprey clip, a warm run
+One file per run, not a batch per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in
 exchange each file's detections are stored as soon as it's done and only one
 file sits in temp storage at a time.
-*Revisit when:* analysis moves to its own Container Apps job (see
-DEPLOYMENT.md). Then the web image can go back to Alpine and this stage moves to
-the job's image, and `Queue.Run` is what the job runs.
+**Analysis runs as a job the web app starts.** In Azure, the queue above runs
+in the workers of a Container Apps job (`infra/job.tf`), not in the web app:
+each execution is one replica of the analysis image running `birdsense worker`
+(`cmd/server/worker.go`), which claims files until nothing has been claimable
+for two minutes and exits. The web app, given the job's resource id
+(`BIRDSENSE_ANALYSIS_JOB`), runs an `analysis.Dispatcher` where the queue would
+be: when a card's last file lands, and every five minutes as a backstop, it
+counts the steps waiting and starts executions -- one per 25 steps, up to
+`analysis_max_workers` -- through Azure Resource Manager (`internal/azjob`,
+two REST calls, allowed by a custom role that can start the job and nothing
+else). The claims (SCHEMA.md, *Claims*) are what let several workers share
+the queue. So the web app is sized to serve pages (0.5 vCPU / 1Gi) and ships
+on Alpine, and a card's analysis is billed only while workers run. A worker's
+status lives in its own process, so it publishes it to
+`status/analysis.json` in file storage, and the web app serves that on
+`/health` and the coordinator's card screens -- or its own failure to start
+workers, which a coordinator needs to see first. Without
+`BIRDSENSE_ANALYSIS_JOB` -- development, compose, or `analysis_job_enabled =
+false` -- the web app runs the queue in its own process as it always did.
+Gotchas: the job's execution list can lag a start, so the dispatcher counts
+its own recent starts on top; and the two images are built at the same tag
+and applied together, so rolling back is still one tag (ROLLBACK.md).
+*Revisit when:* the bill says Batch on spot VMs is worth a second platform
+(ANALYSIS.md) -- the worker runs unchanged there; only the launcher changes.
 
 **Perch is a second opinion, run as a step of its own.** With
 `BIRDSENSE_PERCH` on, Google's Perch v2 runs over every file after BirdNET,
@@ -497,17 +780,18 @@ the two models' detections of one bird are two documents
 they were), every list is one model's at a time (`?model=`, BirdNET's by
 default), and the public page counts BirdNET's alone, because a bird both
 heard would otherwise count twice. It is an internal detail, not a choice
-anyone makes: the Detections tab never asks for Perch's, and only a
-coordinator's card page (`<bs-admin-upload-detail>`) shows them, under
-BirdNET's. Three consequences:
+anyone makes: the Detections tab asks for Perch's only when a coordinator's
+card page (`<bs-admin-upload-detail>`) links to them, as
+`/app/detections?card={reference}&model=perch`. Three consequences:
 - **Its step is separate from the file's.** `audioFiles.perch` has its own
   status, attempts and failure, so Perch failing on a file leaves BirdNET's
   result and doesn't put the card in `needs_attention`. A file waiting for
   Perch still holds its card in `processing`, which is what keeps retention off
   its audio until Perch has read it.
-- **BirdNET never waits for it.** `drain` catches BirdNET up on every card, then
-  takes one Perch file, then looks again -- Perch is ~3x BirdNET's time, and a
-  new card's first opinion shouldn't queue behind an old card's second.
+- **BirdNET never waits for it.** A free slot goes to a BirdNET file on any
+  card before a Perch file -- Perch is ~17x BirdNET's CPU, and a new card's
+  first opinion shouldn't queue behind an old card's second. Perch runs beside
+  BirdNET where its ~2 GB fits, on the cores BirdNET leaves free.
 - **Its scores are a softmax, not a sigmoid.** Perch's outputs are logits, and
   a sigmoid over them puts nearly every top-five guess at 0.99+, so a threshold
   would keep everything. A softmax over the window's classes put the test
@@ -517,9 +801,10 @@ BirdNET's. Three consequences:
   scientific names only; common names are borrowed from BirdNET's labels, and
   the geo model's species list is matched to Perch's by scientific name.
 It costs TensorFlow in the image (~1.3 GB, always installed, so it is a
-setting rather than a build) and ~2.5 GB of peak memory, which is why it is
-off by default and why Terraform refuses it on less than 4Gi (DEPLOYMENT.md,
-*Perch*).
+setting rather than a build), ~2 GB of peak memory, and -- measured on a real
+card -- ~17x BirdNET's CPU, which is why it is off by default and why
+Terraform refuses it on less than 4Gi (DEPLOYMENT.md, *Perch*; ANALYSIS.md,
+*Measured*).
 *Revisit when:* Perch's detections turn out to be worth publishing. Then the
 public page needs a rule for a bird both models heard -- one detection per
 species per window, say -- not a second count.
@@ -552,8 +837,9 @@ start leaves the site perfectly able to serve. The probe numbers in
 `infra/app.tf` are set explicitly for the same reason the split exists: the
 provider's defaults assume a container that isn't CPU-saturated by BirdNET for
 hours.
-*Revisit when:* analysis moves to its own job -- then no health response is
-ever queued behind a BirdNET run, and tighter probes are reasonable again.
+*Revisit now:* with analysis in the job (the default), no health response is
+queued behind a BirdNET run, so the probes can be tightened -- unless
+`analysis_job_enabled` is off, when this reasoning still holds.
 
 **Clips are FLAC.** `clip.py` writes each clip as mono 16-bit FLAC at the
 source's sample rate. It is lossless, so a clip is still exactly what BirdNET
@@ -596,6 +882,31 @@ passes -- a better model, or a lower threshold, only ever runs against cards
 still inside it.
 *Revisit when:* a card has to be held past its window (a hold flag on the
 upload, which the sweep would skip), or re-analysis matters more than the bill.
+
+**Deleting a card is a status and a sweep.** A card is tens of thousands of
+documents and clips, and serverless Cosmos charges a delete about what the
+write cost, so deleting a large one runs into the RU/s limit for minutes --
+longer than the ingress lets a request run, and longer than a deploy's grace.
+So `DELETE /admin/uploads/{ref}` only moves the card to `deleting` and answers
+202, and `internal/deletion`'s `Deleter` runs in the web app (in both modes;
+the job's workers aren't always there) and removes it: woken by the request,
+with a backstop every five minutes and a growing delay after a failed pass.
+The status is what makes it safe. Nothing else moves a card on from
+`deleting` -- the queue only takes `processing` cards' files, `tally` only
+moves a card from `processing`, retention only looks at finished cards --
+and tus and registering the card again both refuse it. The order is the one
+it always was, storage first and the upload last, so a pass cut part way
+leaves a card that says `deleting` and the next pass finishes. Its detections
+drop out of the Detections tab and the landing page as soon as it is marked.
+Gotcha: a card isn't touched for a minute after it's marked, nor while a
+worker holds a lease on one of its files -- a step already running writes its
+clips at the end, and clips written after the sweep passed would be in storage
+with nothing naming them. `Queue.gone` stays as the backstop for detections
+written after the sweep; nothing is a backstop for clips, which is why the
+sweep waits. DELETE-CARDS.md has the design and the gaps it accepts.
+*Revisit when:* one card's delete has to be fast -- then look at Cosmos's
+delete-by-partition-key (a preview feature; check it serves a serverless
+account), not more concurrency against the same RU budget.
 
 **Spectrograms are drawn in the browser.** `<bs-spectrogram>` fetches a
 detection's clip once, plays it from a blob URL, decodes it with Web Audio and
@@ -696,6 +1007,18 @@ TensorFlow on top, ~1.3 GB, and downloads its ~380 MB model on first use:
 .venv/bin/pip install -r analyzer/requirements.txt -r analyzer/requirements-perch.txt
 ```
 
+Measuring analysis, for sizing the replica that runs it (ANALYSIS.md,
+*Performance data*): the server records every file's analysis -- CPU, memory,
+time per phase -- under `perf/` in file storage (`backend/data/audio/perf` in
+dev; `BIRDSENSE_PERF=off` stops it). `cmd/analyze -bench` measures one file at
+several settings, and `cmd/perf` summarizes either:
+
+```sh
+cd backend && BIRDSENSE_BIRDNET_PYTHON=../.venv/bin/python \
+  go run ./cmd/analyze -bench -model perch -threads 1,2,4 card-file.wav
+go run ./cmd/perf bench-*.jsonl data/audio/perf
+```
+
 Container (compose sets `BIRDSENSE_DB=local` and `BIRDSENSE_STORAGE=local`, and
 keeps the database and the audio in two named volumes):
 
@@ -703,10 +1026,17 @@ keeps the database and the audio in two named volumes):
 HOST_PORT=8080 docker compose up --build
 ```
 
+MCP locally: the endpoint is `http://localhost:8080/api/v1/mcp`, and dev
+mode's roster picker is the sign-in the consent page sends you through.
+`claude mcp add --transport http birdsense http://localhost:8080/api/v1/mcp`
+adds it to Claude Code. A claude.ai connector needs a public https URL, so it
+is tried against a deployment.
+
 Checks before committing:
 
 ```sh
 cd backend && gofmt -l . && go vet ./... && go test ./... && govulncheck ./...
+node --test 'test/frontend/*.test.mjs'    # from the repo root; Node 22 or later
 ```
 
 `govulncheck` needs installing once
@@ -739,7 +1069,8 @@ left in `internal/api`. The API's JSON shapes live in `internal/api/shapes.go`
 and differ from the stored documents in a few names. SCHEMA.md's *API mapping*
 section is the rulebook for both the fields and what each write route does
 (DELETE on people and stations sets `removedAt`/`retiredAt`; deleting a card
-is the one hard delete, and takes its audio and detections with it).
+is the one hard delete, and takes its audio and detections with it, in the
+background: see *Deleting a card is a status and a sweep*).
 `internal/api` tests build their own small fixed-date program in the JSON
 backend, deliberately not the dev seed.
 
@@ -750,20 +1081,28 @@ untested -- it needs a client id, a secret, and someone to try it.
 The Cosmos DB backend and the Blob Storage backend have both run in Azure
 against a real card: documents, uploads and analysis all work there. The
 JSON-file backend and its tests still define the behaviour Cosmos must match.
+The browser sends a card's WAVs as FLAC where it can, checked against the
+samples before they go; the server checks each one again when its last byte
+lands, and analyzes it as FLAC.
 Uploaded audio is stored, a card whose files are all in moves to `processing`,
-and the analysis queue runs BirdNET over it in the server process, writing
+and the analysis queue -- the job's workers in Azure, the server's own
+process in development -- runs BirdNET over it, writing
 `unreviewed` detections, each with a clip -- and, with `BIRDSENSE_PERCH` on,
 Perch's detections after them, as a second list (see *Perch is a second
 opinion* above). The coordinator's card page
 (`/admin/uploads/{ref}`) shows each file's status, when its recording is due to
-be removed or was, and what was heard in it, and
-each detection has its own page with its clip, a spectrogram, and Confirm and
+be removed or was, and how much was heard in it, and links to the Detections
+tab narrowed to the card; each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
 minimum confidence and the days heard, and opens the same detection page, where Previous, Next and the arrow keys step
 through the list as filtered and sorted rather than through the file. It
 opens on the past week, with those dates in its own date fields, and widening
 them past what one replica will read says so rather than failing.
+An LLM tool can connect over MCP as anyone on the roster (*LLM tools connect
+over MCP*) and read summaries and CSV exports of a span of time; it can't
+change anything. claude.ai's connector hasn't been tried against a deployment
+yet -- the flow is tested end to end with the MCP SDK's own client.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
 My uploads, their own cards, where an unfinished one is resumed; and

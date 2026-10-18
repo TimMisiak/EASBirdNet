@@ -62,7 +62,7 @@ func (f *fixture) card(ref, status string, received time.Time, fileStatuses ...s
 	var docs []db.AudioFile
 	for _, fs := range fileStatuses {
 		doc := db.AudioFile{
-			RecorderID: "SW-02", Path: "DATA/" + fs + ".WAV", SizeBytes: 100, Night: "2026-08-01",
+			RecorderID: "SW-02", Path: "DATA/" + fs + ".WAV", SizeBytes: 100,
 			Status: fs, BlobName: storage.Name(ref + "/blob" + fs),
 		}
 		f.put(doc.BlobName, "audio")

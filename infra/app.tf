@@ -1,5 +1,6 @@
-# The app itself: one container serving the API and the frontend, with the
-# analysis queue running BirdNET in the same process.
+# The app itself: one container serving the API and the frontend. Analysis
+# runs as the job in job.tf, which this app starts -- or, with
+# analysis_job_enabled off, in this container's own process.
 
 resource "azurerm_log_analytics_workspace" "this" {
   name                = "log-${local.base}"
@@ -37,6 +38,14 @@ resource "azurerm_container_app" "this" {
     name  = "oidc-microsoft-client-secret"
     value = var.oidc_microsoft_client_secret
   }
+  # Google is optional, and a Container Apps secret can't be empty.
+  dynamic "secret" {
+    for_each = var.oidc_google_client_id != "" ? [1] : []
+    content {
+      name  = "oidc-google-client-secret"
+      value = var.oidc_google_client_secret
+    }
+  }
   secret {
     name  = "session-key"
     value = var.session_key
@@ -63,10 +72,10 @@ resource "azurerm_container_app" "this" {
   template {
     # Both bounds are 1 on purpose, and neither is a cost knob:
     #
-    #   min 1 -- the analysis queue runs in the background with no HTTP
-    #   traffic, and a scale-to-zero replica is stopped mid-card. Nothing is
-    #   lost (the queue is the Cosmos documents, and it resumes at the next
-    #   start) but it stops until someone visits.
+    #   min 1 -- work runs in the background with no HTTP traffic: the
+    #   retention sweep, the backstop that starts analysis workers for work
+    #   left waiting (or, without the job, the analysis queue itself). A
+    #   scale-to-zero replica would stop all of it until someone visits.
     #
     #   max 1 -- CORRECTNESS, not cost. tusd holds an upload's lock in the
     #   memory of the replica serving it, so every request for one upload has
@@ -89,11 +98,12 @@ resource "azurerm_container_app" "this" {
       # Terraform owns the running image: a deploy is a new image_tag, applied
       # here (scripts/deploy.ps1). Nothing should `az containerapp update` this
       # app -- that is drift the next apply reverts.
-      image = "${azurerm_container_registry.this.login_server}/birdsense:${var.image_tag}"
+      # The web image serves; the analysis image also has BirdNET, for when
+      # the app analyzes by itself (analysis_job_enabled off).
+      image = "${azurerm_container_registry.this.login_server}/${var.analysis_job_enabled ? "birdsense" : "birdsense-analyzer"}:${var.image_tag}"
 
-      # Sized for analysis, not for serving pages: one Python process at a
-      # time, peaking near 300 MB, CPU-bound for hours per card. Moving
-      # analysis to a Container Apps job would let this go back to 0.25/0.5Gi.
+      # With the job, sized for serving pages and uploads. Without it, sized
+      # for analysis too: CPU-bound for hours per card.
       cpu    = var.cpu
       memory = var.memory
 
@@ -133,6 +143,48 @@ resource "azurerm_container_app" "this" {
       env {
         name  = "BIRDSENSE_PERCH"
         value = var.perch_enabled ? "on" : "off"
+      }
+      # So the analysis performance records under perf/ say which image they
+      # measured (ANALYSIS.md, *Performance data*). They are on by default.
+      env {
+        name  = "BIRDSENSE_IMAGE_TAG"
+        value = var.image_tag
+      }
+      # The replica's size, for the same records: the process can't see its
+      # own limits in Container Apps, only the machine's.
+      env {
+        name  = "BIRDSENSE_REPLICA_CPU"
+        value = tostring(var.cpu)
+      }
+      env {
+        name  = "BIRDSENSE_REPLICA_MEMORY"
+        value = var.memory
+      }
+      # How much analysis runs at once, and what each model is expected to
+      # take: BIRDSENSE_ANALYSIS_* by its suffix (ANALYSIS.md, *Packing*).
+      # Empty, the server's defaults apply.
+      dynamic "env" {
+        for_each = var.analysis_tuning
+        content {
+          name  = "BIRDSENSE_ANALYSIS_${upper(env.key)}"
+          value = env.value
+        }
+      }
+      # With the job, the app starts its workers instead of analyzing: as a
+      # card's last file lands, and every few minutes as a backstop.
+      dynamic "env" {
+        for_each = var.analysis_job_enabled ? [1] : []
+        content {
+          name  = "BIRDSENSE_ANALYSIS_JOB"
+          value = azurerm_container_app_job.analysis.id
+        }
+      }
+      dynamic "env" {
+        for_each = var.analysis_job_enabled ? [1] : []
+        content {
+          name  = "BIRDSENSE_ANALYSIS_JOB_WORKERS"
+          value = tostring(var.analysis_max_workers)
+        }
       }
       # Tells the SDK *which* managed identity to use. Required for a
       # user-assigned one.
@@ -174,6 +226,22 @@ resource "azurerm_container_app" "this" {
       env {
         name  = "BIRDSENSE_OIDC_MICROSOFT_TENANT"
         value = var.oidc_microsoft_tenant
+      }
+      # Google, if configured. The server offers a provider when its client id
+      # is set, and the sign-in page grows a button for it on its own.
+      dynamic "env" {
+        for_each = var.oidc_google_client_id != "" ? [1] : []
+        content {
+          name  = "BIRDSENSE_OIDC_GOOGLE_CLIENT_ID"
+          value = var.oidc_google_client_id
+        }
+      }
+      dynamic "env" {
+        for_each = var.oidc_google_client_id != "" ? [1] : []
+        content {
+          name        = "BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET"
+          secret_name = "oidc-google-client-secret"
+        }
       }
       # Signs the session cookie. Changing it signs everyone out.
       env {
@@ -250,14 +318,16 @@ resource "azurerm_container_app" "this" {
     azurerm_role_assignment.app_blob,
     azurerm_cosmosdb_sql_role_assignment.app,
     azurerm_cosmosdb_sql_container.this,
+    azurerm_role_assignment.app_job_starter,
   ]
 
-  # Perch's process tree peaks near 2.5 GB on its own, so on the 2Gi replica
+  # Perch's process tree peaks near 2 GB on its own (1.95 GB measured on a
+  # real card), so beside the server and BirdNET on the 2Gi replica
   # the analysis would be killed on every file and retried until it failed.
   lifecycle {
     precondition {
-      condition     = !var.perch_enabled || tonumber(trimsuffix(var.memory, "Gi")) >= 4
-      error_message = "perch_enabled needs memory of at least 4Gi (Perch peaks near 2.5 GB); Container Apps pairs 4Gi with cpu 2.0. Set memory = \"4Gi\" and cpu = 2.0, or leave Perch off."
+      condition     = var.analysis_job_enabled || !var.perch_enabled || tonumber(trimsuffix(var.memory, "Gi")) >= 4
+      error_message = "With analysis_job_enabled off, perch_enabled needs memory of at least 4Gi (Perch peaks near 2 GB); Container Apps pairs 4Gi with cpu 2.0. Set memory = \"4Gi\" and cpu = 2.0, turn the job on, or leave Perch off."
     }
   }
 }

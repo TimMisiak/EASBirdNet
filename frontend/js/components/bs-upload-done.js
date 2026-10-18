@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, typography } from "../shared-styles.js";
-import { byteSize, count, longDate, nightRange } from "../format.js";
+import { byteSize, count, dateRange, duration, longDate, megabits } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 
@@ -58,7 +58,8 @@ class UploadDone extends BaseElement {
       this.shadowRoot.innerHTML = this.#loadError ? lookupFailed(this.#loadError) : `<p class="lede">One moment…</p>`;
       return;
     }
-    const nights = upload.nights ?? [];
+    const speed = flow.averageBytesPerSecond();
+    const packed = flow.compression();
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -95,7 +96,7 @@ class UploadDone extends BaseElement {
       <h1>The card is safe to erase.</h1>
       <p class="intro">
         Everything from ${escapeHTML(upload.stationName)} is in our storage, every file
-        complete at the length the card reported. Erase it and put it back in the
+        checked complete against what the card reported. Erase it and put it back in the
         rotation. We've emailed you a copy of this summary.
       </p>
 
@@ -103,8 +104,10 @@ class UploadDone extends BaseElement {
         <dl class="summary">
           ${entry("Reference", upload.reference)}
           ${entry("Recorder", `${upload.stationId} · ${upload.stationName}`)}
-          ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
+          ${upload.firstRecordingAt ? entry("Recorded", dateRange(upload.firstRecordingAt, upload.lastRecordingAt)) : ""}
           ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
+          ${speed ? entry("Upload speed", `${megabits(speed)} average · ${duration(flow.minutesElapsed())}`) : ""}
+          ${packed ? entry("Compression", compression(packed)) : ""}
           ${entry("Card pulled", longDate(upload.pulledOn))}
           ${upload.notes ? entry("Your note", `“${upload.notes}”`) : ""}
         </dl>
@@ -113,7 +116,7 @@ class UploadDone extends BaseElement {
       <div class="panel panel--callout next">
         <h3>What happens next</h3>
         <p style="font-size: 0.90625rem; line-height: 1.65; color: var(--bs-text-soft);">
-          BirdNET is running on your ${count(nights.length)} nights now — it usually finishes
+          BirdNET is running on your ${count(upload.fileCount)} recordings now — it usually finishes
           overnight. You'll get a second email with the results for this card, and any owl
           detections go to the review volunteers before they appear on the public page.
         </p>
@@ -150,6 +153,18 @@ function lookupFailed(error) {
       <button class="btn btn--quiet" data-action="home">My uploads</button>
     </div>
   `;
+}
+
+/**
+ * "54% of the size · 410 Mb/s average": what the files this tab sent went as,
+ * against their size on the card, and how fast the card was compressed.
+ */
+function compression({ files, flac, cardBytes, lineBytes, bytesPerSecond }) {
+  if (!flac) return "None: sent as recorded";
+  const parts = [`${Math.round((lineBytes / cardBytes) * 100)}% of the size`];
+  if (flac < files) parts.push(`${count(flac)} of ${count(files)} files as FLAC`);
+  if (bytesPerSecond) parts.push(`${megabits(bytesPerSecond)} average`);
+  return parts.join(" · ");
 }
 
 function entry(label, value) {

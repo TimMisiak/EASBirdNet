@@ -44,10 +44,11 @@ export const STATUSES = [
 /**
  * The models a detection can come from, BirdNET first because it is what every
  * card is analyzed with. Perch runs as a second step when the server has it
- * on, and that is the server's business: this list is always BirdNET's (the
- * API's default), and only a coordinator's card page shows Perch's. The
- * detection page reads these to say which model heard what it shows.
- * windowSec is the length of the windows each scores.
+ * on, and that is the server's business: this list is BirdNET's (the API's
+ * default) unless it is asked for Perch's by name (?model=perch), which only a
+ * coordinator's card page links to. The detection page reads these to say
+ * which model heard what it shows. windowSec is the length of the windows each
+ * scores.
  */
 export const MODELS = [
   { id: "birdnet", label: "BirdNET", windowSec: 3 },
@@ -83,13 +84,23 @@ export function defaultDates(now = new Date()) {
  * The list's view as a query string gives it, anything unreadable left at its
  * default. dates are the range a query string that names no readable ones of
  * its own gets, so a bare /app/detections is the past DEFAULT_DAYS days.
+ *
+ * card narrows the list to one card's detections (?card=OWL-20260914-SR03),
+ * which is what a card's page links to. A card bounds the read by itself, so
+ * one with no dates of its own gets none: the whole card, not its last week.
+ * model is "" for BirdNET's, the default, or "perch".
  */
 export function viewFrom(params, dates = defaultDates()) {
   const sort = Object.hasOwn(SORTS, params.get("sort")) ? params.get("sort") : "heard";
   const order = params.get("order") === "asc" || params.get("order") === "desc" ? params.get("order") : SORTS[sort];
   const min = Number(params.get("min"));
   const status = params.get("status") ?? "";
+  const card = params.get("card") ?? "";
+  const model = params.get("model") ?? "";
+  if (card) dates = { from: "", to: "" };
   return {
+    card,
+    model: MODELS.some((m) => m.id === model && m !== MODELS[0]) ? model : "",
     status: STATUSES.some((s) => s.id === status) ? status : "",
     species: params.get("species") ?? "",
     min: CONFIDENCES.includes(min) ? min : 0,
@@ -104,6 +115,8 @@ export function viewFrom(params, dates = defaultDates()) {
 /** The query string for a view, leaving out what is at its default. */
 export function paramsFor(view) {
   const params = new URLSearchParams();
+  if (view.card) params.set("card", view.card);
+  if (view.model) params.set("model", view.model);
   if (view.status) params.set("status", view.status);
   if (view.species) params.set("species", view.species);
   if (view.min) params.set("min", view.min);
@@ -124,13 +137,39 @@ function startOfDay(date, addDays = 0) {
 
 /** What GET /detections is asked for one page of a view. */
 function queryFor(view) {
-  const params = { sort: view.sort, order: view.order, limit: PAGE_SIZE, offset: (view.page - 1) * PAGE_SIZE };
+  return { ...filtersFor(view), limit: PAGE_SIZE, offset: (view.page - 1) * PAGE_SIZE };
+}
+
+/** What GET /detections is asked for a view, whichever page of it. */
+function filtersFor(view) {
+  const params = { sort: view.sort, order: view.order };
+  if (view.card) params.card = view.card;
+  if (view.model) params.model = view.model;
   if (view.status) params.status = view.status;
   if (view.species) params.species = view.species;
   if (view.min) params.minConfidence = view.min / 100;
   if (view.from) params.since = startOfDay(view.from).toISOString();
   if (view.to) params.until = startOfDay(view.to, 1).toISOString();
   return params;
+}
+
+/**
+ * Every detection in a view, not a page of it, as a JSON file to save:
+ * {blob, name}. The name says the card and the dates the view covers, or that
+ * it covered the server's own window when "Heard from" was cleared.
+ */
+export async function exportView(view) {
+  const blob = await api.exportDetections(filtersFor(view));
+  return { blob, name: exportName(view) };
+}
+
+/** The file an export of a view is saved as. */
+export function exportName(view) {
+  const parts = [view.model ? `${view.model}-detections` : "detections"];
+  if (view.card) parts.push(view.card);
+  if (view.from) parts.push(view.from);
+  if (view.to) parts.push(view.from ? "to" : "until", view.to);
+  return `${parts.join("-")}.json`;
 }
 
 /** The filters and the sort of a view, without which page of it. */

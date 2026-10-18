@@ -21,6 +21,8 @@ const SITE = "Birdsense — Eastside Audubon";
 const ROUTES = [
   { path: "/", tag: "bs-home-page", chrome: "public", title: SITE },
   { path: "/signin", tag: "bs-signin-page", chrome: "bare", title: "Sign in" },
+  // Where an LLM tool sends someone to let it read Birdsense as them (MCP).
+  { path: "/connect", tag: "bs-connect-page", chrome: "bare", auth: true, title: "Connect an app" },
   { path: "/app", redirect: "/app/upload" },
   // Everyone signed in gets <bs-app-page> and its one row of tabs; a
   // coordinator's three extra tabs keep the /admin/ paths the guard reads.
@@ -92,9 +94,12 @@ class BirdsenseApp extends BaseElement {
     }
     if (route?.auth && !session.isSignedIn()) {
       // A session that ended under them says so, in the same way the OIDC
-      // callback reports a sign-in that didn't work.
-      const to = session.wasEnded() ? "/signin?error=session-ended" : "/signin";
-      return navigate(to, { replace: true });
+      // callback reports a sign-in that didn't work. next brings them back
+      // here once they're in, which a link into the app -- or an app asking
+      // to connect -- would otherwise lose.
+      const to = new URLSearchParams({ next: `${here}${location.search}` });
+      if (session.wasEnded()) to.set("error", "session-ended");
+      return navigate(`/signin?${to}`, { replace: true });
     }
     if (route?.admin && !session.isAdmin()) return navigate("/app", { replace: true });
 

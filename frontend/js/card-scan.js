@@ -1,9 +1,9 @@
 // Reading an SD card in the browser.
 //
 // The card is never copied to the volunteer's disk: we ask for the folder, walk
-// it, and keep file handles. What comes back is a manifest -- how many nights,
-// how many files, how big -- which is what the "here's what's on the card"
-// screen is built on, and the list of files the upload sends.
+// it, and keep file handles. What comes back is a manifest -- which days the
+// card recorded on, how many files, how big -- which is what the "here's what's
+// on the card" screen is built on, and the list of files the upload sends.
 
 const AUDIO = /\.(wav|flac|mp3|w4v)$/i;
 
@@ -17,15 +17,16 @@ export class CancelledError extends Error {
 
 /**
  * Ask for the card and read its manifest. Each of `files` is
- * {path, bytes, night, file}: the path from the card's root with forward
- * slashes, and the File to send.
+ * {path, bytes, date, file}: the path from the card's root with forward
+ * slashes, the date it was recorded on (for the check screen; the server
+ * reads the time itself, from the name), and the File to send.
  *
  * `onWorking` is called when the scan starts on work that finishes: at once
  * where the picker reports a cancellation, and only once the files are in
  * where it doesn't (see `viaInput`). A caller that holds its screen while the
  * card is read holds it from there, so a picker that never answers leaves the
  * page as it was rather than stuck.
- * @returns {Promise<{label: string, nights: object[], files: object[], fileCount: number, totalBytes: number, skipped: string[]}>}
+ * @returns {Promise<{label: string, days: object[], files: object[], fileCount: number, totalBytes: number, skipped: string[]}>}
  */
 export async function scanCard({ onWorking } = {}) {
   if (window.showDirectoryPicker) {
@@ -141,7 +142,7 @@ function manifest({ label, entries }) {
     // A Mac writes a "._" shadow file beside every file on a FAT card. They
     // match the extension and hold no audio.
     if (AUDIO.test(file.name) && !file.name.startsWith("._")) {
-      files.push({ path, bytes: file.size, night: nightOf(file), file });
+      files.push({ path, bytes: file.size, date: dateOf(file), file });
     } else {
       skipped.push(file.name);
     }
@@ -149,20 +150,20 @@ function manifest({ label, entries }) {
   // Byte order, the way the server sorts a card's files.
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-  const byNight = new Map();
+  const byDay = new Map();
   for (const file of files) {
-    const night = byNight.get(file.night) ?? { date: file.night, files: 0, bytes: 0 };
-    night.files += 1;
-    night.bytes += file.bytes;
-    byNight.set(file.night, night);
+    const day = byDay.get(file.date) ?? { date: file.date, files: 0, bytes: 0 };
+    day.files += 1;
+    day.bytes += file.bytes;
+    byDay.set(file.date, day);
   }
 
-  const nights = [...byNight.values()].sort((a, b) => a.date.localeCompare(b.date));
-  flagOddNights(nights);
+  const days = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
+  flagOddDays(days);
 
   return {
     label,
-    nights,
+    days,
     files,
     fileCount: files.length,
     totalBytes: files.reduce((sum, f) => sum + f.bytes, 0),
@@ -173,25 +174,24 @@ function manifest({ label, entries }) {
 /**
  * Recorders put the start of each recording in the file name, as local time:
  * "Marymoor_20260723_160624(-0700).wav" began at 16:06:24 on July 23. The
- * "(-0700)" is the UTC offset, which a night doesn't need -- it is a local date.
+ * "(-0700)" is the UTC offset, which a date as the recorder wrote it doesn't
+ * need.
  */
 const NAMED_START = /(?<!\d)(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)/;
 
 /**
- * Which night a file belongs to. Recording runs dusk to dawn, so a 3 a.m. file
- * is part of the previous evening's night -- shifting back 12 hours puts the
- * whole night on one date.
+ * The date a file was recorded on, as the recorder's clock had it.
  *
  * The time comes from the file name. A file's modified time is when it was
  * last copied, not recorded, so it is only the fallback for a name without one.
  */
-function nightOf(file) {
+function dateOf(file) {
   const named = startFromName(file.name);
   if (named !== null) {
     // Wall-clock arithmetic in UTC, so the browser's own timezone stays out of it.
-    return new Date(named - 12 * 3600 * 1000).toISOString().slice(0, 10);
+    return new Date(named).toISOString().slice(0, 10);
   }
-  const t = new Date(file.lastModified - 12 * 3600 * 1000);
+  const t = new Date(file.lastModified);
   const pad = (n) => String(n).padStart(2, "0");
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
 }
@@ -211,16 +211,20 @@ function startFromName(name) {
 }
 
 /**
- * Mark the nights worth a second look. A night with far fewer files than its
- * neighbours usually means flat batteries or a knocked-over recorder, and the
- * last night is normally short because that's the morning the card was pulled.
+ * Mark the days worth a second look. A day with far fewer files than the
+ * others usually means flat batteries or a knocked-over recorder. The first
+ * and last days are partial whatever happened -- the card went in one day and
+ * came out another -- so they are marked as that instead.
  */
-function flagOddNights(nights) {
-  if (nights.length < 3) return;
-  const counts = [...nights].map((n) => n.files).sort((a, b) => a - b);
+function flagOddDays(days) {
+  if (days.length < 2) return;
+  days[0].flag = "first";
+  days[days.length - 1].flag = "last";
+  const middle = days.slice(1, -1);
+  if (middle.length < 3) return;
+  const counts = middle.map((d) => d.files).sort((a, b) => a - b);
   const typical = counts[Math.floor(counts.length / 2)];
-  nights.forEach((night, i) => {
-    if (night.files >= typical * 0.75) return;
-    night.flag = i === nights.length - 1 ? "partial" : "short";
-  });
+  for (const day of middle) {
+    if (day.files < typical * 0.75) day.flag = "short";
+  }
 }

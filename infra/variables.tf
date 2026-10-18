@@ -48,21 +48,74 @@ variable "bootstrap_admin" {
 }
 
 variable "cpu" {
-  description = "vCPU for the container. The analysis queue runs BirdNET in this container (CLAUDE.md), so this is sized for analysis, not for serving pages."
+  description = "vCPU for the web app's container. With analysis_job_enabled (the default) it only serves pages and uploads; with it off, the analysis queue runs in this container too, and this has to be sized for that (1.0, or 2.0 with Perch)."
   type        = number
-  default     = 1.0
+  default     = 0.5
 }
 
 variable "memory" {
-  description = "Memory for the container. Container Apps only allows particular cpu/memory pairs; 1.0 goes with 2Gi."
+  description = "Memory for the web app's container. Container Apps only allows particular cpu/memory pairs: 0.5 goes with 1Gi, 1.0 with 2Gi, 2.0 with 4Gi."
   type        = string
-  default     = "2Gi"
+  default     = "1Gi"
+}
+
+variable "analysis_job_enabled" {
+  description = "Run analysis as the Container Apps job in job.tf, started by the web app, rather than in the web app's own process. Off, the web app runs the analysis image and analyzes by itself, as before the job existed -- then size cpu and memory for it. See ANALYSIS.md."
+  type        = bool
+  default     = true
+}
+
+variable "analysis_job_starter_role" {
+  description = "The role the web app's identity gets on the analysis job, to start it. Empty (the default) defines a custom role that can only read, start and list the job's executions -- which needs Owner or User Access Administrator to apply. Set a built-in role's name instead, e.g. \"Contributor\", to apply with only the right to assign roles; it is assigned on the job alone, so it reaches nothing else."
+  type        = string
+  default     = ""
+}
+
+variable "analysis_job_role_managed" {
+  description = "Whether Terraform gives the web app its role on the analysis job. False leaves that to someone with the rights, once, by hand (DEPLOYMENT.md, 12b, *Assigning the role by hand*) -- for a deployer whose role assignments are limited to particular roles."
+  type        = bool
+  default     = true
+}
+
+variable "analysis_cpu" {
+  description = "vCPU for each analysis worker replica. It packs BirdNET and Perch into what it has (ANALYSIS.md, Packing); Consumption allows up to 4.0."
+  type        = number
+  default     = 2.0
+}
+
+variable "analysis_memory" {
+  description = "Memory for each analysis worker replica, paired with analysis_cpu: 2.0 with 4Gi, 4.0 with 8Gi. Perch needs at least 4Gi."
+  type        = string
+  default     = "4Gi"
+}
+
+variable "analysis_max_workers" {
+  description = "Most analysis worker replicas at once. Each is billed only while it runs; more finish a card sooner for about the same total."
+  type        = number
+  default     = 10
+}
+
+variable "analysis_replica_timeout_seconds" {
+  description = "Longest one worker replica may run. Workers exit when there is nothing left, so this only bounds a long queue; a stopped worker lets go of its files and the web app starts another."
+  type        = number
+  default     = 14400
 }
 
 variable "perch_enabled" {
   description = "Run Google's Perch v2 over every file after BirdNET, as a second opinion stored beside BirdNET's detections (BIRDSENSE_PERCH). Perch is several times BirdNET's time and memory, so turning it on needs memory = \"4Gi\" and cpu = 2.0, which infra/app.tf checks at plan time, and roughly doubles the app's compute bill. See DEPLOYMENT.md, *Perch*."
   type        = bool
   default     = false
+}
+
+variable "analysis_tuning" {
+  description = "Overrides for how much analysis runs at once, as BIRDSENSE_ANALYSIS_<KEY> settings, e.g. { max_tasks = \"2\", perch_mem = \"2.3Gi\", perch_threads = \"1\", mem_headroom = \"1Gi\", birdnet_mem = \"350Mi\" }. Empty uses the server's defaults: a task per core, and the measured memory of each model. See ANALYSIS.md, *Packing*."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.analysis_tuning) : contains(["max_tasks", "mem_headroom", "birdnet_mem", "perch_mem", "perch_threads"], k)])
+    error_message = "analysis_tuning keys must be max_tasks, mem_headroom, birdnet_mem, perch_mem or perch_threads."
+  }
 }
 
 variable "log_retention_days" {
@@ -141,6 +194,29 @@ variable "oidc_microsoft_tenant" {
   description = "Directory to sign in against. `common` accepts any organization and any personal Microsoft account, which is what a roster of volunteers with their own addresses needs; a tenant GUID restricts sign-in to that one directory."
   type        = string
   default     = "common"
+}
+
+variable "oidc_google_client_id" {
+  description = "Client ID of the Google OAuth client (a Web application) volunteers can sign in through, alongside Microsoft. Empty (the default) offers no Google button. See DEPLOYMENT.md, Sign-in."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.oidc_google_client_id == "" || can(regex("^[0-9]+-[0-9a-z]+\\.apps\\.googleusercontent\\.com$", var.oidc_google_client_id))
+    error_message = "oidc_google_client_id must be the OAuth client's ID, ending in .apps.googleusercontent.com."
+  }
+}
+
+variable "oidc_google_client_secret" {
+  description = "Client secret of that OAuth client. Required when oidc_google_client_id is set. Kept as a Container Apps secret, not in the revision's environment."
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = (var.oidc_google_client_id == "") == (var.oidc_google_client_secret == "")
+    error_message = "oidc_google_client_id and oidc_google_client_secret are set together or not at all."
+  }
 }
 
 variable "session_key" {

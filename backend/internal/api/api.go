@@ -22,6 +22,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
@@ -41,7 +42,10 @@ type Options struct {
 	Files storage.Store
 	// Queue is told when a card has all its files, so BirdNET can start on it.
 	Queue Queue
-	Log   *slog.Logger
+	// Deleter is told when a card has been marked for deletion, so it can
+	// start on it (internal/deletion).
+	Deleter Deleter
+	Log     *slog.Logger
 	// Dev turns on the development-only routes -- the roster the sign-in page
 	// lets you pick an account from, and the sign-in that goes with it.
 	Dev bool
@@ -52,15 +56,23 @@ type Options struct {
 	// Retention is how long a card's originals are kept, so a card can say
 	// when its audio is due to go. The zero value keeps them for good.
 	Retention retention.Policy
+	// PublicURL is where a browser reaches Birdsense (AuthConfig.PublicURL).
+	// It is the MCP authorization server's identity and the base of every
+	// link a tool hands out, so without it the MCP endpoint isn't offered.
+	PublicURL string
 }
 
 // Register mounts the API routes on mux.
 func Register(mux *http.ServeMux, o Options) {
-	register(mux, &handlers{
-		store: o.Store, files: o.Files, queue: o.Queue, log: o.Log, dev: o.Dev,
+	h := &handlers{
+		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
 		retention: o.Retention, now: time.Now,
-	})
+	}
+	if o.PublicURL != "" {
+		h.oauth = newOAuthServer(o.PublicURL, h.keys)
+	}
+	register(mux, h)
 }
 
 // Queue is the analysis queue (internal/analysis). A received card is queued
@@ -71,8 +83,15 @@ type Queue interface {
 	Status() analysis.Status
 }
 
+// Deleter removes cards marked for deletion (internal/deletion). A marked
+// card is work by its status already; Wake only says to look now.
+type Deleter interface {
+	Wake()
+}
+
 func register(mux *http.ServeMux, h *handlers) {
 	h.overview = newOverviewCache()
+	h.scans = make(chan struct{}, mcpScans)
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 	mux.HandleFunc("GET /api/v1/ready", h.ready)
@@ -98,8 +117,13 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/uploads", h.requireSession(h.createUpload))
 	mux.HandleFunc("GET /api/v1/uploads/{reference}", h.requireSession(h.getUpload))
 	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", h.requireSession(h.recordProgress))
+	// The upload speed test: a body read and thrown away (speedtest.go).
+	mux.HandleFunc("POST /api/v1/speedtest", h.requireSession(h.speedTest))
 	// Detections are anyone's to hear and review once signed in, on every card.
 	mux.HandleFunc("GET /api/v1/detections", h.requireSession(h.listDetections))
+	// A literal beside {reference}, which is more specific and so wins; no
+	// card's reference can be "export" (db.UploadID).
+	mux.HandleFunc("GET /api/v1/detections/export", h.requireSession(h.exportDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}", h.requireSession(h.listCardDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", h.requireSession(h.getDetection))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", h.requireSession(h.getClip))
@@ -119,6 +143,24 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("POST /api/v1/admin/stations", h.requireRole(db.RoleAdmin, h.addStation))
 	mux.HandleFunc("PUT /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.updateStation))
 	mux.HandleFunc("DELETE /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.removeStation))
+
+	// MCP: an LLM tool reading Birdsense as whoever connected it, which is an
+	// OAuth 2.1 authorization server of Birdsense's own (oauth.go) in front of
+	// three read-only tools (mcp.go). The well-known documents are where RFC
+	// 8414 and RFC 9728 say a client looks, so they are the only routes
+	// outside /api/.
+	if h.oauth != nil {
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.authServerMetadata)
+		mux.Handle("/.well-known/oauth-protected-resource", h.oauth.resourceMetadata())
+		mux.Handle("/.well-known/oauth-protected-resource"+mcpPath, h.oauth.resourceMetadata())
+		mux.HandleFunc("POST "+oauthRegisterPath, h.registerClient)
+		mux.HandleFunc("GET "+oauthAuthorizePath, h.authorize)
+		mux.HandleFunc("POST "+oauthAuthorizePath, h.requireSession(h.decideRequest))
+		mux.HandleFunc("GET /api/v1/oauth/request", h.requireSession(h.describeRequest))
+		mux.HandleFunc("POST "+oauthTokenPath, h.token)
+		mux.Handle(mcpPath, h.mcpHandler())
+		mux.HandleFunc("GET "+exportPath, h.serveMCPExport)
+	}
 
 	// Development only: not registered at all otherwise, so a deployed server
 	// 404s instead of handing the roster to anyone who asks.
@@ -143,7 +185,10 @@ type handlers struct {
 	files storage.Store
 	// queue hears about cards that are ready for BirdNET. Nil runs no analysis.
 	queue Queue
-	log   *slog.Logger
+	// deleter hears about cards marked for deletion. Nil leaves them marked
+	// until a deleter's backstop finds them.
+	deleter Deleter
+	log     *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
 	// auth is OIDC sign-in, or nil when none is configured.
@@ -160,6 +205,11 @@ type handlers struct {
 	// overview holds the landing page's answer for a minute at a time. Set by
 	// register, so every mux has one.
 	overview *overviewCache
+	// oauth is the MCP endpoint's authorization server, or nil when there is
+	// no public URL to be one at.
+	oauth *oauthServer
+	// scans holds a slot for each MCP range read in flight (mcpScans).
+	scans chan struct{}
 }
 
 // health is unconditionally ok: it is the liveness and startup probe, and a
@@ -394,14 +444,7 @@ func (h *handlers) signedIn(r *http.Request) (db.User, bool, error) {
 	if err != nil {
 		return db.User{}, false, nil
 	}
-	u, err := h.store.GetUserByEmail(r.Context(), email)
-	switch {
-	case errors.Is(err, db.ErrNotFound):
-		return db.User{}, false, nil
-	case err != nil:
-		return db.User{}, false, err
-	}
-	return u, u.RemovedAt == nil, nil
+	return h.onRoster(r, email)
 }
 
 // requireSession rejects anonymous callers. requireRole additionally checks the
@@ -477,11 +520,14 @@ func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.Upl
 // the list is refreshed and the files already in are kept.
 func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.User) {
 	var body struct {
-		StationID string     `json:"stationId"`
-		PulledOn  string     `json:"pulledOn"`
-		Notes     string     `json:"notes"`
-		Nights    []Night    `json:"nights"`
-		Files     []CardFile `json:"files"`
+		StationID string       `json:"stationId"`
+		PulledOn  string       `json:"pulledOn"`
+		Notes     string       `json:"notes"`
+		Files     []listedFile `json:"files"`
+		// Nights is what a page loaded before cards stopped being grouped
+		// into nights still sends. It is read and ignored, so a volunteer
+		// resuming a card from such a page isn't refused mid-card.
+		Nights json.RawMessage `json:"nights,omitempty"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -508,33 +554,27 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		h.problem(w, http.StatusBadRequest, "pulledOn must be YYYY-MM-DD")
 		return
 	}
-	if len(body.Nights) == 0 || len(body.Files) == 0 {
+	if len(body.Files) == 0 {
 		h.problem(w, http.StatusBadRequest, "the card has no audio on it")
 		return
 	}
-	nights := make([]db.Night, len(body.Nights))
-	var files int
-	var bytes int64
-	for i, n := range body.Nights {
-		if _, err := time.Parse("2006-01-02", n.Date); err != nil || n.Files < 0 || n.Bytes < 0 {
-			h.problem(w, http.StatusBadRequest, "each night needs a YYYY-MM-DD date and non-negative counts")
-			return
-		}
-		// A night is measured against the room the card has left rather than
-		// added and then checked, so a crafted list can't overflow the sums
-		// into a total small enough -- or negative enough -- to pass.
-		if n.Files > maxCardFiles-files || n.Bytes > maxCardBytes-bytes {
-			h.problem(w, http.StatusBadRequest, cardTooBig)
-			return
-		}
-		nights[i] = db.Night(n)
-		files += n.Files
-		bytes += n.Bytes
-	}
-	listed, problem := cardList(body.Files, files, bytes)
+	listed, problem := cardList(body.Files)
 	if problem != "" {
 		h.problem(w, http.StatusBadRequest, problem)
 		return
+	}
+	files, bytes := len(listed), int64(0)
+	var first, last *time.Time
+	for _, f := range listed {
+		bytes += f.SizeBytes
+		if t := f.RecordedAt; t != nil {
+			if first == nil || t.Before(*first) {
+				first = t
+			}
+			if last == nil || t.After(*last) {
+				last = t
+			}
+		}
 	}
 	notes, started := strings.TrimSpace(body.Notes), h.stamp()
 	ref := db.UploadID(body.PulledOn, rec.ID)
@@ -544,7 +584,8 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		RecorderID: rec.ID,
 		Recorder:   db.RecorderSnapshot{Name: rec.Name, Latitude: rec.Latitude, Longitude: rec.Longitude},
 		UserID:     me.ID, UserName: me.Name,
-		PulledOn: body.PulledOn, Notes: notes, Nights: nights,
+		PulledOn: body.PulledOn, Notes: notes,
+		FirstRecordingAt: first, LastRecordingAt: last,
 		FileCount: files, TotalBytes: bytes,
 		Status: db.StatusInProgress, StartedAt: started,
 	})
@@ -558,6 +599,9 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 				if u.UserID != me.ID {
 					return errCardTaken
 				}
+				if u.Status == db.StatusDeleting {
+					return errCardDeleting
+				}
 				// A card that is already in keeps the list it was sent with, and
 				// doesn't go back to being sent. A different list is another card
 				// with the same recorder and pull date, and answering with the one
@@ -570,7 +614,8 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 					return nil
 				}
 				u.Notes = notes
-				u.Nights, u.FileCount, u.TotalBytes = nights, files, bytes
+				u.FirstRecordingAt, u.LastRecordingAt = first, last
+				u.FileCount, u.TotalBytes = files, bytes
 				u.Status, u.StartedAt = db.StatusInProgress, started
 				return nil
 			})
@@ -591,6 +636,9 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 	case errors.Is(err, errCardReceived):
 		h.problem(w, http.StatusConflict,
 			"a different card from this recorder, pulled on the same date, has already been uploaded; check the date you pulled the card")
+	case errors.Is(err, errCardDeleting):
+		h.problem(w, http.StatusConflict,
+			"this card is being deleted; once it is gone, in a few minutes, it can be sent again")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
@@ -601,6 +649,7 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 var (
 	errCardTaken    = errors.New("card belongs to someone else")
 	errCardReceived = errors.New("card has been received with a different file list")
+	errCardDeleting = errors.New("card is being deleted")
 )
 
 // listedAsBefore reports whether a card's file list is the one it was last
@@ -643,30 +692,43 @@ const (
 // cardTooBig is what a card claiming more than that is told.
 const cardTooBig = "that is more audio than a card can hold; check the folder you chose"
 
-// cardList checks a card's file list against the nights it was summed into,
-// and returns it as audio files, or else what is wrong with it.
-func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile, string) {
+// listedFile is one file as the browser lists it off a card.
+type listedFile struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+	// Night is sent by pages from before cards stopped being grouped into
+	// nights, and ignored; see createUpload.
+	Night string `json:"night,omitempty"`
+}
+
+// cardList checks a card's file list and returns it as audio files, each
+// with when it was recorded where its name says, or else what is wrong with
+// it.
+func cardList(files []listedFile) ([]db.AudioFile, string) {
 	listed := make([]db.AudioFile, 0, len(files))
 	seen := make(map[string]bool, len(files))
 	var bytes int64
 	for _, f := range files {
 		p := db.CardPath(f.Path)
-		if _, err := time.Parse("2006-01-02", f.Night); err != nil || p == "" || f.Bytes < 0 {
-			return nil, "each file needs its path on the card, a non-negative size and a YYYY-MM-DD night"
+		if p == "" || f.Bytes < 0 {
+			return nil, "each file needs its path on the card and a non-negative size"
 		}
 		if seen[p] {
 			return nil, fmt.Sprintf("the file list has %s twice", p)
 		}
-		// Measured against what the card has left, for the reason the nights are.
+		// A file is measured against the room the card has left rather than
+		// added and then checked, so a crafted list can't overflow the sum
+		// into a total small enough -- or negative enough -- to pass.
 		if f.Bytes > maxFileBytes || f.Bytes > maxCardBytes-bytes || len(listed) == maxCardFiles {
 			return nil, cardTooBig
 		}
 		seen[p] = true
 		bytes += f.Bytes
-		listed = append(listed, db.AudioFile{Path: p, SizeBytes: f.Bytes, Night: f.Night})
-	}
-	if len(listed) != wantFiles || bytes != wantBytes {
-		return nil, "the file list and the nights don't add up to the same card"
+		file := db.AudioFile{Path: p, SizeBytes: f.Bytes}
+		if t, ok := db.RecordedAt(p); ok {
+			file.RecordedAt = &t
+		}
+		listed = append(listed, file)
 	}
 	return listed, ""
 }
@@ -698,14 +760,17 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		old, had := unlisted[id]
 		delete(unlisted, id)
 		sameFile := had && old.SizeBytes == f.SizeBytes
-		if sameFile && (received(old) || (old.Status == db.AudioPending && old.Night == f.Night)) {
+		if sameFile && (received(old) || old.Status == db.AudioPending) {
 			continue
 		}
 		if sameFile && old.BlobName != "" {
 			// A file that was taken off the card's list and is on it again at
 			// the same length is the one already in storage, so it counts as
 			// received rather than being sent a second time.
-			old.Status, old.StatusDetail, old.Night = db.AudioUploaded, "", f.Night
+			old.Status, old.StatusDetail = db.AudioUploaded, ""
+			// Queued afresh: whatever analysis made of it before, and
+			// however often that failed, is behind it.
+			old.Claim = db.Claim{}
 			writes = append(writes, old)
 			continue
 		}
@@ -716,7 +781,7 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		}
 		writes = append(writes, db.AudioFile{
 			ID: id, RecorderID: u.RecorderID, Path: f.Path, SizeBytes: f.SizeBytes,
-			Night: f.Night, Status: db.AudioPending, CreatedAt: old.CreatedAt,
+			RecordedAt: f.RecordedAt, Status: db.AudioPending, CreatedAt: old.CreatedAt,
 		})
 	}
 	for _, old := range unlisted {
@@ -734,7 +799,9 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 // tallyFiles sets a card's uploaded counts from its audio files, and moves a
 // card whose every listed file has landed on to processing. The counts are
 // recounted rather than added to, so a retried request can't count a file
-// twice, and the browser never reports them.
+// twice, and the browser never reports them. It reads every file on the card,
+// so it runs when a card is registered and when countFile says the last file
+// is in, never as each file lands.
 func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error) {
 	files, err := h.store.ListAudioFiles(ctx, ref)
 	if err != nil {
@@ -764,6 +831,28 @@ func (h *handlers) tallyFiles(ctx context.Context, ref string) (db.Upload, error
 	})
 	if err == nil && u.Status == db.StatusProcessing && h.queue != nil {
 		h.queue.Enqueue(ref)
+	}
+	return u, err
+}
+
+// countFile adds one newly received file to its card's counts, and recounts
+// the card from its files once the count says every file is in. The recount
+// is what moves the card to processing, so that step is always checked
+// against the files themselves, and it corrects a count that drifted: one
+// short because a file was marked but its card never counted up (the next
+// registration recounts that), or one over because a registration's recount
+// already included a file that was finishing.
+func (h *handlers) countFile(ctx context.Context, ref string, size int64) (db.Upload, error) {
+	u, err := h.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
+		if !transferring(u.Status) {
+			return nil
+		}
+		u.FilesUploaded = min(u.FilesUploaded+1, u.FileCount)
+		u.BytesUploaded = min(u.BytesUploaded+size, u.TotalBytes)
+		return nil
+	})
+	if err == nil && transferring(u.Status) && u.FilesUploaded >= u.FileCount {
+		u, err = h.tallyFiles(ctx, ref)
 	}
 	return u, err
 }
@@ -869,51 +958,26 @@ func (h *handlers) getCardFiles(w http.ResponseWriter, r *http.Request, _ db.Use
 	}
 }
 
-// deleteUpload removes a card for good: its audio, its audio files, the
-// detections BirdNET found in them, and the card itself. The audio goes first
-// and the card last, so a delete that fails part way leaves the card listed to
-// be deleted again.
-func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, _ db.User) {
-	ctx := r.Context()
-	u, err := h.store.GetUpload(ctx, r.PathValue("reference"))
-	if err == nil {
-		err = h.deleteAudio(ctx, u)
-	}
-	// Not found by now means the analysis queue, finding the card going, got to
-	// the end of deleting it first.
-	if err == nil {
-		if err = h.store.DeleteUpload(ctx, u.ID); errors.Is(err, db.ErrNotFound) {
-			err = nil
-		}
-	}
+// deleteUpload marks a card for deletion and answers at once. The card goes
+// to deleting, which stops anything else being done to it, and the deleter
+// removes its audio, its clips, its files, its detections and then the card
+// itself (internal/deletion) -- more work than a request can be trusted to
+// finish on a large card. Deleting a card already being deleted is the same
+// answer again.
+func (h *handlers) deleteUpload(w http.ResponseWriter, r *http.Request, me db.User) {
+	u, err := deletion.Mark(r.Context(), h.store, r.PathValue("reference"), h.stamp())
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		h.problem(w, http.StatusNotFound, "no such card")
 	case err != nil:
 		h.fail(w, r, err)
 	default:
-		h.json(w, http.StatusOK, map[string]string{"removed": u.ID})
-	}
-}
-
-// deleteAudio removes everything storage holds for a card: its files, finished
-// or not, and its clips, which is everything under its prefix. storagePrefix
-// can spell two references the same, so if another card shares the prefix the
-// audio is left where it is, rather than taking that card's with it.
-func (h *handlers) deleteAudio(ctx context.Context, u db.Upload) error {
-	prefix := storagePrefix(u.ID)
-	all, err := h.store.ListUploads(ctx, db.UploadFilter{})
-	if err != nil {
-		return err
-	}
-	for _, other := range all {
-		if other.ID != u.ID && storagePrefix(other.ID) == prefix {
-			h.log.Warn("deleting a card: leaving its audio and clips in storage, another card shares its prefix",
-				"upload", u.ID, "other", other.ID, "prefix", storage.Name(prefix))
-			return nil
+		h.log.Info("card marked for deletion", "upload", u.ID, "by", me.Email)
+		if h.deleter != nil {
+			h.deleter.Wake()
 		}
+		h.json(w, http.StatusAccepted, map[string]string{"deleting": u.ID})
 	}
-	return h.files.DeleteAll(ctx, prefix)
 }
 
 // listCardDetections is what BirdNET heard on a card, or with ?file= in one of

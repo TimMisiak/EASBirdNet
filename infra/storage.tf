@@ -116,6 +116,25 @@ resource "azurerm_storage_management_policy" "this" {
     }
   }
 
+  # The analysis performance records (internal/perf, ANALYSIS.md): a few
+  # hundred KB per replica-hour, read by a person sizing the analysis replica
+  # and by nothing in the app. Half a year is enough to compare a season.
+  rule {
+    name    = "perf-records"
+    enabled = true
+
+    filters {
+      prefix_match = ["audio/perf/"]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_modification_greater_than = 180
+      }
+    }
+  }
+
   # The backstop has to leave a tiered straggler a full cool period, or the
   # delete above pays the early-deletion charge this rule exists to avoid.
   lifecycle {

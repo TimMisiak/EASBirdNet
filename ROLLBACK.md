@@ -83,6 +83,14 @@ every write.) So before rolling back over a SCHEMA.md change,
 decide whether losing that field on the documents that get touched is
 acceptable; usually it is, but it is a decision, not a no-op.
 
+**Cards being deleted.** Since `deleting` (DELETE-CARDS.md), a coordinator's
+delete only marks a card, and the web app's deleter removes it a minute or
+more later. An image from before that doesn't know the status: a card
+rolled back onto while `deleting` shows the raw word in a grey chip and
+nothing sweeps it. That older image's own delete removes a card in any
+status, so delete such a card again. Anything the deleter had already
+removed stays removed.
+
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).
 No image can bring them back.
@@ -90,6 +98,19 @@ No image can bring them back.
 **Sessions and the roster.** Neither lives in the image. Sessions are signed
 with `BIRDSENSE_SESSION_KEY`, which is configuration; the roster is in Cosmos.
 Rolling back signs nobody out and un-removes nobody.
+
+**Where analysis runs, across the job.** A tag is two images since analysis
+became a job -- `birdsense` for the web app and `birdsense-analyzer` for the
+job's workers -- built from one commit and applied together, so a rollback is
+still one tag. A tag from *before* the job has only `birdsense`, which is the
+whole app and analyzes in its own process; `deploy.ps1 -ImageTag` copies it to
+`birdsense-analyzer` so the apply goes through, and says so. That old code
+never starts the job, so the web app is analyzing again: set `cpu` and
+`memory` in `infra/prod.tfvars` back to what analysis needs (`1.0`/`"2Gi"`,
+or `2.0`/`"4Gi"` with Perch) before rolling back that far, or cards will crawl
+through a half-vCPU replica. Rolling back also leaves claims (SCHEMA.md,
+*Claims*) on files mid-analysis; code from before claims ignores them, and
+code from after lets them lapse.
 
 ## Gotchas
 

@@ -2,14 +2,25 @@
 // erase". It spans four routes, so the state lives here rather than in any one
 // page component, and the pages subscribe to it.
 //
-// Files go one at a time, each as its own tus upload (https://tus.io) to
-// /api/v1/tus/, in chunks: a dropped connection or a pause picks a file up from
-// its last chunk rather than its first byte. The server checks every file
-// against the list the card was registered with, and counts it once its last
-// byte lands, so the card's counts always come from the server. This module
-// tracks the files in this tab and the one that's moving.
+// Each file is its own tus upload (https://tus.io) to /api/v1/tus/, sent in
+// chunks: a dropped connection or a pause picks a file up from its last chunk
+// rather than its first byte. On a fast line a few files go at once, because
+// the server answers each chunk only once it has passed it on to storage, and
+// one file at a time leaves the line idle while it does (PARALLEL-UPLOADS.md).
+// The server checks every file against the list the card was registered with,
+// and counts it once its last byte lands, so the card's counts always come
+// from the server. This module tracks the files in this tab and the ones that
+// are moving.
+//
+// A WAV goes as FLAC when it can (flac.js): the same samples in about half the
+// bytes. It is encoded just before its turn -- the next file's encode runs
+// while the ones before it are on the line -- and a file the encoder can't
+// take, or whose FLAC the server turns down, goes as it is on the card. A
+// file's progress is shown against its size on the card, whatever goes on the
+// line; the speed is the line's, and the encoders' speed is shown beside it.
 
 import * as api from "./api.js";
+import * as flac from "./flac.js";
 import { isUnfinished } from "./upload-status.js";
 
 /**
@@ -39,6 +50,30 @@ const ASSUMED_BYTES_PER_SECOND = (ASSUMED_MBPS * 1e6) / 8;
 const SPEED_WINDOW_MS = 15_000;
 /** Progress arrives many times a second; pages hear about it this often. */
 const NOTIFY_EVERY_MS = 150;
+/**
+ * The most files that go at once. Each waits on the server between its chunks
+ * -- measured on Azure, ~2 s to stage every 50 MB -- and the others keep the
+ * line busy meanwhile: on a 518 Mbit/s line, 3 at once reached 260 Mbit/s and
+ * 6 reached 460 (PARALLEL-UPLOADS.md, *Measured on Azure*). A browser can set
+ * its own for measuring (localStorage "birdsense.upload.parallelFiles", 1-8).
+ */
+export const PARALLEL_FILES = parallelOverride() ?? 6;
+
+function parallelOverride() {
+  try {
+    const n = Number(localStorage.getItem("birdsense.upload.parallelFiles"));
+    return Number.isInteger(n) && n >= 1 && n <= 8 ? n : null;
+  } catch {
+    return null;
+  }
+}
+/**
+ * The share of the line each file gets: one file at a time per this much
+ * measured speed. Splitting a line thinner only stretches each chunk toward
+ * the ingress timeout, so a line under twice this goes one file at a time, and
+ * a 50 MB chunk arrives in about 20 s at any number of files.
+ */
+const MBPS_PER_FILE = 20;
 /** How the server turns down one file (see beforeFileUpload); the others can still go. */
 const FILE_REFUSED = [400, 413, 422];
 
@@ -47,15 +82,35 @@ const KEY = "birdsense.upload.reference";
 const listeners = new Set();
 let state = initial();
 
-// The file being sent, and how fast things are moving. None of it is rendered
+// The files being sent, and how fast things are moving. None of it is rendered
 // directly, so it stays out of state.
-let inFlight = null;
+const inFlight = new Set();
+/**
+ * The files being sent now: `fill` starts more when there's room for them.
+ * Stopping clears it, so what a stopped run still has in hand can't start
+ * files beside the next run's.
+ */
+let sending = null;
 let samples = [];
 let sentThisTab = 0;
 let elapsedMs = 0;
 let runningSince = 0;
 let lastNotify = 0;
 let tusClient = null;
+/**
+ * Each file's encode, started when the file is next to go and let go of once
+ * it is sent or the run stops (prepare, release).
+ */
+const encodes = new Map();
+/** The card's bytes of the files started in this tab, and the bytes they went as. */
+let startedCardBytes = 0;
+let startedLineBytes = 0;
+/** The files this tab sent to the end: how many, how many as FLAC, their bytes on the card and as sent. */
+let finished = noneFinished();
+
+function noneFinished() {
+  return { files: 0, flac: 0, cardBytes: 0, lineBytes: 0 };
+}
 
 function initial() {
   return {
@@ -75,9 +130,11 @@ function initial() {
     upload: null,
     /**
      * The card's files in the order they are sent, once the card has been read
-     * in this tab: {path, bytes, night, file, state, sent, error}. state is
-     * "waiting", "sending", "done", "already" (the server had it before this
-     * tab sent anything) or "failed".
+     * in this tab: {path, bytes, date, file, state, sent, error, compressing}.
+     * state is "waiting", "sending", "done", "already" (the server had it
+     * before this tab sent anything) or "failed"; compressing is true while a
+     * file that is sending is still being encoded. sent is in the card's
+     * bytes, however the file goes.
      */
     files: [],
     error: null,
@@ -129,13 +186,7 @@ function registration(card) {
     stationId: state.stationId,
     pulledOn: state.pulledOn,
     notes: state.notes,
-    nights: card.nights.map(({ date, files, bytes, flag }) => ({
-      date,
-      files,
-      bytes,
-      ...(flag ? { flag } : {}),
-    })),
-    files: card.files.map(({ path, bytes, night }) => ({ path, bytes, night })),
+    files: card.files.map(({ path, bytes }) => ({ path, bytes })),
   };
 }
 
@@ -234,6 +285,11 @@ export function pause() {
 export function reset() {
   stop();
   elapsedMs = 0;
+  sentThisTab = 0;
+  startedCardBytes = 0;
+  startedLineBytes = 0;
+  finished = noneFinished();
+  flac.resetMeter();
   sessionStorage.removeItem(KEY);
   state = initial();
   for (const listener of listeners) listener(state);
@@ -280,80 +336,189 @@ async function run(reference) {
 
 const running = (reference) => state.upload?.reference === reference && state.status === "uploading";
 
-/** Send every waiting file in order. False if the run was stopped part-way. */
-async function sendWaiting(tus, reference) {
-  for (;;) {
-    if (!running(reference)) return false;
-    const entry = state.files.find((f) => f.state === "waiting");
-    if (!entry) return true;
-    try {
-      await send(tus, reference, entry);
-      Object.assign(entry, { state: "done", sent: entry.bytes });
-    } catch (error) {
-      if (error instanceof Stopped) return false;
-      const status = error?.originalResponse?.getStatus?.();
-      if (!FILE_REFUSED.includes(status)) throw explain(status);
-      const refusal = serverReason(error);
-      if (refusal?.code === "ERR_FILE_RECEIVED") {
-        Object.assign(entry, { state: "already", sent: entry.bytes });
-      } else {
-        Object.assign(entry, { state: "failed", sent: 0, error: refusal?.message ?? error.message });
+/**
+ * Send every waiting file, in order, as many at once as the line warrants
+ * (filesAtOnce). True once every file is sent or turned down; false if the run
+ * was stopped part-way. A failure that isn't one file being turned down stops
+ * the lot, as it did one file at a time.
+ */
+function sendWaiting(tus, reference) {
+  return new Promise((resolve, reject) => {
+    // Files only leave "waiting" during a run, so the next one is always at
+    // or after the last one taken, and finding it never rescans the card.
+    let next = 0;
+    let settled = false;
+    const run = {};
+    const settle = (done, value) => {
+      if (settled) return;
+      settled = true;
+      if (sending === run) sending = null;
+      done(value);
+    };
+    const nextWaiting = () => {
+      while (next < state.files.length && state.files[next].state !== "waiting") next += 1;
+      return state.files[next];
+    };
+    // This run's own, so a file stopped by a pause settles this run, not
+    // whichever a quick resume has started since.
+    const fill = () => {
+      if (settled) return;
+      if (sending !== run || !running(reference)) return settle(resolve, false);
+      while (inFlight.size < filesAtOnce()) {
+        const entry = nextWaiting();
+        if (!entry) break;
+        sendOne(tus, reference, entry).then(fill, (error) => settle(reject, error));
       }
+      // The next file's encode, so the line isn't kept waiting for it.
+      const ahead = nextWaiting();
+      if (ahead) prepare(ahead);
+      if (!inFlight.size && !ahead) settle(resolve, true);
+    };
+    run.fill = fill;
+    sending = run;
+    fill();
+  });
+}
+
+/** One file, to the end: sent, already in, or turned down. Throws what should stop the card. */
+async function sendOne(tus, reference, entry) {
+  try {
+    await send(tus, reference, entry);
+    Object.assign(entry, { state: "done", sent: entry.bytes });
+    finished.files += 1;
+    if (entry.encoding === "flac") finished.flac += 1;
+    finished.cardBytes += entry.bytes;
+    finished.lineBytes += entry.lineBytes;
+  } catch (error) {
+    if (error instanceof Stopped) return;
+    const status = error?.originalResponse?.getStatus?.();
+    if (!FILE_REFUSED.includes(status)) {
+      // Not this file's fault: it goes again from its last chunk next time.
+      entry.state = "waiting";
+      throw explain(status);
     }
-    set({ files: state.files });
+    const refusal = serverReason(error);
+    if (refusal?.code === "ERR_FILE_RECEIVED") {
+      Object.assign(entry, { state: "already", sent: entry.bytes });
+    } else if (entry.encoding === "flac") {
+      // The server turned the FLAC down (checkFLAC): the card's own file goes instead.
+      console.warn(`Sending ${entry.path} as it is on the card: ${refusal?.message ?? error.message}`);
+      Object.assign(entry, { asIs: true, state: "waiting", sent: 0 });
+      if (running(reference)) return sendOne(tus, reference, entry);
+    } else {
+      Object.assign(entry, { state: "failed", sent: 0, error: refusal?.message ?? error.message });
+    }
   }
+  if (running(reference)) set({ files: state.files });
+}
+
+/** One file until the line is measured, then one per MBPS_PER_FILE of it, up to PARALLEL_FILES. */
+function filesAtOnce() {
+  const speed = bytesPerSecond();
+  if (speed === null) return 1;
+  return Math.min(PARALLEL_FILES, Math.max(1, Math.floor((speed * 8) / 1e6 / MBPS_PER_FILE)));
 }
 
 class Stopped extends Error {}
 
 function send(tus, reference, entry) {
+  let handle = null;
   return new Promise((resolve, reject) => {
     let stopped = false;
+    let upload = null;
     // The first progress report of a resumed file is what had already landed.
     let first = true;
-    const upload = new tus.Upload(entry.file, {
-      endpoint: ENDPOINT,
-      chunkSize: CHUNK_BYTES,
-      retryDelays: RETRY_DELAYS,
-      metadata: { reference, path: entry.path },
-      // Resume by card and path: a recorder names its files the same way on
-      // every card, so the file name alone would find another card's upload.
-      fingerprint: async () => `birdsense:${reference}:${entry.path}:${entry.bytes}:${entry.file.lastModified}`,
-      removeFingerprintOnSuccess: true,
-      onProgress: (sent) => {
-        progress(entry, sent, first);
-        first = false;
-      },
-      onSuccess: resolve,
-      onError: reject,
-    });
-    inFlight = {
+    handle = {
       stop() {
         stopped = true;
-        upload.abort();
-        entry.state = "waiting";
+        upload?.abort();
+        Object.assign(entry, { state: "waiting", compressing: false });
         reject(new Stopped());
       },
     };
-    entry.state = "sending";
+    inFlight.add(handle);
+    Object.assign(entry, { state: "sending", compressing: !entry.asIs, onLine: 0 });
     set({ files: state.files });
-    upload.findPreviousUploads().then((previous) => {
-      if (stopped) return;
-      if (previous.length) upload.resumeFromPreviousUpload(previous[0]);
-      upload.start();
-    }, reject);
+    prepare(entry)
+      .then((encoded) => {
+        if (stopped) return;
+        const body = encoded?.blob ?? entry.file;
+        Object.assign(entry, { compressing: false, encoding: encoded ? "flac" : "", lineBytes: body.size });
+        startedCardBytes += entry.bytes;
+        startedLineBytes += body.size;
+        set({ files: state.files });
+        upload = new tus.Upload(body, {
+          endpoint: ENDPOINT,
+          chunkSize: CHUNK_BYTES,
+          retryDelays: RETRY_DELAYS,
+          metadata: encoded
+            ? { reference, path: entry.path, encoding: "flac", samples: String(encoded.samples) }
+            : { reference, path: entry.path },
+          // Resume by card and path: a recorder names its files the same way on
+          // every card, so the file name alone would find another card's upload.
+          // A FLAC only resumes over bytes the same encoder made the same way.
+          fingerprint: async () =>
+            `birdsense:${reference}:${entry.path}:${entry.bytes}:${entry.file.lastModified}` +
+            (encoded ? `:${flac.ENCODER}:${encoded.bytes}:${encoded.hash}` : ""),
+          removeFingerprintOnSuccess: true,
+          onProgress: (sent) => {
+            progress(entry, sent, first);
+            first = false;
+          },
+          onSuccess: resolve,
+          onError: reject,
+        });
+        return upload.findPreviousUploads().then((previous) => {
+          if (stopped) return;
+          if (previous.length) upload.resumeFromPreviousUpload(previous[0]);
+          upload.start();
+        });
+      })
+      .catch(reject);
   }).finally(() => {
-    inFlight = null;
+    inFlight.delete(handle);
+    release(entry);
   });
 }
 
-function progress(entry, sent, first) {
-  if (!first && sent > entry.sent) sentThisTab += sent - entry.sent;
-  entry.sent = sent;
+/**
+ * A file's body, encoded as FLAC (flac.js), or null to send it as it is.
+ * Asked for when the file is sending and again when it is next in line, and
+ * started only once.
+ */
+function prepare(entry) {
+  let job = encodes.get(entry);
+  if (!job) {
+    const controller = new AbortController();
+    const result = entry.asIs ? Promise.resolve(null) : flac.encode(entry.file, controller.signal);
+    // A file stopped before its turn came has nobody waiting on its encode.
+    result.catch(() => {});
+    job = { controller, result };
+    encodes.set(entry, job);
+  }
+  return job.result;
+}
+
+/** Stop a file's encode, or remove the FLAC it made. */
+function release(entry) {
+  const job = encodes.get(entry);
+  if (!job) return;
+  encodes.delete(entry);
+  job.controller.abort();
+  job.result.then((encoded) => encoded?.discard(), () => {});
+}
+
+/** What has landed of a file's upload, `onLine` of its `lineBytes`. */
+function progress(entry, onLine, first) {
+  if (!first && onLine > entry.onLine) sentThisTab += onLine - entry.onLine;
+  entry.onLine = onLine;
+  entry.sent = entry.lineBytes ? Math.round((onLine / entry.lineBytes) * entry.bytes) : 0;
   const now = Date.now();
   samples.push([now, sentThisTab]);
   while (samples.length > 2 && now - samples[1][0] >= SPEED_WINDOW_MS) samples.shift();
   if (now - lastNotify >= NOTIFY_EVERY_MS) set({ files: state.files });
+  // Once the line is measured fast, the other files can start.
+  sending?.fill();
 }
 
 /** Register the card again to learn which files the server has, and queue the rest. */
@@ -372,9 +537,11 @@ function interrupt(reference, error) {
   report(reference, "interrupted");
 }
 
-/** Stop the file in flight and the clock. */
+/** Stop the files in flight and the clock. */
 function stop() {
-  inFlight?.stop();
+  sending = null;
+  for (const upload of [...inFlight]) upload.stop();
+  for (const entry of [...encodes.keys()]) release(entry);
   if (runningSince) elapsedMs += Date.now() - runningSince;
   runningSince = 0;
   samples = [];
@@ -457,10 +624,45 @@ export function bytesPerSecond() {
   return t1 - t0 >= 2_000 ? ((b1 - b0) * 1_000) / (t1 - t0) : null;
 }
 
-/** Minutes of transfer left, at the measured speed once there is one. */
-export const minutesRemaining = () =>
-  ((state.upload?.totalBytes ?? 0) - totals().bytes) / ((bytesPerSecond() ?? ASSUMED_BYTES_PER_SECOND) * 60);
+/**
+ * Minutes of transfer left, at the measured speed once there is one, for the
+ * bytes the rest of the card will go as: the share of the card's bytes the
+ * files started so far went as, about a half once WAVs go as FLAC.
+ */
+export function minutesRemaining() {
+  const share = startedCardBytes ? startedLineBytes / startedCardBytes : 1;
+  const left = ((state.upload?.totalBytes ?? 0) - totals().bytes) * share;
+  return left / ((bytesPerSecond() ?? ASSUMED_BYTES_PER_SECOND) * 60);
+}
 export const minutesElapsed = () => (elapsedMs + (runningSince ? Date.now() - runningSince : 0)) / 60_000;
+/**
+ * Bytes per second over the whole time spent sending, pauses left out, or null
+ * if this tab sent too little to say (a card that was already in, or a reload
+ * of the done page). Only what this tab sent counts: what had landed before a
+ * resume took none of its time.
+ */
+export function averageBytesPerSecond() {
+  const ms = minutesElapsed() * 60_000;
+  return ms >= 2_000 && sentThisTab > 0 ? (sentThisTab * 1_000) / ms : null;
+}
+/**
+ * Bytes of WAV compressed per second over the last few seconds of encoding
+ * (flac.js), or null until there's enough to say. In the card's bytes, where
+ * the line's speed is in the bytes that go: on a line the encoders can't keep
+ * up with, the line runs at about this times the share the card goes as.
+ */
+export const compressionBytesPerSecond = () => flac.bytesPerSecond();
+
+/**
+ * What the files this tab sent went as -- {files, flac, cardBytes, lineBytes},
+ * where `flac` counts the files that went as FLAC -- and `bytesPerSecond`, the
+ * average speed the card was compressed at, or null if too little was. Null
+ * if this tab sent no file to the end.
+ */
+export function compression() {
+  return finished.files ? { ...finished, bytesPerSecond: flac.averageBytesPerSecond() } : null;
+}
+
 /** Minutes to send this many bytes at the assumed speed, before anything has been sent. */
 export const totalMinutes = (bytes) => bytes / (ASSUMED_BYTES_PER_SECOND * 60);
 export const assumedSpeed = () => `${ASSUMED_MBPS} Mb/s`;

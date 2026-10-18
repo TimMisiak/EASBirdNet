@@ -28,7 +28,7 @@ func TestListEveryDetection(t *testing.T) {
 			t.Fatal(err)
 		}
 		return db.Detection{
-			AudioFileID: "af_list", DetectedAt: when, Night: "2026-08-19", StartSec: float64(when.Hour()),
+			AudioFileID: "af_list", DetectedAt: when, StartSec: float64(when.Hour()),
 			ScientificName: scientific, CommonName: common, Confidence: confidence,
 		}
 	}
@@ -78,7 +78,7 @@ func TestListEveryDetection(t *testing.T) {
 		}
 	}
 	if d := all.Detections[0]; d.CommonName != "Western Screech-Owl" || d.Reference != "OWL-20260913-SR05" ||
-		d.StationName != "Soaring Eagle – East Loop" || d.Night != "2026-09-12" {
+		d.StationName != "Soaring Eagle – East Loop" {
 		t.Errorf("newest = %+v, want the screech-owl on OWL-20260913-SR05, at the card's station name", d)
 	}
 	// BirdNET's labels, not a reviewer's correction.
@@ -158,7 +158,7 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.UpsertDetections(t.Context(), "OWL-20260821-SR03", []db.Detection{{
-		AudioFileID: "af_old", DetectedAt: old, Night: "2026-05-31", StartSec: 9,
+		AudioFileID: "af_old", DetectedAt: old, StartSec: 9,
 		ScientificName: "Tyto alba", CommonName: "Barn Owl", Confidence: 0.8,
 	}}); err != nil {
 		t.Fatal(err)
@@ -199,6 +199,63 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 	if before.Total != 1 || before.Window == nil ||
 		!before.Window.Since.Equal(until.AddDate(0, 0, -defaultDetectionsDays)) {
 		t.Errorf("until June 2nd = %d detections, window %+v; want the one barn owl in the week before it", before.Total, before.Window)
+	}
+}
+
+// TestOneCardsDetections is the list a card's page links to: what was heard on
+// that card alone, all of it, because the card bounds the read where the
+// default window would otherwise -- a card's detections sit in its own
+// partition.
+func TestOneCardsDetections(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	list := func(query string) listedBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections?"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET detections?%s = %d %s", query, rec.Code, rec.Body)
+		}
+		return decodeInto[listedBody](t, rec)
+	}
+
+	// OWL-20260821-SR03's one detection is from August, weeks before the
+	// default window; naming the card is enough to see it.
+	if got := list(""); got.Total != 5 {
+		t.Fatalf("default list = %d, want this week's 5 (the August card's isn't among them)", got.Total)
+	}
+	old := list("card=OWL-20260821-SR03")
+	if old.Total != 1 || old.Window != nil || old.Detections[0].Reference != "OWL-20260821-SR03" ||
+		len(old.Species) != 1 || old.Species[0].CommonName != "Northern Saw-whet Owl" {
+		t.Errorf("the August card = %d detections, window %+v, species %+v; want its one saw-whet and no window",
+			old.Total, old.Window, old.Species)
+	}
+
+	// Only that card's, of the species as well as the rows, and the other
+	// filters still narrow it.
+	sr05 := list("card=OWL-20260913-SR05")
+	if sr05.Total != 5 || len(sr05.Species) != 3 {
+		t.Errorf("OWL-20260913-SR05 = %d detections of %d species, want 5 of 3", sr05.Total, len(sr05.Species))
+	}
+	for _, d := range sr05.Detections {
+		if d.Reference != "OWL-20260913-SR05" {
+			t.Errorf("a detection from %s in OWL-20260913-SR05's list", d.Reference)
+		}
+	}
+	if got := list("card=OWL-20260913-SR05&status=rejected"); got.Total != 1 {
+		t.Errorf("OWL-20260913-SR05's rejected = %d, want 1", got.Total)
+	}
+	if got := list("card=OWL-20260913-SR05&since=2026-09-13T00:00:00Z"); got.Total != 3 || got.Window != nil {
+		t.Errorf("OWL-20260913-SR05 from the 13th = %d, window %+v; want 3, unwindowed", got.Total, got.Window)
+	}
+	if got := list("card=OWL-20990101-XX99"); got.Total != 0 {
+		t.Errorf("a card that isn't there = %d detections, want none", got.Total)
+	}
+
+	// The export says which card it is, and names no dates it wasn't given.
+	rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?card=OWL-20260821-SR03", "", admin)
+	head := decodeInto[DetectionExport](t, rec)
+	if rec.Code != http.StatusOK || head.Card != "OWL-20260821-SR03" || head.Since != nil || head.Window != nil || head.Total != 1 {
+		t.Errorf("export of the August card = %d, head %+v; want the card, no since, no window, 1 row", rec.Code, head)
 	}
 }
 
@@ -262,6 +319,80 @@ func TestTooManyDetectionsIsAskedAgain(t *testing.T) {
 	}
 }
 
+// TestExportDetections holds GET /detections/export to the list it saves: the
+// same rows the same parameters list, in the same order, all of them rather
+// than a page, under a head that says what was asked for.
+func TestExportDetections(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	type exportBody struct {
+		DetectionExport
+		Detections []ListedDetection `json:"detections"`
+	}
+	export := func(query string) exportBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET detections/export?%s = %d %s", query, rec.Code, rec.Body)
+		}
+		if got := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment; filename=") {
+			t.Errorf("Content-Disposition = %q, want an attachment", got)
+		}
+		return decodeInto[exportBody](t, rec)
+	}
+	ids := func(rows []ListedDetection) string {
+		out := make([]string, len(rows))
+		for i, d := range rows {
+			out[i] = d.Reference + "/" + d.ID
+		}
+		return strings.Join(out, ", ")
+	}
+
+	// Whole, where the list is a page: limit and offset don't apply.
+	const query = "since=2026-01-01T00:00:00Z&sort=confidence&order=asc"
+	listed := do(t, mux, http.MethodGet, "/api/v1/detections?"+query, "", admin)
+	list := decodeInto[listedBody](t, listed)
+	got := export(query + "&limit=2&offset=1")
+	if got.Total != list.Total || len(got.Detections) != list.Total || ids(got.Detections) != ids(list.Detections) {
+		t.Errorf("export = %d rows (%s), want the list's %d in its order (%s)",
+			len(got.Detections), ids(got.Detections), list.Total, ids(list.Detections))
+	}
+	if d := got.Detections[0]; d.StationName == "" || d.DetectedAt.IsZero() || d.Reference == "" {
+		t.Errorf("exported row = %+v, want its card, station and time as the list has them", d)
+	}
+	if got.Sort != sortConfidence || got.Order != "asc" || got.Model != db.ModelBirdNET || got.Window != nil ||
+		got.Until != nil || !got.ExportedAt.Equal(testNow) {
+		t.Errorf("head = %+v, want what was asked for", got.DetectionExport)
+	}
+
+	// Filtered as the list is, and bounded the same way when it names no dates.
+	if got := export("since=2026-01-01T00:00:00Z&species=Strix+varia"); got.Total != 3 || got.Species != "Strix varia" ||
+		len(got.Detections) != 3 {
+		t.Errorf("barred owls = %d (%s), want 3", got.Total, ids(got.Detections))
+	}
+	if got := export(""); got.Window == nil || got.Window.Days != defaultDetectionsDays || got.Order != "desc" {
+		t.Errorf("no dates = window %+v, order %q; want the default window, newest first", got.Window, got.Order)
+	}
+
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?status=maybe", "", admin); rec.Code != http.StatusBadRequest {
+		t.Errorf("export with a bad status = %d, want 400", rec.Code)
+	}
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export", "", vol); rec.Code != http.StatusOK {
+		t.Errorf("volunteer export = %d, want 200", rec.Code)
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/detections/export", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous export = %d, want 401", rec.Code)
+	}
+
+	// Too wide to read is the list's 400, not a file.
+	wide := muxFor(tooManyStore{newTestStore(t)}, testFiles(t), false)
+	rec := do(t, wide, http.MethodGet, "/api/v1/detections/export?since=2020-01-01T00:00:00Z", "", admin)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "narrow the dates") {
+		t.Errorf("an export too wide to read = %d %s, want 400 saying how to narrow it", rec.Code, rec.Body)
+	}
+}
+
 // Perch's detections are a second list, not more rows in BirdNET's: each list
 // is one model's, BirdNET's unless the request asks for Perch's, and the
 // public page counts BirdNET's alone.
@@ -274,7 +405,7 @@ func TestPerchDetectionsAreListedApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	perch := db.Detection{
-		Model: db.ModelPerch, AudioFileID: "af_perch", DetectedAt: testNow.Add(-24 * time.Hour), Night: "2026-09-12", StartSec: 5, EndSec: 10,
+		Model: db.ModelPerch, AudioFileID: "af_perch", DetectedAt: testNow.Add(-24 * time.Hour), StartSec: 5, EndSec: 10,
 		ScientificName: "Megascops kennicottii", CommonName: "Western Screech-Owl", Confidence: 0.6, ReviewStatus: db.ReviewConfirmed,
 	}
 	if err := store.UpsertDetections(ctx, ref, []db.Detection{perch}); err != nil {
@@ -323,5 +454,70 @@ func TestPerchDetectionsAreListedApart(t *testing.T) {
 	}
 	if after.ConfirmedDetections != before.ConfirmedDetections {
 		t.Errorf("confirmed on the public page went %d -> %d; Perch's shouldn't count", before.ConfirmedDetections, after.ConfirmedDetections)
+	}
+}
+
+// A card being deleted drops out of the detections list and the landing page
+// as soon as it is marked, not when the deleter gets to it.
+func TestACardBeingDeletedIsNotCounted(t *testing.T) {
+	mux, store := newTestMux(t)
+	ctx := t.Context()
+	const going = "OWL-20260913-SR05"
+	yearStart := time.Date(testNow.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+	all, err := store.ListDetections(ctx, db.DetectionFilter{Since: yearStart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := store.ListDetections(ctx, db.DetectionFilter{Since: yearStart, ReviewStatus: db.ReviewConfirmed, Model: db.ModelBirdNET})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onCard := func(ds []db.Detection) (n int) {
+		for _, d := range ds {
+			if d.UploadID == going {
+				n++
+			}
+		}
+		return n
+	}
+	if onCard(all) == 0 || onCard(confirmed) == 0 {
+		t.Fatalf("the seed has no confirmed detections on %s to leave out", going)
+	}
+
+	admin := signedIn(t, mux, db.RoleAdmin)
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+going, "", admin); rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE = %d (%s)", rec.Code, rec.Body)
+	}
+
+	rec := do(t, mux, http.MethodGet, "/api/v1/detections?since=2026-01-01T00:00:00Z", "", admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detections = %d %s", rec.Code, rec.Body)
+	}
+	listed := decodeInto[listedBody](t, rec)
+	if want := len(all) - onCard(all); listed.Total != want {
+		t.Errorf("listed %d, want %d: every detection but the %d on the card being deleted", listed.Total, want, onCard(all))
+	}
+	for _, d := range listed.Detections {
+		if d.Reference == going {
+			t.Errorf("listed %s from the card being deleted", d.ID)
+		}
+	}
+	species := 0
+	for _, s := range listed.Species {
+		species += s.Detections
+	}
+	if species != listed.Total {
+		t.Errorf("species count %d detections, want the %d listed", species, listed.Total)
+	}
+
+	rec = do(t, mux, http.MethodGet, "/api/v1/public/overview", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET overview = %d %s", rec.Code, rec.Body)
+	}
+	overview := decodeInto[struct {
+		Program ProgramStats `json:"program"`
+	}](t, rec)
+	if want := len(confirmed) - onCard(confirmed); overview.Program.ConfirmedDetections != want {
+		t.Errorf("confirmed detections = %d, want %d", overview.Program.ConfirmedDetections, want)
 	}
 }

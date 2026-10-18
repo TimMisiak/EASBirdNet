@@ -44,11 +44,12 @@ func seedCard(t *testing.T, s Store) (User, Recorder, Upload) {
 	if err != nil {
 		t.Fatalf("create recorder: %v", err)
 	}
+	first, last := time.Date(2026, 8, 25, 3, 0, 0, 0, time.UTC), time.Date(2026, 8, 26, 13, 0, 0, 0, time.UTC)
 	up, err := s.CreateUpload(ctx, Upload{
 		ID: "OWL-20260907-SR02", RecorderID: r.ID,
 		Recorder: RecorderSnapshot{Name: r.Name, Latitude: r.Latitude, Longitude: r.Longitude},
 		UserID:   u.ID, UserName: u.Name, PulledOn: "2026-09-07",
-		Nights:    []Night{{Date: "2026-08-24", Files: 24, Bytes: 9_192_000_000}, {Date: "2026-08-25", Files: 3, Bytes: 1_149_000_000, Flag: "partial"}},
+		FirstRecordingAt: &first, LastRecordingAt: &last,
 		FileCount: 27, TotalBytes: 10_341_000_000, Status: StatusInProgress, StartedAt: now(),
 	})
 	if err != nil {
@@ -71,7 +72,7 @@ func TestJSONFileRoundTrip(t *testing.T) {
 
 	start := time.Date(2026, 8, 25, 4, 0, 0, 0, time.UTC)
 	file := AudioFile{RecorderID: r.ID, Path: `DATA\20260824\20260825_040000.WAV`, SizeBytes: 383_000_000,
-		Night: "2026-08-24", RecordedAt: &start, BlobName: "uploads/" + up.ID + "/3f9a0c2b7d1e4a65", Status: AudioUploaded}
+		RecordedAt: &start, BlobName: "uploads/" + up.ID + "/3f9a0c2b7d1e4a65", Status: AudioUploaded}
 	if err := s.UpsertAudioFiles(ctx, up.ID, []AudioFile{file}); err != nil {
 		t.Fatalf("upsert audio: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestJSONFileRoundTrip(t *testing.T) {
 		t.Errorf("audio file = %q at %q, want the derived id and a forward-slash path", files[0].ID, files[0].Path)
 	}
 
-	det := Detection{AudioFileID: files[0].ID, RecorderID: r.ID, DetectedAt: start.Add(732 * time.Second), Night: "2026-08-24",
+	det := Detection{AudioFileID: files[0].ID, RecorderID: r.ID, DetectedAt: start.Add(732 * time.Second),
 		StartSec: 732, EndSec: 735, ScientificName: "Strix varia", CommonName: "Barred Owl", Confidence: 0.91}
 	if err := s.UpsertDetections(ctx, up.ID, []Detection{det}); err != nil {
 		t.Fatalf("upsert detections: %v", err)
@@ -185,7 +186,7 @@ func TestJSONFileFailedMutateChangesNothing(t *testing.T) {
 	boom := errors.New("not today")
 	_, err := s.UpdateUpload(ctx, up.ID, func(u *Upload) error {
 		u.FilesUploaded = 27
-		u.Nights[0].Files = 0
+		*u.FirstRecordingAt = time.Time{}
 		return boom
 	})
 	if !errors.Is(err, boom) {
@@ -229,9 +230,9 @@ func TestJSONFileReturnsCopies(t *testing.T) {
 	_, _, up := seedCard(t, s)
 
 	got, _ := s.GetUpload(ctx, up.ID)
-	got.Nights[0].Files = 0
+	*got.FirstRecordingAt = time.Time{}
 	list, _ := s.ListUploads(ctx, UploadFilter{})
-	list[0].Nights[1].Flag = ""
+	*list[0].LastRecordingAt = time.Time{}
 
 	again, _ := s.GetUpload(ctx, up.ID)
 	sameJSON(t, "stored upload", again, up)
@@ -320,6 +321,33 @@ func TestJSONFileListFilters(t *testing.T) {
 	birdnets, _ := s.ListDetections(ctx, DetectionFilter{Model: ModelBirdNET})
 	if len(birdnets) != 4 || birdnets[0].Model != "" {
 		t.Errorf("BirdNET's = %d, want the four stored with no model", len(birdnets))
+	}
+
+	// A recorder filter keeps that recorder's detections, and EachDetection
+	// hands over what ListDetections lists, in whatever order.
+	elsewhere := mk(later.ID, 4*time.Hour, "Tyto alba", "")
+	elsewhere.RecorderID = "SW-99"
+	if err := s.UpsertDetections(ctx, later.ID, []Detection{elsewhere}); err != nil {
+		t.Fatal(err)
+	}
+	fromThere, _ := s.ListDetections(ctx, DetectionFilter{RecorderIDs: []string{"SW-99"}})
+	if len(fromThere) != 1 || fromThere[0].RecorderID != "SW-99" {
+		t.Errorf("from SW-99 = %d detections, want its one", len(fromThere))
+	}
+	f := DetectionFilter{Model: ModelBirdNET, RecorderIDs: []string{r.ID, "SW-00"}}
+	listed, _ := s.ListDetections(ctx, f)
+	var each []Detection
+	if err := s.EachDetection(ctx, f, func(d Detection) error { each = append(each, d); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	sortDetections(each)
+	if len(each) != 4 || len(listed) != 4 || each[0].ID != listed[0].ID || each[3].ID != listed[3].ID {
+		t.Errorf("EachDetection = %d detections, ListDetections = %d; want the same four", len(each), len(listed))
+	}
+	stop := errors.New("stop")
+	calls := 0
+	if err := s.EachDetection(ctx, f, func(Detection) error { calls++; return stop }); !errors.Is(err, stop) || calls != 1 {
+		t.Errorf("EachDetection after fn fails = %v after %d calls, want fn's error after one", err, calls)
 	}
 }
 

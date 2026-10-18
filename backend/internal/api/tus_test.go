@@ -2,11 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,12 +16,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -29,39 +33,31 @@ type registeredBody struct {
 	Files  []CardFile `json:"files"`
 }
 
-// cardBody is a POST /api/v1/uploads body for a card with nights of perNight
-// files, 100 bytes each, the first night on firstNight.
-func cardBody(stationID, pulledOn, notes, firstNight string, nights, perNight int) string {
-	first, err := time.Parse("2006-01-02", firstNight)
+// cardBody is a POST /api/v1/uploads body for a card with a folder a day for
+// days days, the first on firstDay, of perDay files of 100 bytes each, named
+// for when they were recorded as a recorder names them: a minute apart from
+// 20:00 Pacific.
+func cardBody(stationID, pulledOn, notes, firstDay string, days, perDay int) string {
+	first, err := time.ParseInLocation("2006-01-02", firstDay, pacific)
 	if err != nil {
 		panic(err)
 	}
-	var ns []Night
-	var fs []CardFile
-	for i := range nights {
-		date := first.AddDate(0, 0, i).Format("2006-01-02")
-		ns = append(ns, Night{Date: date, Files: perNight, Bytes: int64(100 * perNight)})
-		for j := range perNight {
-			path := fmt.Sprintf("DATA/%s/%03d.WAV", strings.ReplaceAll(date, "-", ""), j)
-			fs = append(fs, CardFile{Path: path, Bytes: 100, Night: date})
+	var fs []listedFile
+	for i := range days {
+		day := first.AddDate(0, 0, i)
+		for j := range perDay {
+			at := day.Add(20*time.Hour + time.Duration(j)*time.Minute)
+			path := fmt.Sprintf("DATA/%s/%s.WAV", day.Format("20060102"), at.Format("20060102_150405"))
+			fs = append(fs, listedFile{Path: path, Bytes: 100})
 		}
 	}
-	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "notes": notes, "nights": ns, "files": fs})
+	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "notes": notes, "files": fs})
 	return string(b)
 }
 
-// oneNightBody is a POST /api/v1/uploads body for a card holding one night of
-// the files given, summed into it the way the browser sums them.
-func oneNightBody(stationID, pulledOn, night string, files []CardFile) string {
-	var bytes int64
-	for _, f := range files {
-		bytes += f.Bytes
-	}
-	b, _ := json.Marshal(map[string]any{
-		"stationId": stationID, "pulledOn": pulledOn,
-		"nights": []Night{{Date: night, Files: len(files), Bytes: bytes}},
-		"files":  files,
-	})
+// filesBody is a POST /api/v1/uploads body for a card holding the files given.
+func filesBody(stationID, pulledOn string, files []listedFile) string {
+	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "files": files})
 	return string(b)
 }
 
@@ -88,7 +84,12 @@ func newTusServerIn(t *testing.T, dir string) *tusServer {
 	if err != nil {
 		t.Fatalf("open test file storage: %v", err)
 	}
-	store := newTestStore(t)
+	return newTusServerOver(t, dir, files, newTestStore(t))
+}
+
+// newTusServerOver is newTusServerIn over a store the test has wrapped.
+func newTusServerOver(t *testing.T, dir string, files storage.Store, store db.Store) *tusServer {
+	t.Helper()
 	mux := muxFor(store, files, false)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -129,16 +130,22 @@ func (s *tusServer) do(method, url string, body []byte, header map[string]string
 // create starts an upload of one file on a card, as tus-js-client does.
 func (s *tusServer) create(cookie *http.Cookie, reference, path string, size int64) tusReply {
 	s.t.Helper()
-	meta := []string{}
-	if reference != "" {
-		meta = append(meta, "reference "+base64.StdEncoding.EncodeToString([]byte(reference)))
-	}
-	if path != "" {
-		meta = append(meta, "path "+base64.StdEncoding.EncodeToString([]byte(path)))
+	return s.createWith(cookie, map[string]string{metaReference: reference, metaPath: path}, size)
+}
+
+// createWith starts an upload with the metadata given, leaving out the keys
+// whose value is empty.
+func (s *tusServer) createWith(cookie *http.Cookie, meta map[string]string, size int64) tusReply {
+	s.t.Helper()
+	pairs := []string{}
+	for k, v := range meta {
+		if v != "" {
+			pairs = append(pairs, k+" "+base64.StdEncoding.EncodeToString([]byte(v)))
+		}
 	}
 	return s.do(http.MethodPost, tusPath, nil, map[string]string{
 		"Upload-Length":   strconv.FormatInt(size, 10),
-		"Upload-Metadata": strings.Join(meta, ","),
+		"Upload-Metadata": strings.Join(pairs, ","),
 	}, cookie)
 }
 
@@ -153,18 +160,35 @@ func (s *tusServer) patch(cookie *http.Cookie, location string, offset int, chun
 // send uploads data in chunks of at most chunk bytes and returns the upload URL.
 func (s *tusServer) send(cookie *http.Cookie, reference, path string, data []byte, chunk int) string {
 	s.t.Helper()
-	created := s.create(cookie, reference, path, int64(len(data)))
+	return s.sendWith(cookie, map[string]string{metaReference: reference, metaPath: path}, data, chunk)
+}
+
+// sendWith is send with the metadata given (createWith).
+func (s *tusServer) sendWith(cookie *http.Cookie, meta map[string]string, data []byte, chunk int) string {
+	s.t.Helper()
+	created := s.createWith(cookie, meta, int64(len(data)))
 	if created.status != http.StatusCreated {
-		s.t.Fatalf("create %s = %d (%s)", path, created.status, created.body)
+		s.t.Fatalf("create %s = %d (%s)", meta[metaPath], created.status, created.body)
 	}
 	location := created.header.Get("Location")
-	for offset := 0; offset < len(data); offset += chunk {
-		end := min(offset+chunk, len(data))
-		if r := s.patch(cookie, location, offset, data[offset:end]); r.status != http.StatusNoContent {
-			s.t.Fatalf("patch %s at %d = %d (%s)", path, offset, r.status, r.body)
-		}
+	if r := s.sendTo(cookie, location, data, chunk); r.status != http.StatusNoContent {
+		s.t.Fatalf("patch %s = %d (%s)", meta[metaPath], r.status, r.body)
 	}
 	return location
+}
+
+// sendTo sends data to an upload that has been created, in chunks of at most
+// chunk bytes, and returns the first reply that isn't a 204 or else the last.
+func (s *tusServer) sendTo(cookie *http.Cookie, location string, data []byte, chunk int) tusReply {
+	s.t.Helper()
+	var r tusReply
+	for offset := 0; offset < len(data); offset += chunk {
+		end := min(offset+chunk, len(data))
+		if r = s.patch(cookie, location, offset, data[offset:end]); r.status != http.StatusNoContent {
+			return r
+		}
+	}
+	return r
 }
 
 func (s *tusServer) register(cookie *http.Cookie, body string) registeredBody {
@@ -280,7 +304,7 @@ func TestTusRefusesFilesThatArentOnTheCard(t *testing.T) {
 		{"someone else's card", marcus, ref, reg.Files[1].Path, 100, http.StatusNotFound},
 		{"a card that's been received", marcus, "OWL-20260821-SR03", "DATA/a.WAV", 100, http.StatusUnprocessableEntity},
 		// A length no card list could carry: tusd refuses it before a byte lands.
-		{"longer than a file can be", jane, ref, reg.Files[1].Path, maxFileBytes + 1, http.StatusRequestEntityTooLarge},
+		{"longer than a file can be", jane, ref, reg.Files[1].Path, maxFLACBytes(maxFileBytes) + 1, http.StatusRequestEntityTooLarge},
 	}
 	for _, tc := range cases {
 		if r := s.create(tc.cookie, tc.ref, tc.path, tc.size); r.status != tc.want {
@@ -379,7 +403,7 @@ func TestReRegisteringACardKeepsTheFilesAlreadyIn(t *testing.T) {
 		t.Errorf("re-registered = %d uploaded, files %+v; want the first file kept", again.Upload.FilesUploaded, again.Files)
 	}
 
-	// A different folder that shares only the later nights: the first night's
+	// A different folder that shares only the later days: the first day's
 	// file is off the list and no longer counts, and the new one is pending.
 	moved := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-13", 3, 1))
 	paths := []string{}
@@ -425,9 +449,9 @@ func TestReRegisteringAFileAtADifferentLengthReplacesWhatWasStored(t *testing.T)
 		t.Fatalf("received file = %+v, %v", stored, err)
 	}
 
-	longer := oneNightBody("SW-03", "2026-09-14", "2026-09-12", []CardFile{
-		{Path: first, Bytes: 150, Night: "2026-09-12"},
-		{Path: second, Bytes: 100, Night: "2026-09-12"},
+	longer := filesBody("SW-03", "2026-09-14", []listedFile{
+		{Path: first, Bytes: 150},
+		{Path: second, Bytes: 100},
 	})
 	if u := s.register(jane, longer).Upload; u.FilesUploaded != 0 || u.TotalBytes != 250 {
 		t.Errorf("after the longer list = %d files, %d bytes; want 0 of 250", u.FilesUploaded, u.TotalBytes)
@@ -489,9 +513,34 @@ func TestDeleteUpload(t *testing.T) {
 		t.Errorf("volunteer DELETE = %d, want %d", rec.Code, http.StatusForbidden)
 	}
 	admin := signedIn(t, s.mux, db.RoleAdmin)
-	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusOK {
-		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusAccepted {
+		t.Fatalf("DELETE = %d, want %d (%s)", rec.Code, http.StatusAccepted, rec.Body)
 	}
+
+	// The request only marks the card. It is listed as being deleted, and
+	// nothing more can be sent to it or registered for it.
+	marked, err := s.store.GetUpload(ctx, ref)
+	if err != nil || marked.Status != db.StatusDeleting || marked.DeleteRequestedAt == nil {
+		t.Fatalf("card after DELETE = %+v, %v; want it deleting, with the time", marked, err)
+	}
+	if got := s.card(jane, ref); got.Status != db.StatusDeleting {
+		t.Errorf("the volunteer's card is %q, want %q", got.Status, db.StatusDeleting)
+	}
+	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
+		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)
+	}
+	if rec := do(t, s.mux, http.MethodPost, "/api/v1/uploads", cardBody("SW-03", "2026-09-14", "", "2026-09-12", 2, 1), jane); rec.Code != http.StatusConflict {
+		t.Errorf("registering the card again = %d, want 409 (%s)", rec.Code, rec.Body)
+	}
+	// Deleting it again is the same answer, and doesn't move the time on.
+	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusAccepted {
+		t.Errorf("DELETE again while deleting = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if again, _ := s.store.GetUpload(ctx, ref); !again.DeleteRequestedAt.Equal(*marked.DeleteRequestedAt) {
+		t.Errorf("marked again at %v, want %v kept", again.DeleteRequestedAt, marked.DeleteRequestedAt)
+	}
+
+	sweepDeleted(t, s.store, s.files)
 
 	if _, err := s.store.GetUpload(ctx, ref); !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
@@ -506,9 +555,6 @@ func TestDeleteUpload(t *testing.T) {
 			t.Errorf("stored %s after delete: err = %v, want ErrNotFound", name, err)
 		}
 	}
-	if r := s.patch(jane, partial, 40, audio(2)[40:]); r.status != http.StatusNotFound {
-		t.Errorf("carrying on with the unfinished file = %d, want 404", r.status)
-	}
 	for _, u := range decodeInto[uploadsBody](t, do(t, s.mux, http.MethodGet, "/api/v1/admin/uploads", "", admin)).Uploads {
 		if u.Reference == ref {
 			t.Error("deleted card is still listed")
@@ -521,6 +567,17 @@ func TestDeleteUpload(t *testing.T) {
 
 	if rec := do(t, s.mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusNotFound {
 		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// sweepDeleted runs the deleter over every card marked for deletion, as the
+// server's own would, and fails the test if it leaves one.
+func sweepDeleted(t *testing.T, store db.Store, files storage.Store) {
+	t.Helper()
+	d := deletion.New(store, files, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d.Settle = 0
+	if again := d.Sweep(t.Context()); again != 0 {
+		t.Fatalf("the deleter left a card, to look at again in %v", again)
 	}
 }
 
@@ -549,9 +606,10 @@ func TestDeleteUploadLeavesAudioSharedWithAnotherCard(t *testing.T) {
 	}
 
 	admin := signedIn(t, mux, db.RoleAdmin)
-	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+url.PathEscape("OWL-20260914-SRA B"), "", admin); rec.Code != http.StatusOK {
+	if rec := do(t, mux, http.MethodDelete, "/api/v1/admin/uploads/"+url.PathEscape("OWL-20260914-SRA B"), "", admin); rec.Code != http.StatusAccepted {
 		t.Fatalf("DELETE = %d (%s)", rec.Code, rec.Body)
 	}
+	sweepDeleted(t, store, files)
 	if _, err := store.GetUpload(ctx, "OWL-20260914-SRA B"); !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("card after delete: err = %v, want ErrNotFound", err)
 	}
@@ -559,5 +617,123 @@ func TestDeleteUploadLeavesAudioSharedWithAnotherCard(t *testing.T) {
 		t.Errorf("the other card's audio went: %v", err)
 	} else {
 		r.Close()
+	}
+}
+
+// spyStore counts a card's full file listings, and can fail the next card
+// update, which is how the tests below see what a received file costs.
+type spyStore struct {
+	db.Store
+	listings   atomic.Int64
+	failUpdate atomic.Bool
+}
+
+func (s *spyStore) ListAudioFiles(ctx context.Context, uploadID string) ([]db.AudioFile, error) {
+	s.listings.Add(1)
+	return s.Store.ListAudioFiles(ctx, uploadID)
+}
+
+func (s *spyStore) UpdateUpload(ctx context.Context, id string, mutate func(*db.Upload) error) (db.Upload, error) {
+	if s.failUpdate.CompareAndSwap(true, false) {
+		return db.Upload{}, errors.New("injected: the card update failed")
+	}
+	return s.Store.UpdateUpload(ctx, id, mutate)
+}
+
+func newSpiedTusServer(t *testing.T) (*tusServer, *spyStore) {
+	t.Helper()
+	dir := t.TempDir()
+	files, err := storage.OpenLocal(dir)
+	if err != nil {
+		t.Fatalf("open test file storage: %v", err)
+	}
+	spy := &spyStore{Store: newTestStore(t)}
+	return newTusServerOver(t, dir, files, spy), spy
+}
+
+// A received file counts its card up by one; only the last file recounts the
+// card from its files. Recounting as each file lands read every file on the
+// card each time, so a card cost the square of its files (CARD-COUNTS.md).
+func TestReceivingAFileDoesntRecountTheCard(t *testing.T) {
+	s, spy := newSpiedTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	const files = 60
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 3, files/3))
+	ref := reg.Upload.Reference
+
+	spy.listings.Store(0)
+	for i, f := range reg.Files[:files-1] {
+		s.send(jane, ref, f.Path, audio(i), 100)
+	}
+	if n := spy.listings.Load(); n != 0 {
+		t.Errorf("sending %d of %d files listed the card's files %d times, want 0", files-1, files, n)
+	}
+	u, err := s.store.GetUpload(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.FilesUploaded != files-1 || u.BytesUploaded != 100*(files-1) || u.Status != db.StatusInProgress {
+		t.Errorf("before the last file: %d files, %d bytes, %s; want %d, %d, in_progress",
+			u.FilesUploaded, u.BytesUploaded, u.Status, files-1, 100*(files-1))
+	}
+
+	s.send(jane, ref, reg.Files[files-1].Path, audio(files), 100)
+	if n := spy.listings.Load(); n != 1 {
+		t.Errorf("the last file listed the card's files %d times, want 1", n)
+	}
+	if u := s.card(jane, ref); u.FilesUploaded != files || u.Status != db.StatusProcessing {
+		t.Errorf("after every file: %d files, %s; want %d, processing", u.FilesUploaded, u.Status, files)
+	}
+}
+
+// Only the write that marks a file uploaded counts it, so the finish hook
+// running again for the same upload adds nothing.
+func TestFinishingAFileTwiceCountsItOnce(t *testing.T) {
+	s := newTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 2))
+	ref, path := reg.Upload.Reference, reg.Files[0].Path
+	s.send(jane, ref, path, audio(1), 100)
+
+	h := &handlers{store: s.store, files: s.files, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now: func() time.Time { return testNow }}
+	hook := tushandler.HookEvent{Context: t.Context(), Upload: tushandler.FileInfo{
+		ID:       ref + "/again",
+		MetaData: tushandler.MetaData{metaReference: ref, metaAudioFile: db.AudioFileID(ref, path)},
+	}}
+	if _, err := h.afterFileUpload(hook); err != nil {
+		t.Fatalf("finishing again: %v", err)
+	}
+	if u := s.card(jane, ref); u.FilesUploaded != 1 || u.BytesUploaded != 100 {
+		t.Errorf("after finishing a file twice: %d files, %d bytes; want 1, 100", u.FilesUploaded, u.BytesUploaded)
+	}
+	if f, _ := s.store.GetAudioFile(t.Context(), ref, db.AudioFileID(ref, path)); strings.HasSuffix(f.BlobName, "/again") {
+		t.Errorf("finishing again replaced the stored copy: %s", f.BlobName)
+	}
+}
+
+// A file marked uploaded whose card update then failed leaves the card a file
+// short. Registering the card again -- which the browser does when every file
+// went but the card isn't in -- recounts it and moves it on.
+func TestAFileMissedByItsCardIsCountedWhenTheCardIsRegisteredAgain(t *testing.T) {
+	s, spy := newSpiedTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	body := cardBody("SW-03", "2026-09-14", "", "2026-09-12", 1, 2)
+	reg := s.register(jane, body)
+	ref := reg.Upload.Reference
+
+	spy.failUpdate.Store(true)
+	created := s.create(jane, ref, reg.Files[0].Path, 100)
+	if r := s.patch(jane, created.header.Get("Location"), 0, audio(1)); r.status < 500 {
+		t.Fatalf("last chunk with the card update failing = %d (%s), want a server error", r.status, r.body)
+	}
+	s.send(jane, ref, reg.Files[1].Path, audio(2), 100)
+	if u := s.card(jane, ref); u.FilesUploaded != 1 || u.Status != db.StatusInProgress {
+		t.Fatalf("with one file's count lost: %d files, %s; want 1, in_progress", u.FilesUploaded, u.Status)
+	}
+
+	again := s.register(jane, body)
+	if u := again.Upload; u.FilesUploaded != 2 || u.BytesUploaded != 200 || u.Status != db.StatusProcessing {
+		t.Errorf("registered again: %d files, %d bytes, %s; want 2, 200, processing", u.FilesUploaded, u.BytesUploaded, u.Status)
 	}
 }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"log/slog"
@@ -14,7 +15,8 @@ import (
 // The third-party origins the frontend reaches. Each one is a decision
 // recorded in CLAUDE.md (*No build step*): Leaflet and tus-js-client from
 // jsDelivr, the webfonts from Google, map tiles from OpenStreetMap. Adding an
-// origin here is adding a dependency -- put it in that list too.
+// origin here is adding a dependency -- put it in that list too. (libflac.js,
+// the FLAC encoder, is vendored under frontend/vendor/, so it is 'self'.)
 const (
 	jsDelivr  = "https://cdn.jsdelivr.net"
 	fontsCSS  = "https://fonts.googleapis.com"
@@ -76,8 +78,10 @@ func SecurityHeaders(next http.Handler, opts SecurityOptions) http.Handler {
 //     (shared-styles.js) aren't subject to this; component <style> blocks are.
 //   - script-src names one hash, index.html's import map, and nothing else
 //     inline. Scripts are the directive worth keeping strict.
+//     'wasm-unsafe-eval' lets WebAssembly be compiled -- the FLAC encoder, in
+//     a worker that gets this same policy -- and allows no JavaScript eval.
 func contentSecurityPolicy(importMap string) string {
-	script := "script-src 'self' " + jsDelivr
+	script := "script-src 'self' " + jsDelivr + " 'wasm-unsafe-eval'"
 	if importMap != "" {
 		script += " '" + importMap + "'"
 	}
@@ -93,9 +97,11 @@ func contentSecurityPolicy(importMap string) string {
 		"img-src 'self' data: " + jsDelivr + " " + osmTiles,
 		// A clip is fetched, then played from a blob URL (bs-spectrogram).
 		"media-src 'self' blob:",
+		// 'self' is also where the FLAC encoder's worker fetches its .wasm.
 		"connect-src 'self'",
 		"object-src 'none'",
-		"worker-src 'none'",
+		// The FLAC encoder runs in a worker of our own (js/flac-worker.js).
+		"worker-src 'self'",
 		"base-uri 'self'",
 		"form-action 'self'",
 		"frame-ancestors 'none'",
@@ -114,6 +120,12 @@ var importMapScript = regexp.MustCompile(`(?s)<script type="importmap">(.*?)</sc
 // and an import map the policy doesn't name is silently ignored by the
 // browser, which loses the recorders map without an error anyone would see.
 // An external import map would avoid this, but no browser supports one.
+//
+// The browser hashes the script as parsed, not as sent: HTML parsing turns
+// every CRLF and lone CR into LF first. So the file's bytes are normalized the
+// same way before hashing, or a checkout with Windows line endings (Git's
+// autocrlf, and deploy.ps1 builds the image from the working tree) ships a
+// hash no browser will ever match.
 func importMapHash(dir string, log *slog.Logger) string {
 	if dir == "" {
 		return ""
@@ -127,7 +139,9 @@ func importMapHash(dir string, log *slog.Logger) string {
 	if m == nil {
 		return ""
 	}
-	sum := sha256.Sum256(m[1])
+	script := bytes.ReplaceAll(m[1], []byte("\r\n"), []byte("\n"))
+	script = bytes.ReplaceAll(script, []byte("\r"), []byte("\n"))
+	sum := sha256.Sum256(script)
 	hash := "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
 	if log != nil {
 		log.Info("import map allowed by the content security policy", "hash", hash)

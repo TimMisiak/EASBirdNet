@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { clock, count, dateAtTime, longDate, shortDate } from "../format.js";
+import { clock, count, dateAtTime, longDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
 import * as list from "../detection-list.js";
@@ -13,16 +13,18 @@ import "./bs-spectrogram.js";
  * <bs-detection-detail reference="OWL-20260914-SR03" detection="det_…"> -- one
  * detection, for review: its clip to hear and see, and Confirm or Discard.
  *
- * It is opened from a card's page, and goes back there, or from the list of
- * every detection, which it goes back to with that list's filters. Its links
- * stay under whichever it was opened from.
+ * It is opened from the list of detections -- every card's, or one card's,
+ * which is what a card's page links to -- and goes back to it with that list's
+ * filters. A link that carries no list (/admin/uploads/{ref}/detections/{id},
+ * which the card's page used to list its detections under) goes back to the
+ * card instead. Its links stay under whichever it was opened from.
  *
  * Previous and Next step through whichever sequence it was opened from, which
  * is the point of them: a reviewer who filtered the list to unreviewed Barn
  * Owls, most confident first, is working through *that*, so stepping follows
  * it -- across cards, and across the list's pages, where the next page is
  * fetched as they reach it (detection-list.js holds the pages, so nothing
- * re-runs the search). Opened from a card instead, or from a link that lost
+ * re-runs the search). Opened from a link that carries no list, or one that lost
  * the list, they step through the file's own detections in the order heard.
  *
  * The other species BirdNET heard during the clip, from the same file's
@@ -52,7 +54,7 @@ const SIBLINGS_LIMIT = 500;
 
 /**
  * The last file's detections, kept across navigations. Stepping through a
- * night stays in one file for run after run, and asking for up to
+ * recording stays in one file for run after run, and asking for up to
  * SIBLINGS_LIMIT of them again on every step is the one expensive thing about
  * a step that doesn't change file.
  */
@@ -288,7 +290,7 @@ class DetectionDetail extends BaseElement {
     const { status, error } = this.#state;
     const from = this.#list;
     const back = from
-      ? { href: `${from.path}${from.search}`, label: "All detections" }
+      ? { href: `${from.path}${from.search}`, label: listLabel(this.#view) }
       : { href: `/admin/uploads/${encodeURIComponent(this.reference)}`, label: this.reference };
 
     this.shadowRoot.innerHTML = `
@@ -419,8 +421,7 @@ class DetectionDetail extends BaseElement {
             </dd>
             <dt>File</dt>
             <dd><span class="path">${escapeHTML(file.path).replaceAll("/", "/<wbr>")}</span></dd>
-            <dt>Night</dt>
-            <dd>${escapeHTML(shortDate(file.night))}</dd>
+            ${file.recordedAt ? `<dt>Recording started</dt><dd>${escapeHTML(dateAtTime(file.recordedAt))}</dd>` : ""}
             <dt>Card</dt>
             <dd>
               ${
@@ -525,6 +526,12 @@ class DetectionDetail extends BaseElement {
     if (panel) panel.innerHTML = this.#reviewPanel(next);
     if (chip) chip.innerHTML = this.#chip();
   }
+}
+
+/** What the link back to the list a detection was opened from says. */
+function listLabel(view) {
+  const whose = view.model === "perch" ? "Perch's detections" : "detections";
+  return view.card ? `${whose[0].toUpperCase()}${whose.slice(1)} on ${view.card}` : `All ${whose}`;
 }
 
 customElements.define("bs-detection-detail", DetectionDetail);

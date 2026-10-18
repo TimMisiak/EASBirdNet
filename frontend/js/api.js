@@ -68,12 +68,12 @@ export const fetchStations = () => get("/stations");
 
 /** The signed-in volunteer's own cards, newest first. */
 export const fetchMyUploads = () => get("/uploads");
-/** One of the volunteer's cards, and each file on its list with its status ({path, bytes, night, status}). */
+/** One of the volunteer's cards, and each file on its list with its status ({path, bytes, recordedAt, status}). */
 export const fetchUpload = (reference) => get(`/uploads/${encodeURIComponent(reference)}`);
 
 /**
  * Register a card that is about to be sent, with the files read off it
- * ({path, bytes, night}). Returns the card with its reference, and each file
+ * ({path, bytes}). Returns the card with its reference, and each file
  * with its status on the server, so a resume sends only what's missing.
  */
 export const createUpload = (body) => request("POST", "/uploads", body);
@@ -84,6 +84,20 @@ export const createUpload = (body) => request("POST", "/uploads", body);
  */
 export const reportProgress = (reference, body) =>
   request("POST", `/uploads/${encodeURIComponent(reference)}/progress`, body);
+
+/**
+ * Send a body for the server to read and throw away (the upload speed test,
+ * speed-test.js). Not JSON going out, so it doesn't go through request; a 401
+ * still signs the app out the same way.
+ */
+export async function sendSpeedTest(body, signal) {
+  const res = await fetch(`${BASE}/speedtest`, { method: "POST", body, signal });
+  if (!res.ok) {
+    if (res.status === 401) signedOut();
+    const payload = await res.json().catch(() => null);
+    throw new ApiError(res.status, payload?.error ?? `POST /speedtest failed (${res.status})`);
+  }
+}
 
 // Detections are anyone's to hear and review once signed in, on every card.
 
@@ -98,6 +112,22 @@ export const fetchDetections = (params) => {
   const search = new URLSearchParams(params).toString();
   return get(`/detections${search ? `?${search}` : ""}`);
 };
+/**
+ * Every detection fetchDetections' params match, not a page of them, as a
+ * JSON file to save: a Blob of {exportedAt, ...what was asked, total,
+ * detections}. limit and offset don't apply. A file, not JSON to parse, so it
+ * doesn't go through request; a 401 still signs the app out the same way.
+ */
+export async function exportDetections(params) {
+  const search = new URLSearchParams(params).toString();
+  const res = await fetch(`${BASE}/detections/export${search ? `?${search}` : ""}`);
+  if (!res.ok) {
+    if (res.status === 401) signedOut();
+    const payload = await res.json().catch(() => null);
+    throw new ApiError(res.status, payload?.error ?? `GET /detections/export failed (${res.status})`);
+  }
+  return res.blob();
+}
 /**
  * What BirdNET heard in one file of a card, in the order it was heard, at most
  * limit of them: {detections, total}. total is how many there are in all.
@@ -120,6 +150,16 @@ export const clipURL = (reference, id) =>
 /** Record a verdict on a detection: "confirmed", "rejected", or back to "unreviewed". */
 export const reviewDetection = (reference, id, status) =>
   request("PUT", `/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/review`, { status });
+
+// Connecting an LLM tool over MCP: the consent page's two calls. signed is
+// the authorization request the server signed into the page's URL.
+
+/** Which app is asking to connect, and where it sends them back: {client, redirectHost, user}. */
+export const fetchConnectRequest = (signed) =>
+  get(`/oauth/request?${new URLSearchParams({ request: signed })}`);
+/** Allow or refuse it. Returns {redirect}: where to send the browser, back to the app. */
+export const decideConnectRequest = (signed, approve) =>
+  request("POST", "/oauth/authorize", { request: signed, approve });
 
 export const fetchAllUploads = () => get("/admin/uploads");
 /** One card and every file on it, with where each is in upload and analysis. */

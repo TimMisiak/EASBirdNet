@@ -47,6 +47,32 @@ DeepMind and published on
 - **TensorFlow** (`analyzer/requirements-perch.txt`), which Perch runs on, is
   also licensed under the Apache License 2.0.
 
+## libflac.js and libFLAC
+
+The browser encodes a card's WAV recordings as FLAC before sending them with
+**libflac.js** 5.6.0 (<https://github.com/mmig/libflac.js>), a WebAssembly
+build of the Xiph.Org Foundation's **libFLAC** 1.3.4 (<https://xiph.org/flac/>)
+with **libogg** 1.3.6 (<https://xiph.org/ogg/>). It is vendored, unmodified,
+in `frontend/vendor/libflacjs-5.6.0/`, and served from there:
+
+| File | sha256 |
+|---|---|
+| `libflac.min.wasm.js` | `76892e974c95adc489910bc991e1d234bb48fb9f1bcc3f76ab471a1493c30f7e` |
+| `libflac.min.wasm.wasm` | `dd145880539e836501e3c779aae19e0d3915a90fbf83b50c8a5cde819c6450b0` |
+
+Both are the package's own `dist/` files, as npm publishes `libflacjs@5.6.0`
+and jsDelivr serves them at
+`https://cdn.jsdelivr.net/npm/libflacjs@5.6.0/dist/`; checking an update is
+comparing those hashes. Upgrading means replacing the directory, and the
+version in `js/flac-worker.js` and `js/flac.js` (`ENCODER`) with it.
+
+- **libflac.js** is licensed under the MIT License:
+  [LICENSES/MIT-libflac.js.txt](LICENSES/MIT-libflac.js.txt).
+- **libFLAC** is licensed under the BSD 3-Clause License:
+  [LICENSES/BSD-3-Clause-libFLAC.txt](LICENSES/BSD-3-Clause-libFLAC.txt).
+- **libogg** is licensed under the BSD 3-Clause License:
+  [LICENSES/BSD-3-Clause-libogg.txt](LICENSES/BSD-3-Clause-libogg.txt).
+
 ## Banner photo
 
 `frontend/images/barred-owl.jpg`: "Barred Owl forest canopy Seattle Washington

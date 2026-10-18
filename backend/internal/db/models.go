@@ -69,7 +69,9 @@ type Recorder struct {
 
 // Upload statuses. A card moves down this list; needs_attention is a side
 // branch a coordinator resolves by hand. in_review is a card BirdNET has been
-// over, every file of it, waiting for its detections to be reviewed.
+// over, every file of it, waiting for its detections to be reviewed. deleting
+// can follow any of them: a coordinator has deleted the card, and
+// internal/deletion is removing it.
 const (
 	StatusInProgress     = "in_progress"
 	StatusInterrupted    = "interrupted"
@@ -77,6 +79,7 @@ const (
 	StatusInReview       = "in_review"
 	StatusNeedsAttention = "needs_attention"
 	StatusResultsSent    = "results_sent"
+	StatusDeleting       = "deleting"
 )
 
 // Upload is one SD card on its way from a recorder into storage and through
@@ -91,9 +94,13 @@ type Upload struct {
 	UserID   string           `json:"userId"`
 	UserName string           `json:"userName"`
 
-	PulledOn string  `json:"pulledOn"` // YYYY-MM-DD
-	Notes    string  `json:"notes,omitempty"`
-	Nights   []Night `json:"nights"`
+	PulledOn string `json:"pulledOn"` // YYYY-MM-DD
+	Notes    string `json:"notes,omitempty"`
+	// FirstRecordingAt and LastRecordingAt are when the card's first and last
+	// recordings started, read from the file names when the card is
+	// registered (RecordedAt). They are absent when no file name says.
+	FirstRecordingAt *time.Time `json:"firstRecordingAt,omitempty"`
+	LastRecordingAt  *time.Time `json:"lastRecordingAt,omitempty"`
 
 	FileCount     int   `json:"fileCount"`
 	TotalBytes    int64 `json:"totalBytes"`
@@ -124,8 +131,12 @@ type Upload struct {
 	// audio without reading their files. The card's detections and their clips
 	// are kept: only a coordinator deleting the card removes those.
 	AudioDeletedAt *time.Time `json:"audioDeletedAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	// DeleteRequestedAt is when a coordinator deleted the card, which moved it
+	// to deleting. The card itself goes once internal/deletion has removed
+	// everything else of it.
+	DeleteRequestedAt *time.Time `json:"deleteRequestedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
 // RecorderSnapshot is the part of a Recorder an upload keeps for itself.
@@ -133,16 +144,6 @@ type RecorderSnapshot struct {
 	Name      string  `json:"name"`
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
-}
-
-// Night is one dusk-to-dawn block of recording found on a card.
-type Night struct {
-	Date  string `json:"date"` // YYYY-MM-DD, the evening the night began
-	Files int    `json:"files"`
-	Bytes int64  `json:"bytes"`
-	// Flag is "" when the night looks normal, otherwise a short reason the
-	// volunteer should eyeball it ("short", "partial").
-	Flag string `json:"flag,omitempty"`
 }
 
 // Analysis records how BirdNET was run over a card, so a detection can be
@@ -187,12 +188,44 @@ type PerchRun struct {
 	StatusDetail   string     `json:"statusDetail,omitempty"`
 	AnalyzedAt     *time.Time `json:"analyzedAt,omitempty"`
 	DetectionCount int        `json:"detectionCount"`
+	Claim
+}
+
+// Claim is who is running a step of a file and until when, and how often the
+// step has failed on it. BirdNET's step carries it on the AudioFile itself,
+// Perch's on its PerchRun; its fields sit beside the step's status in the
+// document, not in an object of their own.
+//
+// A worker takes a step by moving it to "analyzing" with its name and a lease
+// in one replace-if-unchanged write, and renews the lease while it runs, so
+// two workers never run one step and a worker that dies lets go of it when
+// its lease lapses (internal/analysis).
+type Claim struct {
+	// ClaimedBy names the worker holding the step: its process, e.g.
+	// "ca-birdsense-prod--0000010-c6bd4bb69-zdmkj:1". Empty when no one is.
+	ClaimedBy string `json:"claimedBy,omitempty"`
+	// LeaseUntil is when the claim lapses unless it is renewed. An
+	// "analyzing" step whose lease has passed is anyone's to take.
+	LeaseUntil *time.Time `json:"leaseUntil,omitempty"`
+	// Attempts counts the tries on the step that failed in a way worth
+	// another -- the model crashing, storing what it heard failing, or a
+	// worker dying with the step claimed. It is stored so that a fleet of
+	// short-lived workers can't retry one file for good.
+	Attempts int `json:"attempts,omitempty"`
+	// RetryAfter is when a step that failed and is waiting to be tried again
+	// may be taken: 30 s after its first failure, 60 s after its second. It
+	// spaces one file's tries without holding up any other file.
+	RetryAfter *time.Time `json:"retryAfter,omitempty"`
 }
 
 // AudioDetailNotOnCard is the StatusDetail of a failed file that was on a
 // card's list, but not on the list the card was registered with again. It is
 // no longer part of the card, so nothing counts or analyzes it.
 const AudioDetailNotOnCard = "not on the card when it was registered again"
+
+// EncodingFLAC is the Encoding of a file the browser read as a WAV and sent
+// as FLAC: the same samples, about half the bytes.
+const EncodingFLAC = "flac"
 
 // AudioFile is one recording from a card.
 type AudioFile struct {
@@ -202,14 +235,20 @@ type AudioFile struct {
 	// Path is the file's path relative to the card root, with forward slashes.
 	Path      string `json:"path"`
 	SizeBytes int64  `json:"sizeBytes"`
-	Night     string `json:"night"` // YYYY-MM-DD, the evening the night began
-	// RecordedAt is when the recording started, when it is known.
+	// RecordedAt is when the recording started: from its file name when the
+	// card is registered (RecordedAt), and from the audio when it is read.
 	RecordedAt  *time.Time `json:"recordedAt,omitempty"`
 	DurationSec float64    `json:"durationSec,omitempty"`
 	SampleRate  int        `json:"sampleRate,omitempty"`
 	// BlobName is where the audio lives in file storage (storage.Name of its
 	// tus upload), set when the last byte lands.
-	BlobName     string     `json:"blobName,omitempty"`
+	BlobName string `json:"blobName,omitempty"`
+	// Encoding is how the browser sent the file, set with BlobName: empty
+	// for the file byte for byte as it was on the card, or EncodingFLAC for
+	// a WAV it encoded as FLAC first. SizeBytes is still the card's length;
+	// StoredBytes is the length of what is in storage.
+	Encoding     string     `json:"encoding,omitempty"`
+	StoredBytes  int64      `json:"storedBytes,omitempty"`
 	Status       string     `json:"status"`
 	StatusDetail string     `json:"statusDetail,omitempty"`
 	UploadedAt   *time.Time `json:"uploadedAt,omitempty"`
@@ -223,7 +262,9 @@ type AudioFile struct {
 	DetectionCount int        `json:"detectionCount"`
 	// Perch is the file's Perch step, absent when Perch wasn't turned on
 	// when BirdNET finished with the file.
-	Perch     *PerchRun `json:"perch,omitempty"`
+	Perch *PerchRun `json:"perch,omitempty"`
+	// Claim is BirdNET's step: who is running it, and its failed attempts.
+	Claim
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -255,7 +296,6 @@ type Detection struct {
 	RecorderID  string `json:"recorderId"`
 	// DetectedAt is the file's start time plus StartSec.
 	DetectedAt     time.Time `json:"detectedAt"`
-	Night          string    `json:"night"` // YYYY-MM-DD
 	StartSec       float64   `json:"startSec"`
 	EndSec         float64   `json:"endSec"`
 	ScientificName string    `json:"scientificName"`

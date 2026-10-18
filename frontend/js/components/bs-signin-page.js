@@ -13,7 +13,8 @@ import "./bs-brand-mark.js";
  * /api/v1/auth/{provider}/start, which redirects to the provider and comes
  * back to the callback, so nothing here is a fetch. A sign-in that failed
  * comes back to /signin?error=<reason>, which signInError turns into a
- * sentence.
+ * sentence. A sign-in the route guard sent here carries ?next=, the page they
+ * were on its way to, and either kind of sign-in goes there afterwards.
  *
  * In dev mode a boxed picker at the bottom lists everyone on the roster to
  * sign in as; the server only offers that roster in dev mode, and the page
@@ -39,6 +40,15 @@ class SignInPage extends BaseElement {
       this.#error = error;
     }
     this.render();
+  }
+
+  /**
+   * Where to go once signed in: the page the guard sent them here from, if it
+   * is a path on this site, or the app. The server checks it again.
+   */
+  get #next() {
+    const next = query().get("next") ?? "";
+    return next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/app";
   }
 
   /** What the callback said when it sent the browser back here. */
@@ -67,7 +77,8 @@ class SignInPage extends BaseElement {
         this.render();
         // A full navigation, not a fetch: the provider will redirect the
         // browser back to the callback.
-        window.location.assign(`/api/v1/auth/${encodeURIComponent(el.dataset.provider)}/start`);
+        const next = this.#next === "/app" ? "" : `?${new URLSearchParams({ next: this.#next })}`;
+        window.location.assign(`/api/v1/auth/${encodeURIComponent(el.dataset.provider)}/start${next}`);
       },
       dev: (form) => this.#signIn({ email: form.elements.email.value }),
     };
@@ -80,7 +91,7 @@ class SignInPage extends BaseElement {
     this.render();
     try {
       await session.signIn(body);
-      navigate("/app");
+      navigate(this.#next);
     } catch (error) {
       this.#busy = false;
       this.#error = error;

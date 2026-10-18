@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, filters, forms, panels, tables, typography } from "../shared-styles.js";
-import { count, longDate } from "../format.js";
+import { count, dateRange, longDate } from "../format.js";
 import { isMoving, statusChip } from "../upload-status.js";
 import "./bs-chip.js";
 
@@ -49,20 +49,27 @@ export const CELLS = {
     head: "Pulled",
     cell: (u) => `<td class="nowrap">${escapeHTML(longDate(u.pulledOn))}</td>`,
   },
-  nights: {
-    head: "Nights",
-    right: true,
-    cell: (u) => `<td class="num">${u.nights?.length ?? 0}</td>`,
+  recorded: {
+    head: "Recorded",
+    cell: (u) => `<td class="nowrap">${u.firstRecordingAt ? escapeHTML(dateRange(u.firstRecordingAt, u.lastRecordingAt)) : "—"}</td>`,
   },
   files: {
     head: "Files",
     right: true,
     cell: (u) => `<td class="num muted">${count(u.filesUploaded)} / ${count(u.fileCount)}</td>`,
   },
+  /** Linked to the Detections tab, narrowed to the card, once it has any. */
   detections: {
     head: "Detections",
     right: true,
-    cell: (u) => `<td class="num muted">${u.analysis ? count(u.detectionCount) : "—"}</td>`,
+    cell: (u) =>
+      `<td class="num muted">${
+        !u.analysis
+          ? "—"
+          : u.detectionCount > 0
+            ? `<a href="/app/detections?card=${encodeURIComponent(u.reference)}">${count(u.detectionCount)}</a>`
+            : count(u.detectionCount)
+      }</td>`,
   },
   status: {
     head: "Status",

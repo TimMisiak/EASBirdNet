@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -47,7 +48,7 @@ func TestRoutesCoexist(t *testing.T) {
 	}
 	defer store.Close()
 	cfg := config{StaticDir: dir, SessionKey: api.RandomSessionKey()}
-	mux := newMux(cfg, store, testFiles(t), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := newMux(cfg, store, testFiles(t), nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	cases := []struct {
 		path string
@@ -270,6 +271,22 @@ func TestConfigFromEnvPerch(t *testing.T) {
 	}
 }
 
+// Performance records are on unless they are turned off.
+func TestConfigFromEnvPerf(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	for v, want := range map[string]bool{"": true, "off": false, "on": true} {
+		t.Setenv("BIRDSENSE_PERF", v)
+		if cfg, err := configFromEnv(); err != nil || cfg.Perf != want {
+			t.Errorf("BIRDSENSE_PERF=%q: perf = %v, %v; want %v", v, cfg.Perf, err, want)
+		}
+	}
+	t.Setenv("BIRDSENSE_PERF", "sometimes")
+	if _, err := configFromEnv(); err == nil {
+		t.Error("BIRDSENSE_PERF=sometimes was accepted")
+	}
+}
+
 // Nothing the production startup path does -- bootstrapping the roster, then
 // wiring the API -- may put a placeholder person into the database.
 func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
@@ -291,7 +308,7 @@ func TestProductionStartupAddsNoPlaceholderPeople(t *testing.T) {
 		if err := prepareDatabase(ctx, cfg, store, log); err != nil {
 			t.Fatalf("prepare: %v", err)
 		}
-		mux := newMux(cfg, store, testFiles(t), nil, nil, log)
+		mux := newMux(cfg, store, testFiles(t), nil, nil, nil, log)
 		for _, path := range []string{"/api/v1/health", "/api/v1/session", "/api/v1/public/overview"} {
 			mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
 		}
@@ -337,7 +354,7 @@ func TestDevStartupSeedsAnEmptyDatabase(t *testing.T) {
 			t.Fatalf("prepare: %v", err)
 		}
 	}
-	mux := newMux(cfg, store, testFiles(t), nil, nil, log)
+	mux := newMux(cfg, store, testFiles(t), nil, nil, nil, log)
 	get := func(path string, cookie *http.Cookie) string {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -521,5 +538,196 @@ func TestLoggerEmitsJSON(t *testing.T) {
 	}
 	if line.Level != "WARN" || line.Err != "no such file" {
 		t.Errorf("level = %q, err = %q, want the level and each attribute as their own fields", line.Level, line.Err)
+	}
+}
+
+// The replica's size comes in Container Apps' spelling, and a typo is an
+// error rather than a wrong figure in every performance record.
+func TestReplicaSize(t *testing.T) {
+	if cores, bytes, err := replicaSize("2", "4Gi"); err != nil || cores != 2 || bytes != 4<<30 {
+		t.Errorf("2, 4Gi = %v, %v, %v", cores, bytes, err)
+	}
+	if cores, bytes, err := replicaSize("0.5", "1.0Gi"); err != nil || cores != 0.5 || bytes != 1<<30 {
+		t.Errorf("0.5, 1.0Gi = %v, %v, %v", cores, bytes, err)
+	}
+	if cores, bytes, err := replicaSize("", ""); err != nil || cores != 0 || bytes != 0 {
+		t.Errorf("unset = %v, %v, %v", cores, bytes, err)
+	}
+	for _, bad := range [][2]string{{"two", ""}, {"", "4GB"}, {"", "4096"}, {"-1", ""}} {
+		if _, _, err := replicaSize(bad[0], bad[1]); err == nil {
+			t.Errorf("%q, %q was accepted", bad[0], bad[1])
+		}
+	}
+}
+
+// A replica runs a task per core in its memory less the headroom; a machine
+// that only knows the host runs two, so a laptop isn't taken over.
+func TestAnalysisCapacity(t *testing.T) {
+	tune := analysisTuning{Headroom: 1 << 30}
+	if c := analysisCapacity(tune, 2, 4<<30, "config"); c.Cores != 2 || c.MaxTasks != 2 || c.Memory != 3<<30 {
+		t.Errorf("2 vCPU / 4Gi replica = %+v", c)
+	}
+	if c := analysisCapacity(tune, 32, 64<<30, "host"); c.Cores != 2 || c.MaxTasks != 2 {
+		t.Errorf("a 32-core host = %+v, want two tasks on two cores", c)
+	}
+	if c := analysisCapacity(tune, 0.5, 1<<30, "cgroup"); c.MaxTasks != 1 || c.Memory != 1 {
+		t.Errorf("a replica smaller than the headroom = %+v, want one task at a time", c)
+	}
+	tune.MaxTasks = 3
+	if c := analysisCapacity(tune, 2, 8<<30, "config"); c.MaxTasks != 3 {
+		t.Errorf("MaxTasks set = %+v, want 3", c)
+	}
+}
+
+func TestAnalysisTuning(t *testing.T) {
+	signInEnv(t)
+	t.Setenv("BIRDSENSE_DB", "local")
+	t.Setenv("BIRDSENSE_ANALYSIS_PERCH_MEM", "2.5Gi")
+	t.Setenv("BIRDSENSE_ANALYSIS_BIRDNET_MEM", "300Mi")
+	t.Setenv("BIRDSENSE_ANALYSIS_PERCH_THREADS", "2")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	costs := analysisCosts(cfg.Analysis)
+	if p := costs[birdnet.ModelPerch]; p.Memory != 5<<29 || p.Threads != 2 {
+		t.Errorf("perch = %+v", p)
+	}
+	if b := costs[birdnet.ModelBirdNET]; b.Memory != 300<<20 {
+		t.Errorf("birdnet = %+v", b)
+	}
+	if cfg.Analysis.Headroom != 1<<30 {
+		t.Errorf("headroom = %d, want the 1Gi default", cfg.Analysis.Headroom)
+	}
+	for name, bad := range map[string]string{"BIRDSENSE_ANALYSIS_PERCH_MEM": "2.5GB", "BIRDSENSE_ANALYSIS_MAX_TASKS": "-1"} {
+		t.Setenv(name, bad)
+		if _, err := configFromEnv(); err == nil {
+			t.Errorf("%s=%s was accepted", name, bad)
+		}
+		t.Setenv(name, "")
+	}
+}
+
+// A worker serves nothing, so it starts on a production configuration
+// without the sign-in settings the web app requires; the web app reads the
+// job it starts workers of.
+func TestWorkerConfigNeedsNoSignIn(t *testing.T) {
+	t.Setenv("BIRDSENSE_DB", "cosmos")
+	t.Setenv("BIRDSENSE_COSMOS_ENDPOINT", "https://cosmos.example.net")
+	t.Setenv("BIRDSENSE_BLOB_ENDPOINT", "https://st.example.net")
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB", "/subscriptions/s/resourceGroups/rg/providers/Microsoft.App/jobs/caj")
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB_WORKERS", "4")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "SESSION_KEY") && !strings.Contains(err.Error(), "OIDC") {
+		t.Fatalf("web app config = %v, want it refused for want of sign-in settings", err)
+	}
+	cfg, err := readConfig(true)
+	if err != nil {
+		t.Fatalf("worker config: %v", err)
+	}
+	if cfg.AnalysisJob == "" || cfg.AnalysisWorkers != 4 {
+		t.Errorf("job = %q, workers = %d", cfg.AnalysisJob, cfg.AnalysisWorkers)
+	}
+	t.Setenv("BIRDSENSE_ANALYSIS_JOB_WORKERS", "0")
+	if _, err := readConfig(true); err == nil {
+		t.Error("BIRDSENSE_ANALYSIS_JOB_WORKERS=0 was accepted")
+	}
+}
+
+// The request log says what each request was answered with and how big its
+// body was -- a tus PATCH's chunk -- and the writer it wraps the response in
+// still lets a handler reach the connection: tusd sets read deadlines through
+// http.ResponseController, and a wrapper that hid them would fail every PATCH.
+func TestRequestLoggerRecordsStatusAndBytes(t *testing.T) {
+	var out bytes.Buffer
+	var deadlineErr error
+	h := requestLogger(newLogger(&out), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadlineErr = http.NewResponseController(w).SetReadDeadline(time.Now().Add(time.Minute))
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/api/v1/tus/x/y", strings.NewReader("chunk"))
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if deadlineErr != nil {
+		t.Errorf("setting a read deadline through the logged writer: %v", deadlineErr)
+	}
+	var line struct {
+		Msg    string `json:"msg"`
+		Method string `json:"method"`
+		Status int    `json:"status"`
+		Bytes  int64  `json:"bytes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
+		t.Fatalf("log line %q: %v", out.String(), err)
+	}
+	if line.Msg != "request" || line.Method != http.MethodPatch || line.Status != http.StatusNoContent || line.Bytes != 5 {
+		t.Errorf("logged %+v, want a PATCH answered 204 with a 5-byte body", line)
+	}
+}
+
+// TestStartupDatesCardsFromTheirFiles holds the one-time pass over cards
+// registered before cards carried their recording times: each is dated from
+// its files' names, a card already dated is left alone, and a card whose
+// names carry no time stays undated.
+func TestStartupDatesCardsFromTheirFiles(t *testing.T) {
+	ctx := t.Context()
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	dated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, u := range []db.Upload{
+		{ID: "OWL-20260914-SR02", RecorderID: "SW-02", Status: db.StatusInReview},
+		{ID: "OWL-20260914-SR03", RecorderID: "SW-03", Status: db.StatusInReview},
+		{ID: "OWL-20260914-SR04", RecorderID: "SW-04", Status: db.StatusInReview, FirstRecordingAt: &dated, LastRecordingAt: &dated},
+	} {
+		if _, err := store.CreateUpload(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analyzed := time.Date(2026, 9, 13, 3, 0, 0, 0, time.UTC)
+	for ref, files := range map[string][]db.AudioFile{
+		"OWL-20260914-SR02": {
+			{Path: "DATA/Marymoor_20260912_200000(-0700).WAV"},
+			{Path: "DATA/Marymoor_20260913_050000(-0700).WAV"},
+			// Analysis read this one's start from the audio already.
+			{Path: "DATA/later.WAV", RecordedAt: &analyzed},
+			// Off the card's list: not the card's recording.
+			{Path: "DATA/Marymoor_20260920_050000(-0700).WAV", StatusDetail: db.AudioDetailNotOnCard},
+		},
+		"OWL-20260914-SR03": {{Path: "DATA/a.WAV"}},
+		"OWL-20260914-SR04": {{Path: "DATA/Marymoor_20260912_200000(-0700).WAV"}},
+	} {
+		if err := store.UpsertAudioFiles(ctx, ref, files); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := backfillRecordingTimes(ctx, store, log); err != nil {
+		t.Fatal(err)
+	}
+	at := func(ref string) string {
+		u, _ := store.GetUpload(ctx, ref)
+		if u.FirstRecordingAt == nil {
+			return "undated"
+		}
+		return u.FirstRecordingAt.UTC().Format(time.RFC3339) + " to " + u.LastRecordingAt.UTC().Format(time.RFC3339)
+	}
+	for ref, want := range map[string]string{
+		"OWL-20260914-SR02": "2026-09-13T03:00:00Z to 2026-09-13T12:00:00Z",
+		"OWL-20260914-SR03": "undated",
+		"OWL-20260914-SR04": "2026-01-01T00:00:00Z to 2026-01-01T00:00:00Z",
+	} {
+		if got := at(ref); got != want {
+			t.Errorf("%s = %s, want %s", ref, got, want)
+		}
 	}
 }

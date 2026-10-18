@@ -78,6 +78,13 @@ type Store interface {
 	// ListDetections returns matching detections in the order they were heard.
 	// A filter matching more than MaxDetectionScan of them is ErrTooMany.
 	ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error)
+	// EachDetection hands every matching detection to fn, in no particular
+	// order, a page at a time rather than all at once -- so it has no
+	// MaxDetectionScan, because it never holds more than a page. It is for
+	// reading a whole range through once (the MCP summary and export), not
+	// for a list that has to be sorted. An error from fn stops the read and is
+	// returned.
+	EachDetection(ctx context.Context, f DetectionFilter, fn func(Detection) error) error
 	// UpsertDetections writes whole documents, creating or replacing each. A
 	// detection with no id gets DetectionID from its file, start and species.
 	UpsertDetections(ctx context.Context, uploadID string, detections []Detection) error
@@ -133,6 +140,9 @@ type DetectionFilter struct {
 	// Model keeps one model's detections, ModelBirdNET or ModelPerch
 	// (Detection.ModelOf, so BirdNET's include those stored before Perch).
 	Model string
+	// RecorderIDs keeps detections from any of these recorders; empty keeps
+	// every recorder's.
+	RecorderIDs []string
 }
 
 // Backends.
@@ -194,7 +204,8 @@ func (f DetectionFilter) match(d Detection) bool {
 		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since)) &&
 		(f.Until.IsZero() || d.DetectedAt.Before(f.Until)) &&
 		d.Confidence >= f.MinConfidence &&
-		(f.Model == "" || d.ModelOf() == f.Model)
+		(f.Model == "" || d.ModelOf() == f.Model) &&
+		(len(f.RecorderIDs) == 0 || slices.Contains(f.RecorderIDs, d.RecorderID))
 }
 
 func sortUsers(us []User) {

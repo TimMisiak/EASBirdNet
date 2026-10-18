@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/mail"
 	"os"
@@ -19,9 +20,12 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/azjob"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
@@ -41,6 +45,9 @@ func newLogger(w io.Writer) *slog.Logger {
 
 func main() {
 	log := newLogger(os.Stdout)
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		os.Exit(runWorker(log))
+	}
 
 	cfg, err := configFromEnv()
 	if err != nil {
@@ -64,6 +71,7 @@ func main() {
 			"endpoint", cfg.DB.CosmosEndpoint, "database", cfg.DB.CosmosDatabase, "key_auth", cfg.DB.CosmosKey != "")
 	}
 
+	cfg.Storage.Log = log
 	files, err := storage.Open(cfg.Storage)
 	if err != nil {
 		log.Error("opening file storage", "err", err)
@@ -94,15 +102,44 @@ func main() {
 	// reports what it is waiting for through the admin API, and needs no
 	// restart once the environment is right. So the server starts it either
 	// way -- an unanalyzable card waits in processing rather than being lost.
-	queue := analysis.New(store, files, cfg.Analyzer, log)
-	queue.Perch = cfg.Perch
+	queue := newQueue(cfg, store, files, log)
+	// What each file's analysis costs, written beside the audio. It stops
+	// after the queue, so the last task's record is flushed.
+	perfCtx, stopPerf := context.WithCancel(context.Background())
+	perfDone := make(chan struct{})
 	analysisCtx, stopAnalysis := context.WithCancel(context.Background())
 	analysisDone := make(chan struct{})
-	log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
-	go func() {
-		defer close(analysisDone)
-		queue.Run(analysisCtx)
-	}()
+	// The API's view of analysis: this process's own queue, or, when analysis
+	// runs as a job, the dispatcher that starts its workers.
+	var analysisAPI api.Queue = queue
+	if cfg.AnalysisJob == "" {
+		startPerf(perfCtx, perfDone, cfg, queue, files, log, map[string]any{"inProcess": true})
+		log.Info("analysis queue starting", "python", cfg.Analyzer.Python, "script", cfg.Analyzer.Script, "perch", cfg.Perch)
+		go func() {
+			defer close(analysisDone)
+			queue.Run(analysisCtx)
+		}()
+	} else {
+		close(perfDone)
+		job, err := azjob.New(cfg.AnalysisJob)
+		if err != nil {
+			log.Error("the analysis job", "err", err)
+			os.Exit(1)
+		}
+		d := analysis.NewDispatcher(queue, job, files, log)
+		if cfg.AnalysisWorkers > 0 {
+			d.MaxWorkers = cfg.AnalysisWorkers
+		}
+		if cfg.AnalysisStepsPerWorker > 0 {
+			d.StepsPerWorker = cfg.AnalysisStepsPerWorker
+		}
+		analysisAPI = d
+		log.Info("analysis runs as a job", "job", cfg.AnalysisJob, "max_workers", d.MaxWorkers, "steps_per_worker", d.StepsPerWorker)
+		go func() {
+			defer close(analysisDone)
+			d.Run(analysisCtx)
+		}()
+	}
 
 	// Audio retention: the originals of a card BirdNET has finished with go
 	// after their window, and its detections and clips stay. Unlike analysis
@@ -122,6 +159,17 @@ func main() {
 		close(retentionDone)
 		log.Info("audio retention is off: card originals are kept until the card is deleted")
 	}
+
+	// Deleting cards: a coordinator's delete only marks the card, and this
+	// removes it. It runs here rather than in the analysis job, because the
+	// web app is the one process that is always running.
+	deleter := deletion.New(store, files, log)
+	deleteCtx, stopDeleting := context.WithCancel(context.Background())
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		deleter.Run(deleteCtx)
+	}()
 
 	// Sign-in. Reaching the provider is a network call, so a provider that is
 	// unreachable now is retried when someone signs in rather than stopping
@@ -145,7 +193,7 @@ func main() {
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: requestLogger(log, web.SecurityHeaders(
-			newMux(cfg, store, files, queue, auth, log),
+			newMux(cfg, store, files, analysisAPI, deleter, auth, log),
 			// Dev is http://localhost, where HSTS is ignored anyway.
 			web.SecurityOptions{StaticDir: cfg.StaticDir, HTTPS: !cfg.Dev, Log: log},
 		)),
@@ -167,9 +215,14 @@ func main() {
 	// A BirdNET run in flight is killed; its file is queued again next start.
 	stopAnalysis()
 	<-analysisDone
+	stopPerf()
+	<-perfDone
 	// A sweep in flight stops between files; the next start finishes it.
 	stopRetention()
 	<-retentionDone
+	// A card being deleted is left in deleting; the next start finishes it.
+	stopDeleting()
+	<-deleteDone
 	if err := store.Close(); err != nil {
 		log.Error("closing the database", "err", err)
 	}
@@ -211,11 +264,12 @@ func shutdownHTTP(srv *http.Server, grace time.Duration, log *slog.Logger) error
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, deleter api.Deleter, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Options{
-		Store: store, Files: files, Queue: queue, Log: log,
+		Store: store, Files: files, Queue: queue, Deleter: deleter, Log: log,
 		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
+		PublicURL: cfg.Auth.PublicURL,
 	})
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
@@ -251,6 +305,187 @@ type config struct {
 	// turns it on: it needs TensorFlow in the image and several times
 	// BirdNET's memory and time (DEPLOYMENT.md).
 	Perch bool
+	// Perf records what analysis costs the machine -- CPU, memory, time per
+	// phase -- into file storage under perf/, for sizing the replica that runs
+	// it (ANALYSIS.md, *Performance data*). On unless BIRDSENSE_PERF is off.
+	Perf bool
+	// ImageTag is the image this is, when the deployment says
+	// (BIRDSENSE_IMAGE_TAG), so performance records name what they measured.
+	ImageTag string
+	// ReplicaCPU and ReplicaMemory are the replica's size as Terraform set it
+	// (BIRDSENSE_REPLICA_CPU, e.g. 2.0, and BIRDSENSE_REPLICA_MEMORY, e.g.
+	// 4Gi), for the performance records when the container's own limits
+	// can't be read. Zero when unset.
+	ReplicaCPU    float64
+	ReplicaMemory int64
+	// Analysis tunes how much the analysis queue runs at once; zero fields
+	// take the defaults analysisCapacity and analysisCosts describe.
+	Analysis analysisTuning
+	// AnalysisJob, when set, is the resource id of the Container Apps job
+	// analysis runs as (BIRDSENSE_ANALYSIS_JOB): the web app then starts its
+	// workers instead of analyzing in this process (ANALYSIS.md, *The job*).
+	// AnalysisWorkers caps the workers at once and AnalysisStepsPerWorker is
+	// how much waiting work starts one more; 0 takes the dispatcher's defaults.
+	AnalysisJob            string
+	AnalysisWorkers        int
+	AnalysisStepsPerWorker int
+}
+
+// newQueue is the analysis queue as configured, sized to this replica.
+func newQueue(cfg config, store db.Store, files storage.Store, log *slog.Logger) *analysis.Queue {
+	queue := analysis.New(store, files, cfg.Analyzer, log)
+	queue.Perch = cfg.Perch
+	cores, memory, limitsFrom := perf.Limits(cfg.ReplicaCPU, cfg.ReplicaMemory)
+	queue.Capacity = analysisCapacity(cfg.Analysis, cores, memory, limitsFrom)
+	queue.Costs = analysisCosts(cfg.Analysis)
+	log.Info("analysis capacity", "cores", queue.Capacity.Cores, "memory_mb", queue.Capacity.Memory>>20,
+		"max_tasks", queue.Capacity.MaxTasks, "limits_from", limitsFrom)
+	return queue
+}
+
+// startPerf records what the queue's analysis costs, if that is on, until ctx
+// ends; done is closed once the last record is flushed.
+func startPerf(ctx context.Context, done chan struct{}, cfg config, queue *analysis.Queue, files storage.Store, log *slog.Logger, settings map[string]any) {
+	if !cfg.Perf {
+		close(done)
+		return
+	}
+	instance := perf.Instance()
+	settings["perch"], settings["capacity"], settings["costs"] = cfg.Perch, queue.Capacity, queue.Costs
+	queue.Perf = perf.New(perf.NewStoreSink(files, instance), perf.Config{
+		Instance: instance, Version: cfg.ImageTag, Settings: settings,
+		LimitCores: cfg.ReplicaCPU, LimitMemory: cfg.ReplicaMemory,
+	}, log)
+	log.Info("analysis performance records on", "instance", instance)
+	go func() {
+		defer close(done)
+		queue.Perf.Run(ctx)
+	}()
+}
+
+// analysisTuning is the BIRDSENSE_ANALYSIS_* settings: how many tasks at
+// once, how much memory to leave the server, and what each model's task is
+// expected to take (ANALYSIS.md, *Packing*).
+type analysisTuning struct {
+	MaxTasks     int   // BIRDSENSE_ANALYSIS_MAX_TASKS
+	Headroom     int64 // BIRDSENSE_ANALYSIS_MEM_HEADROOM, default 1Gi
+	BirdNETMem   int64 // BIRDSENSE_ANALYSIS_BIRDNET_MEM
+	PerchMem     int64 // BIRDSENSE_ANALYSIS_PERCH_MEM
+	PerchThreads int   // BIRDSENSE_ANALYSIS_PERCH_THREADS; 0 is the cores free when it starts
+}
+
+func readAnalysisTuning() (analysisTuning, error) {
+	t := analysisTuning{Headroom: 1 << 30}
+	for _, n := range []struct {
+		name string
+		to   *int
+	}{{"BIRDSENSE_ANALYSIS_MAX_TASKS", &t.MaxTasks}, {"BIRDSENSE_ANALYSIS_PERCH_THREADS", &t.PerchThreads}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			i, err := strconv.Atoi(v)
+			if err != nil || i < 0 {
+				return t, fmt.Errorf("%s must be a whole number, not %q", n.name, v)
+			}
+			*n.to = i
+		}
+	}
+	for _, n := range []struct {
+		name string
+		to   *int64
+	}{{"BIRDSENSE_ANALYSIS_MEM_HEADROOM", &t.Headroom}, {"BIRDSENSE_ANALYSIS_BIRDNET_MEM", &t.BirdNETMem}, {"BIRDSENSE_ANALYSIS_PERCH_MEM", &t.PerchMem}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			b, err := parseSize(v)
+			if err != nil {
+				return t, fmt.Errorf("%s: %w", n.name, err)
+			}
+			*n.to = b
+		}
+	}
+	return t, nil
+}
+
+// parseSize reads a size as Container Apps writes one: "350Mi", "2.3Gi".
+func parseSize(v string) (int64, error) {
+	for suffix, unit := range map[string]float64{"Mi": 1 << 20, "Gi": 1 << 30} {
+		if n, ok := strings.CutSuffix(v, suffix); ok {
+			f, err := strconv.ParseFloat(n, 64)
+			if err != nil || f < 0 {
+				break
+			}
+			return int64(f * unit), nil
+		}
+	}
+	return 0, fmt.Errorf(`a size must be like "350Mi" or "2.3Gi", not %q`, v)
+}
+
+// analysisCapacity is what the queue may run at once on a replica of this
+// size: its memory less the headroom, and a task per core. Limits read from
+// the whole host -- a development machine, where nothing says what the
+// server's share is -- run two tasks at most, on two cores, so running the
+// server doesn't take a laptop over; BIRDSENSE_REPLICA_CPU and _MEMORY or
+// BIRDSENSE_ANALYSIS_MAX_TASKS say otherwise.
+func analysisCapacity(t analysisTuning, cores float64, memory int64, from string) analysis.Capacity {
+	if from == "host" {
+		cores = min(cores, 2)
+	}
+	c := analysis.Capacity{Cores: cores, Memory: max(memory-t.Headroom, 1), MaxTasks: t.MaxTasks}
+	if c.MaxTasks == 0 {
+		c.MaxTasks = max(1, int(cores))
+	}
+	return c
+}
+
+// analysisCosts is DefaultCosts with the settings' overrides.
+func analysisCosts(t analysisTuning) map[string]analysis.Cost {
+	costs := maps.Clone(analysis.DefaultCosts)
+	if t.BirdNETMem > 0 {
+		c := costs[birdnet.ModelBirdNET]
+		c.Memory = t.BirdNETMem
+		costs[birdnet.ModelBirdNET] = c
+	}
+	p := costs[birdnet.ModelPerch]
+	if t.PerchMem > 0 {
+		p.Memory = t.PerchMem
+	}
+	p.Threads = t.PerchThreads
+	costs[birdnet.ModelPerch] = p
+	return costs
+}
+
+// replicaSize reads the replica's configured size, in Container Apps' own
+// spelling. Either may be empty.
+func replicaSize(cpu, memory string) (float64, int64, error) {
+	var cores float64
+	var bytes int64
+	if cpu != "" {
+		n, err := strconv.ParseFloat(cpu, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, fmt.Errorf("BIRDSENSE_REPLICA_CPU must be a number of cores, not %q", cpu)
+		}
+		cores = n
+	}
+	if memory != "" {
+		n, err := strconv.ParseFloat(strings.TrimSuffix(memory, "Gi"), 64)
+		if err != nil || n <= 0 || !strings.HasSuffix(memory, "Gi") {
+			return 0, 0, fmt.Errorf(`BIRDSENSE_REPLICA_MEMORY must be like "4Gi", not %q`, memory)
+		}
+		bytes = int64(n * (1 << 30))
+	}
+	return cores, bytes, nil
+}
+
+// onOff reads a switch. A typo would quietly leave something off (or on), so
+// only the spellings below are accepted.
+func onOff(name string, fallback bool) (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(name))); v {
+	case "":
+		return fallback, nil
+	case "off", "false", "0":
+		return false, nil
+	case "on", "true", "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be on or off, not %q", name, v)
+	}
 }
 
 // configFromEnv reads the BIRDSENSE_* variables. The database defaults to Cosmos
@@ -258,6 +493,12 @@ type config struct {
 // File storage follows the database unless BIRDSENSE_STORAGE says otherwise:
 // a directory in dev mode, Azure Blob Storage everywhere else.
 func configFromEnv() (config, error) {
+	return readConfig(false)
+}
+
+// readConfig reads the environment for the web app, or for an analysis
+// worker, which serves nothing and so needs no sign-in settings.
+func readConfig(worker bool) (config, error) {
 	cfg := config{
 		Addr: envOr("BIRDSENSE_ADDR", ":8080"),
 		// Relative to backend/, which is where `go run ./cmd/server` is run
@@ -323,14 +564,35 @@ func configFromEnv() (config, error) {
 	}
 	cfg.Retention = retention.Policy{Window: time.Duration(days) * 24 * time.Hour}
 
-	// A typo here would quietly leave a model off (or on), so only the
-	// spellings below are accepted.
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("BIRDSENSE_PERCH"))); v {
-	case "", "off", "false", "0":
-	case "on", "true", "1":
-		cfg.Perch = true
-	default:
-		return cfg, fmt.Errorf("BIRDSENSE_PERCH must be on or off, not %q", v)
+	var err error
+	if cfg.Perch, err = onOff("BIRDSENSE_PERCH", false); err != nil {
+		return cfg, err
+	}
+	if cfg.Perf, err = onOff("BIRDSENSE_PERF", true); err != nil {
+		return cfg, err
+	}
+	cfg.ImageTag = os.Getenv("BIRDSENSE_IMAGE_TAG")
+	if cfg.ReplicaCPU, cfg.ReplicaMemory, err = replicaSize(os.Getenv("BIRDSENSE_REPLICA_CPU"), os.Getenv("BIRDSENSE_REPLICA_MEMORY")); err != nil {
+		return cfg, err
+	}
+	if cfg.Analysis, err = readAnalysisTuning(); err != nil {
+		return cfg, err
+	}
+	cfg.AnalysisJob = strings.TrimSpace(os.Getenv("BIRDSENSE_ANALYSIS_JOB"))
+	for _, n := range []struct {
+		name string
+		to   *int
+	}{{"BIRDSENSE_ANALYSIS_JOB_WORKERS", &cfg.AnalysisWorkers}, {"BIRDSENSE_ANALYSIS_STEPS_PER_WORKER", &cfg.AnalysisStepsPerWorker}} {
+		if v := strings.TrimSpace(os.Getenv(n.name)); v != "" {
+			i, err := strconv.Atoi(v)
+			if err != nil || i < 1 {
+				return cfg, fmt.Errorf("%s must be a positive whole number, not %q", n.name, v)
+			}
+			*n.to = i
+		}
+	}
+	if worker {
+		return cfg, nil
 	}
 
 	if err := readAuth(&cfg); err != nil {
@@ -423,12 +685,16 @@ func readAuth(cfg *config) error {
 }
 
 // prepareDatabase is everything the server writes on its own before it serves:
-// the bootstrap admin, and in dev mode the placeholder program if the database
-// is still empty after that. Outside dev mode the bootstrap admin is the only
-// write the server ever makes unasked.
+// the bootstrap admin, recording times for cards registered before cards had
+// them, and in dev mode the placeholder program if the database is still
+// empty after that. Outside dev mode those first two are the only writes the
+// server ever makes unasked.
 func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
 	if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
 		return fmt.Errorf("bootstrapping the roster: %w", err)
+	}
+	if err := backfillRecordingTimes(ctx, store, log); err != nil {
+		return fmt.Errorf("dating cards from their files: %w", err)
 	}
 	if !cfg.Dev {
 		return nil
@@ -439,6 +705,60 @@ func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.
 	}
 	if seeded {
 		log.Info("seeded an empty dev database with placeholder people and recorders", "path", cfg.DB.LocalPath)
+	}
+	return nil
+}
+
+// backfillRecordingTimes gives a card registered before cards were dated by
+// their recordings its first and last recording times, read from its files'
+// names as registration now does. It only touches cards without them, so
+// after the first start it is one query and nothing else -- except for a card
+// whose file names carry no time, which is read again each start and left as
+// it is.
+//
+// Cards used to be dated by "nights" instead, which nothing reads any more;
+// the field is left in the old documents, unread, rather than rewritten.
+func backfillRecordingTimes(ctx context.Context, store db.Store, log *slog.Logger) error {
+	uploads, err := store.ListUploads(ctx, db.UploadFilter{})
+	if err != nil {
+		return err
+	}
+	for _, u := range uploads {
+		if u.FirstRecordingAt != nil || u.Status == db.StatusDeleting {
+			continue
+		}
+		files, err := store.ListAudioFiles(ctx, u.ID)
+		if err != nil {
+			return err
+		}
+		var first, last *time.Time
+		for _, f := range files {
+			t := f.RecordedAt
+			if t == nil {
+				if named, ok := db.RecordedAt(f.Path); ok {
+					t = &named
+				}
+			}
+			if t == nil || f.StatusDetail == db.AudioDetailNotOnCard {
+				continue
+			}
+			if first == nil || t.Before(*first) {
+				first = t
+			}
+			if last == nil || t.After(*last) {
+				last = t
+			}
+		}
+		if first == nil {
+			continue
+		}
+		if _, err := store.UpdateUpload(ctx, u.ID, func(u *db.Upload) error {
+			u.FirstRecordingAt, u.LastRecordingAt = first, last
+			return nil
+		}); err != nil {
+			return err
+		}
+		log.Info("dated a card by its recordings", "card", u.ID, "first", first, "last", last)
 	}
 	return nil
 }
@@ -470,10 +790,48 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// requestLogger logs every request once it is answered: its status, and the
+// length of the body it brought (-1 when unstated), which on a tus PATCH is
+// the chunk -- so a card's upload rate can be read off the log
+// (PARALLEL-UPLOADS.md, *Checking a card's upload*).
 func requestLogger(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Info("request", "method", r.Method, "path", r.URL.Path, "dur", time.Since(start))
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		log.Info("request", "method", r.Method, "path", r.URL.Path, "status", sw.status(),
+			"bytes", r.ContentLength, "dur", time.Since(start))
 	})
+}
+
+// statusWriter notes the status a handler answers with. It unwraps, so
+// http.ResponseController reaches the real writer: tusd sets read deadlines
+// through one, and a wrapper that hid them would fail every PATCH.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.code == 0 {
+		w.code = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// status is what was answered; a handler that wrote nothing answered 200.
+func (w *statusWriter) status() int {
+	if w.code == 0 {
+		return http.StatusOK
+	}
+	return w.code
 }

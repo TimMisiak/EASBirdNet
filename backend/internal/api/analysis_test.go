@@ -100,8 +100,8 @@ func TestAdminCardPageShowsAudioRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.UpsertAudioFiles(ctx, ref, []db.AudioFile{
-		{Path: "DATA/kept.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, BlobName: "uploads/" + ref + "/kept"},
-		{Path: "DATA/gone.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, AudioDeletedAt: &gone},
+		{Path: "DATA/kept.wav", SizeBytes: 100, Status: db.AudioAnalyzed, BlobName: "uploads/" + ref + "/kept"},
+		{Path: "DATA/gone.wav", SizeBytes: 100, Status: db.AudioAnalyzed, AudioDeletedAt: &gone},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,9 +151,9 @@ func TestAdminCardPageShowsEachFileAndWhatWasHeard(t *testing.T) {
 	ref := "OWL-20260913-SR05"
 	analyzed := testNow
 	if err := store.UpsertAudioFiles(ctx, ref, []db.AudioFile{
-		{Path: "DATA/b.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, AnalyzedAt: &analyzed, DetectionCount: 1},
-		{Path: "DATA/a.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioFailed, StatusDetail: "unreadable audio"},
-		{Path: "DATA/old.wav", Night: "2026-09-11", SizeBytes: 100, Status: db.AudioFailed, StatusDetail: db.AudioDetailNotOnCard},
+		{Path: "DATA/b.wav", SizeBytes: 100, Status: db.AudioAnalyzed, AnalyzedAt: &analyzed, DetectionCount: 1},
+		{Path: "DATA/a.wav", SizeBytes: 100, Status: db.AudioFailed, StatusDetail: "unreadable audio"},
+		{Path: "DATA/old.wav", SizeBytes: 100, Status: db.AudioFailed, StatusDetail: db.AudioDetailNotOnCard},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 	ctx := t.Context()
 	ref := "OWL-20260913-SR05"
 	if err := store.UpsertAudioFiles(ctx, ref, []db.AudioFile{
-		{Path: "DATA/b.wav", Night: "2026-09-12", SizeBytes: 100, Status: db.AudioAnalyzed, DetectionCount: 2},
+		{Path: "DATA/b.wav", SizeBytes: 100, Status: db.AudioAnalyzed, DetectionCount: 2},
 	}); err != nil {
 		t.Fatal(err)
 	}

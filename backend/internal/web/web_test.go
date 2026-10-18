@@ -93,7 +93,8 @@ func TestSecurityHeaders(t *testing.T) {
 		"default-src 'none'",
 		"frame-ancestors 'none'",
 		"object-src 'none'",
-		"script-src 'self' " + jsDelivr,
+		"script-src 'self' " + jsDelivr + " 'wasm-unsafe-eval'",
+		"worker-src 'self'",
 		"style-src 'self' 'unsafe-inline' " + fontsCSS + " " + jsDelivr,
 		"font-src " + fontFiles,
 		osmTiles,
@@ -144,5 +145,25 @@ func TestShippedIndexIsAllowedByThePolicy(t *testing.T) {
 			continue
 		}
 		t.Errorf("index.html has an inline script the policy blocks: <script%s>", attrs)
+	}
+}
+
+// A browser hashes an inline script after HTML parsing has turned CRLF into
+// LF, so a Windows checkout of index.html must hash the same as a Unix one.
+func TestImportMapHashIgnoresLineEndings(t *testing.T) {
+	const page = "<head>\n<script type=\"importmap\">\n{\"imports\": {}}\n</script>\n</head>\n"
+	hashOf := func(content string) string {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return importMapHash(dir, nil)
+	}
+	lf := hashOf(page)
+	if crlf := hashOf(strings.ReplaceAll(page, "\n", "\r\n")); crlf != lf {
+		t.Errorf("CRLF index.html hashes to %s, LF to %s", crlf, lf)
+	}
+	if cr := hashOf(strings.ReplaceAll(page, "\n", "\r")); cr != lf {
+		t.Errorf("CR index.html hashes to %s, LF to %s", cr, lf)
 	}
 }

@@ -58,3 +58,18 @@ output "image_tag" {
   description = "The tag Terraform currently has deployed. Handy for applying a settings change without a rebuild: pass it back as -var image_tag=..."
   value       = var.image_tag
 }
+
+output "analysis_job_name" {
+  description = "The analysis job, for `az containerapp job execution list --name <this> -g <group>`."
+  value       = azurerm_container_app_job.analysis.name
+}
+
+output "analysis_job_id" {
+  description = "The analysis job's resource id: the scope its starter role is assigned on."
+  value       = azurerm_container_app_job.analysis.id
+}
+
+output "app_identity_principal_id" {
+  description = "The web app's identity, which the job's starter role is assigned to."
+  value       = azurerm_user_assigned_identity.this.principal_id
+}

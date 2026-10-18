@@ -285,18 +285,6 @@ documents that the `skipEmpty` tusd workaround is only safe *because* blob
 versioning is off — turning on `versioning_enabled` would break every card
 upload. `storage.tf` carries no warning about that coupling; it should.
 
-### 5.11 Every deploy rebuilds the BirdNET stage from scratch
-`scripts/deploy.ps1:110`, `Dockerfile:21-37`
-
-`az acr build` runs on a fresh agent with no `--cache-from` and no registry
-cache, so every deploy pip-installs the pinned requirements and re-downloads
-~90 MB of models from Zenodo.
-
-**If not fixed:** multi-minute deploys, and a deploy that can fail because PyPI
-or Zenodo is having a bad day. A rollback is no longer exposed to this —
-`deploy.ps1 -ImageTag` applies an image that is already built (ROLLBACK.md) —
-so this is now about forward deploys only.
-
 ### 5.12 The client secret expires, and nothing in Azure can warn about it — **[decide]**
 `infra/app.tf:36-43`, `infra/variables.tf`, `backend/internal/api/auth.go`
 
@@ -393,11 +381,10 @@ being rediscovered.
   same seam.
 - **`retention.Sweep` runs three cross-partition `ListUploads` calls**
   (`retention.go:113`) because `UploadFilter` has no multi-status field.
-- **`analysis.tally` replaces the upload document after every file**
-  (`analysis.go:442`) even when nothing changed — ~336 no-op writes per card.
-- **`analysis.drain` aborts the whole pass on the first card's error**
-  (`analysis.go:148-163`), so one card's store failure stalls every other
-  `processing` card for a cycle.
+- **`analysis.fill` stops its scan on the first card whose files can't be
+  listed**, so one card's store failure stalls every other `processing` card
+  for a cycle. (A file failing no longer does: it waits on its `retryAfter`
+  while the rest go on.)
 - **`Queue.Enqueue`'s `reference` parameter is unused** (`analysis.go:97`).
 
 ## Robustness, not urgent
@@ -459,10 +446,11 @@ being rediscovered.
   `gofmt`, `go vet`, `go test` and `govulncheck`). Nothing runs
   `terraform fmt -check` or `terraform validate` on `infra/`, so formatting
   drift and a syntax error both wait until someone deploys.
-- **No frontend tests at all** — 7,120 lines of JavaScript, zero. Mostly fine
-  (UI regressions show themselves), but there is no harness at all should a
-  piece of frontend logic ever warrant one — `upload-flow.js`'s state machine
-  and `format.js` are the candidates.
+- **Most of the frontend has no tests.** There is a harness now --
+  `test/frontend/`, plain `node --test`, run in CI -- but it covers only the
+  FLAC path (`wav.js`, `flac-worker.js`). Mostly fine (UI regressions show
+  themselves); `upload-flow.js`'s state machine and `format.js` are the next
+  candidates.
 - **`${HOST_PORT}` has no default** (`docker-compose.yml:9`). Unset, compose
   publishes on a random host port, contradicting README.md and CLAUDE.md's
   `http://localhost:8080`. Use `${HOST_PORT:-8080}`.

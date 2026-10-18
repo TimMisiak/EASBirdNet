@@ -25,12 +25,14 @@ HOST_PORT=8080 docker compose up --build
 
 ```sh
 cd backend && gofmt -l . && go vet ./... && go test ./... && govulncheck ./...
+node --test 'test/frontend/*.test.mjs'    # from the repo root; Node 22 or later
 ```
 
 `govulncheck` installs with
-`go install golang.org/x/vuln/cmd/govulncheck@latest`. GitHub Actions runs all
-four on every push and pull request, and again weekly so a new advisory against
-unchanged code still surfaces.
+`go install golang.org/x/vuln/cmd/govulncheck@latest`. The frontend's tests
+need nothing installed beyond Node. GitHub Actions runs all five on every push
+and pull request, and again weekly so a new advisory against unchanged code
+still surfaces.
 
 ## Deploying
 
