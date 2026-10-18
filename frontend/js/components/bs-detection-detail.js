@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { clock, count, dateAtTime, longDate, shortDate } from "../format.js";
+import { clock, count, dateAtTime, longDate } from "../format.js";
 import { reviewChip } from "../upload-status.js";
 import * as api from "../api.js";
 import * as list from "../detection-list.js";
@@ -52,7 +52,7 @@ const SIBLINGS_LIMIT = 500;
 
 /**
  * The last file's detections, kept across navigations. Stepping through a
- * night stays in one file for run after run, and asking for up to
+ * recording stays in one file for run after run, and asking for up to
  * SIBLINGS_LIMIT of them again on every step is the one expensive thing about
  * a step that doesn't change file.
  */
@@ -419,8 +419,7 @@ class DetectionDetail extends BaseElement {
             </dd>
             <dt>File</dt>
             <dd><span class="path">${escapeHTML(file.path).replaceAll("/", "/<wbr>")}</span></dd>
-            <dt>Night</dt>
-            <dd>${escapeHTML(shortDate(file.night))}</dd>
+            ${file.recordedAt ? `<dt>Recording started</dt><dd>${escapeHTML(dateAtTime(file.recordedAt))}</dd>` : ""}
             <dt>Card</dt>
             <dd>
               ${

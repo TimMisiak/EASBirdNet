@@ -42,7 +42,7 @@ class MyUploads extends UploadsTable {
       CELLS.reference,
       CELLS.station,
       CELLS.pulled,
-      CELLS.nights,
+      CELLS.recorded,
       CELLS.files,
       CELLS.detections,
       CELLS.status,

@@ -94,9 +94,9 @@ func TestTusTakesAWAVAsFLAC(t *testing.T) {
 func TestTusRefusesFLACItCantTake(t *testing.T) {
 	s := newTusServer(t)
 	jane := signedIn(t, s.mux, db.RoleVolunteer)
-	reg := s.register(jane, oneNightBody("SW-03", "2026-09-14", "2026-09-12", []CardFile{
-		{Path: "DATA/a.WAV", Bytes: 1000, Night: "2026-09-12"},
-		{Path: "DATA/b.mp3", Bytes: 1000, Night: "2026-09-12"},
+	reg := s.register(jane, filesBody("SW-03", "2026-09-14", []listedFile{
+		{Path: "DATA/a.WAV", Bytes: 1000},
+		{Path: "DATA/b.mp3", Bytes: 1000},
 	}))
 	ref := reg.Upload.Reference
 	with := func(meta map[string]string, change func(map[string]string)) map[string]string {

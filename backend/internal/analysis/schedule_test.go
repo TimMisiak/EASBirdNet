@@ -42,7 +42,7 @@ func TestTheQueuePacksBothModels(t *testing.T) {
 	for _, p := range []string{bn1, bn2, bn3} {
 		blob := storage.Name(newer + "/" + p[len(p)-10:len(p)-4])
 		f.put(blob, p)
-		docs = append(docs, db.AudioFile{Path: p, Night: "2026-09-12", Status: db.AudioUploaded, BlobName: blob})
+		docs = append(docs, db.AudioFile{Path: p, Status: db.AudioUploaded, BlobName: blob})
 	}
 	if err := f.store.UpsertAudioFiles(t.Context(), newer, docs); err != nil {
 		t.Fatal(err)

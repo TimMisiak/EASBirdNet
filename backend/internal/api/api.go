@@ -159,7 +159,7 @@ func register(mux *http.ServeMux, h *handlers) {
 		mux.HandleFunc("GET /api/v1/oauth/request", h.requireSession(h.describeRequest))
 		mux.HandleFunc("POST "+oauthTokenPath, h.token)
 		mux.Handle(mcpPath, h.mcpHandler())
-		mux.HandleFunc("GET "+exportPath, h.exportDetections)
+		mux.HandleFunc("GET "+exportPath, h.serveMCPExport)
 	}
 
 	// Development only: not registered at all otherwise, so a deployed server
@@ -520,11 +520,14 @@ func (h *handlers) writeUploads(w http.ResponseWriter, r *http.Request, f db.Upl
 // the list is refreshed and the files already in are kept.
 func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.User) {
 	var body struct {
-		StationID string     `json:"stationId"`
-		PulledOn  string     `json:"pulledOn"`
-		Notes     string     `json:"notes"`
-		Nights    []Night    `json:"nights"`
-		Files     []CardFile `json:"files"`
+		StationID string       `json:"stationId"`
+		PulledOn  string       `json:"pulledOn"`
+		Notes     string       `json:"notes"`
+		Files     []listedFile `json:"files"`
+		// Nights is what a page loaded before cards stopped being grouped
+		// into nights still sends. It is read and ignored, so a volunteer
+		// resuming a card from such a page isn't refused mid-card.
+		Nights json.RawMessage `json:"nights,omitempty"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -551,33 +554,27 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		h.problem(w, http.StatusBadRequest, "pulledOn must be YYYY-MM-DD")
 		return
 	}
-	if len(body.Nights) == 0 || len(body.Files) == 0 {
+	if len(body.Files) == 0 {
 		h.problem(w, http.StatusBadRequest, "the card has no audio on it")
 		return
 	}
-	nights := make([]db.Night, len(body.Nights))
-	var files int
-	var bytes int64
-	for i, n := range body.Nights {
-		if _, err := time.Parse("2006-01-02", n.Date); err != nil || n.Files < 0 || n.Bytes < 0 {
-			h.problem(w, http.StatusBadRequest, "each night needs a YYYY-MM-DD date and non-negative counts")
-			return
-		}
-		// A night is measured against the room the card has left rather than
-		// added and then checked, so a crafted list can't overflow the sums
-		// into a total small enough -- or negative enough -- to pass.
-		if n.Files > maxCardFiles-files || n.Bytes > maxCardBytes-bytes {
-			h.problem(w, http.StatusBadRequest, cardTooBig)
-			return
-		}
-		nights[i] = db.Night(n)
-		files += n.Files
-		bytes += n.Bytes
-	}
-	listed, problem := cardList(body.Files, files, bytes)
+	listed, problem := cardList(body.Files)
 	if problem != "" {
 		h.problem(w, http.StatusBadRequest, problem)
 		return
+	}
+	files, bytes := len(listed), int64(0)
+	var first, last *time.Time
+	for _, f := range listed {
+		bytes += f.SizeBytes
+		if t := f.RecordedAt; t != nil {
+			if first == nil || t.Before(*first) {
+				first = t
+			}
+			if last == nil || t.After(*last) {
+				last = t
+			}
+		}
 	}
 	notes, started := strings.TrimSpace(body.Notes), h.stamp()
 	ref := db.UploadID(body.PulledOn, rec.ID)
@@ -587,7 +584,8 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 		RecorderID: rec.ID,
 		Recorder:   db.RecorderSnapshot{Name: rec.Name, Latitude: rec.Latitude, Longitude: rec.Longitude},
 		UserID:     me.ID, UserName: me.Name,
-		PulledOn: body.PulledOn, Notes: notes, Nights: nights,
+		PulledOn: body.PulledOn, Notes: notes,
+		FirstRecordingAt: first, LastRecordingAt: last,
 		FileCount: files, TotalBytes: bytes,
 		Status: db.StatusInProgress, StartedAt: started,
 	})
@@ -616,7 +614,8 @@ func (h *handlers) createUpload(w http.ResponseWriter, r *http.Request, me db.Us
 					return nil
 				}
 				u.Notes = notes
-				u.Nights, u.FileCount, u.TotalBytes = nights, files, bytes
+				u.FirstRecordingAt, u.LastRecordingAt = first, last
+				u.FileCount, u.TotalBytes = files, bytes
 				u.Status, u.StartedAt = db.StatusInProgress, started
 				return nil
 			})
@@ -693,30 +692,43 @@ const (
 // cardTooBig is what a card claiming more than that is told.
 const cardTooBig = "that is more audio than a card can hold; check the folder you chose"
 
-// cardList checks a card's file list against the nights it was summed into,
-// and returns it as audio files, or else what is wrong with it.
-func cardList(files []CardFile, wantFiles int, wantBytes int64) ([]db.AudioFile, string) {
+// listedFile is one file as the browser lists it off a card.
+type listedFile struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+	// Night is sent by pages from before cards stopped being grouped into
+	// nights, and ignored; see createUpload.
+	Night string `json:"night,omitempty"`
+}
+
+// cardList checks a card's file list and returns it as audio files, each
+// with when it was recorded where its name says, or else what is wrong with
+// it.
+func cardList(files []listedFile) ([]db.AudioFile, string) {
 	listed := make([]db.AudioFile, 0, len(files))
 	seen := make(map[string]bool, len(files))
 	var bytes int64
 	for _, f := range files {
 		p := db.CardPath(f.Path)
-		if _, err := time.Parse("2006-01-02", f.Night); err != nil || p == "" || f.Bytes < 0 {
-			return nil, "each file needs its path on the card, a non-negative size and a YYYY-MM-DD night"
+		if p == "" || f.Bytes < 0 {
+			return nil, "each file needs its path on the card and a non-negative size"
 		}
 		if seen[p] {
 			return nil, fmt.Sprintf("the file list has %s twice", p)
 		}
-		// Measured against what the card has left, for the reason the nights are.
+		// A file is measured against the room the card has left rather than
+		// added and then checked, so a crafted list can't overflow the sum
+		// into a total small enough -- or negative enough -- to pass.
 		if f.Bytes > maxFileBytes || f.Bytes > maxCardBytes-bytes || len(listed) == maxCardFiles {
 			return nil, cardTooBig
 		}
 		seen[p] = true
 		bytes += f.Bytes
-		listed = append(listed, db.AudioFile{Path: p, SizeBytes: f.Bytes, Night: f.Night})
-	}
-	if len(listed) != wantFiles || bytes != wantBytes {
-		return nil, "the file list and the nights don't add up to the same card"
+		file := db.AudioFile{Path: p, SizeBytes: f.Bytes}
+		if t, ok := db.RecordedAt(p); ok {
+			file.RecordedAt = &t
+		}
+		listed = append(listed, file)
 	}
 	return listed, ""
 }
@@ -748,14 +760,14 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		old, had := unlisted[id]
 		delete(unlisted, id)
 		sameFile := had && old.SizeBytes == f.SizeBytes
-		if sameFile && (received(old) || (old.Status == db.AudioPending && old.Night == f.Night)) {
+		if sameFile && (received(old) || old.Status == db.AudioPending) {
 			continue
 		}
 		if sameFile && old.BlobName != "" {
 			// A file that was taken off the card's list and is on it again at
 			// the same length is the one already in storage, so it counts as
 			// received rather than being sent a second time.
-			old.Status, old.StatusDetail, old.Night = db.AudioUploaded, "", f.Night
+			old.Status, old.StatusDetail = db.AudioUploaded, ""
 			// Queued afresh: whatever analysis made of it before, and
 			// however often that failed, is behind it.
 			old.Claim = db.Claim{}
@@ -769,7 +781,7 @@ func (h *handlers) registerFiles(ctx context.Context, u db.Upload, listed []db.A
 		}
 		writes = append(writes, db.AudioFile{
 			ID: id, RecorderID: u.RecorderID, Path: f.Path, SizeBytes: f.SizeBytes,
-			Night: f.Night, Status: db.AudioPending, CreatedAt: old.CreatedAt,
+			RecordedAt: f.RecordedAt, Status: db.AudioPending, CreatedAt: old.CreatedAt,
 		})
 	}
 	for _, old := range unlisted {

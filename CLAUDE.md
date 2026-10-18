@@ -61,7 +61,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── flac-worker.js   A classic worker: libflac.js encodes one WAV, and checks a tab's first
 │       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
-│       ├── card-scan.js     Reads a card folder into a night-by-night manifest
+│       ├── card-scan.js     Reads a card folder into a day-by-day manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
 │                            and uploads-table.js (the two card lists' base class)
@@ -397,19 +397,23 @@ removing someone ends their connections, and rotating the session key ends
 everyone's. A connection lasts 90 days from Allow, as a session does;
 refreshing doesn't extend it. Redirect URIs must be https, or http on
 loopback (any port, RFC 8252); custom schemes aren't taken.
-Three read-only tools, sized for a week of nights at a time:
-- `list_recorders`: ids, names, positions, and each one's latest night of data.
-- `detection_summary`: a range of nights (noon to noon Pacific, as the card
-  scan assigns files; at most 31, the last 7 by default), filtered by minimum
-  confidence and recorders, aggregated in Go into a few thousand tokens --
-  totals, per-night counts, per species (count, nights, recorders, confidence,
-  reviews, by hour, its best detection's link) and *coverage*: which nights
-  each recorder has analyzed data for, which are still pending, which have no
-  card. Coverage matters because cards arrive a week or two late, and a
+Three read-only tools, sized for a week at a time:
+- `list_recorders`: ids, names, positions, and when each one's most recent
+  recording started.
+- `detection_summary`: the detections between two RFC 3339 instants the
+  caller names (`since` inclusive, `until` exclusive; at most 31 days apart,
+  the last 7 by default), filtered by minimum confidence and recorders,
+  aggregated in Go into a few thousand tokens -- totals, per-day counts per
+  recorder, per species (count, days, recorders, confidence, reviews, by
+  hour, its best detection's link) and *coverage*: per recorder, the cards
+  with recordings in the range, each with when its first and last recordings
+  started and whether BirdNET has finished with it. Days and hours are
+  counted, and times written, in the `timeZone` the caller names (Pacific by
+  default). Coverage matters because cards arrive a week or two late, and a
   model reading counts without it reports a quiet recorder as fewer birds.
   Rejected detections count only in `totals.rejected`; a reviewer's
   correction replaces BirdNET's species. BirdNET's alone, never Perch's.
-- `detections_export`: the same range as CSV, one row per detection, behind a
+- `detections_export`: the same span as CSV, one row per detection, behind a
   link the tool returns rather than rows in the conversation -- a week is
   ~140,000 rows, ~4M tokens, which no context holds. The link is signed with
   who asked and for what, lasts 30 minutes, and is the only credential the
@@ -428,6 +432,26 @@ domain is added; the summary needs nothing.
 with a Client ID Metadata Document instead of DCR, or the same ranges are
 asked for often enough that a cached per-week summary is worth its
 invalidation.
+
+**There are no nights: when is a time, and a span is the reader's to choose.**
+Recorders run dusk to dawn, and Birdsense once grouped a card's files into
+*nights* -- the evening a night began, so a 3 a.m. file belonged to the day
+before -- and showed, counted and filtered by them. Read beside the
+Detections tab's calendar dates, that was two meanings of "Sep 15" in one app.
+So everything is dated by when it was recorded: a card by its first and last
+recordings (`firstRecordingAt`, `lastRecordingAt`, from the file names at
+registration), a file by `recordedAt`, a detection by `detectedAt`. Screens
+show dates and times in the browser's time zone; the upload check groups a
+card's files by the date in their names, and flags a day with far fewer files
+than the others, the first and last days being partial by nature. Anything
+that filters takes instants, and anything that counts by day says which time
+zone it counted in. Which instants make up "last week's owl activity" is the
+caller's to decide -- noon to noon, dusk to dawn -- not the server's.
+Gotcha: a card registered before this has no recording times until the
+server starts and reads them from its files' names (`backfillRecordingTimes`);
+the old `night` fields stay in those documents, unread (SCHEMA.md).
+*Revisit when:* a recorder's file names carry no time -- then a card can't be
+dated except by when it was pulled, and analysis already falls back to that.
 
 **Card audio goes over tus, through the app.** A card is ~128 GB in files of a
 few hundred MB, sent over home connections that drop. The browser sends each
@@ -650,7 +674,7 @@ with a batch of files and parses the one JSON object it prints, rather than
 binding a TFLite runtime into Go through cgo. Clips are cut the same way, by
 `analyzer/clip.py` with soundfile, which is what birdnet reads audio with, so a
 file BirdNET could analyze can be cut. The model loads once per batch, so
-hand it a night of files, not one at a time. The package uses BirdNET v2.4 on
+hand it a batch of files, not one at a time. The package uses BirdNET v2.4 on
 LiteRT (`library="litert"`), which needs no TensorFlow. Two consequences:
 - The runtime image is Debian (`python:3.12-slim-bookworm`), not Alpine,
   because the LiteRT and numpy wheels are glibc builds. The venv and the models
@@ -690,7 +714,7 @@ file goes on, and the third fails the file, so nothing that keeps failing can
 wedge the queue. Only a failure no one file is to blame for -- the store
 unreachable -- pauses the queue, on a delay that grows while it lasts. The last file moves the card to
 `in_review`, or `needs_attention` if any failed.
-One file per run, not a night per run: measured on the Osprey clip, a warm run
+One file per run, not a batch per run: measured on the Osprey clip, a warm run
 spends ~3 s starting Python and loading the model, and BirdNET takes ~18 s per
 10 minutes of audio. On hour-long card files that overhead is ~3%, and in
 exchange each file's detections are stored as soon as it's done and only one
@@ -1050,7 +1074,7 @@ through the list as filtered and sorted rather than through the file. It
 opens on the past week, with those dates in its own date fields, and widening
 them past what one replica will read says so rather than failing.
 An LLM tool can connect over MCP as anyone on the roster (*LLM tools connect
-over MCP*) and read summaries and CSV exports of a range of nights; it can't
+over MCP*) and read summaries and CSV exports of a span of time; it can't
 change anything. claude.ai's connector hasn't been tried against a deployment
 yet -- the flow is tested end to end with the MCP SDK's own client.
 Anyone signed in can review. Everyone works in the same shell

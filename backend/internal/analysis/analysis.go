@@ -44,7 +44,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -984,11 +983,21 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 		}
 	}
 
-	night, _ := time.ParseInLocation(time.DateOnly, f.Night, pacific)
+	// When the recording started: as the store has it, or from its name.
+	// Without either, the day the card came out is all that is known, which
+	// is within a card's length of the truth -- close enough for BirdNET's
+	// week, and a detection's time says no better than the file's name did.
+	start, startKnown := db.RecordedAt(f.Path)
+	if f.RecordedAt != nil {
+		start, startKnown = *f.RecordedAt, true
+	}
+	if !startKnown {
+		start, _ = time.ParseInLocation(time.DateOnly, card.PulledOn, pacific)
+	}
 	opts := settings
 	opts.Model, opts.Threads = s.model, threads
 	if lat, lon := card.Recorder.Latitude, card.Recorder.Longitude; lat != 0 || lon != 0 {
-		opts.Location = &birdnet.Location{Latitude: lat, Longitude: lon, Week: birdnet.Week(night)}
+		opts.Location = &birdnet.Location{Latitude: lat, Longitude: lon, Week: birdnet.Week(start.In(pacific))}
 	}
 	task.Phase("analyze")
 	ran, err := q.analyzer.Analyze(ctx, []string{local}, opts)
@@ -1001,16 +1010,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 		return result{}, unreadable(ran.Files[0].Error)
 	}
 
-	res = result{model: ran.Model}
-	res.start, res.startKnown = RecordedAt(f.Path)
-	if f.RecordedAt != nil {
-		res.start, res.startKnown = *f.RecordedAt, true
-	}
-	start := res.start
-	if !res.startKnown {
-		// Without a time in the name, the night is all that is known.
-		start = night
-	}
+	res = result{model: ran.Model, start: start, startKnown: startKnown}
 	found := merge(ran.Files[0].Detections)
 	detections := make([]db.Detection, len(found))
 	clips := make([]birdnet.Clip, len(found))
@@ -1021,7 +1021,7 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 			Model:       s.model,
 			AudioFileID: f.ID, RecorderID: card.RecorderID,
 			DetectedAt: start.Add(time.Duration(d.StartSec * float64(time.Second))).UTC().Truncate(time.Millisecond),
-			Night:      f.Night, StartSec: d.StartSec, EndSec: d.EndSec,
+			StartSec:   d.StartSec, EndSec: d.EndSec,
 			ScientificName: d.ScientificName, CommonName: d.CommonName, Confidence: d.Confidence,
 			ReviewStatus: db.ReviewUnreviewed,
 		}
@@ -1337,44 +1337,3 @@ var pacific = func() *time.Location {
 	}
 	return loc
 }()
-
-// namedStart matches the start of a recording in its file name, as recorders
-// write it: "Marymoor_20260723_160624(-0700).wav" began at 16:06:24 on July 23,
-// local time, at UTC-7. The trailing boundary is what keeps a longer run of
-// digits from matching. frontend/js/card-scan.js reads the same timestamp to
-// put a file on its night.
-var namedStart = regexp.MustCompile(`(?:^|\D)(\d{8}_\d{6})(?:\D|$)`)
-
-// namedOffset matches the UTC offset that may follow that time, in
-// parentheses. It is matched on its own rather than as a second group of
-// namedStart: RE2 has no lookahead, so namedStart's trailing boundary consumes
-// the "(" that opens the offset, and one pattern for both silently never
-// matches the offset of the very format it documents.
-var namedOffset = regexp.MustCompile(`\(([+-]\d{4})\)`)
-
-// RecordedAt is when a recording started, from its file name. The UTC offset
-// in the name is used when there is one; otherwise the time is Pacific.
-func RecordedAt(cardPath string) (time.Time, bool) {
-	name := path.Base(cardPath)
-	m := namedStart.FindStringSubmatchIndex(name)
-	if m == nil {
-		return time.Time{}, false
-	}
-	stamp := name[m[2]:m[3]]
-	loc := pacific
-	// Search from the end of the time itself, not the end of the match, which
-	// may have taken the offset's opening parenthesis with it.
-	if o := namedOffset.FindStringSubmatch(name[m[3]:]); o != nil {
-		offset, err := time.Parse("-0700", o[1])
-		if err != nil {
-			return time.Time{}, false
-		}
-		_, secs := offset.Zone()
-		loc = time.FixedZone(o[1], secs)
-	}
-	t, err := time.ParseInLocation("20060102_150405", stamp, loc)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t.UTC(), true
-}

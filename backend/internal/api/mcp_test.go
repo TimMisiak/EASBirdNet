@@ -24,22 +24,24 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
-// seedWeek adds a week of nights, 2026-09-14 to 2026-09-19, to the test
-// program: a card from SW-02 that BirdNET has finished with, one from SW-03
-// still being analyzed, and one from SW-05 being deleted. The detections are
-// chosen to sit on each edge the range tools have to get right.
+// seedWeek adds a week of recording, the evenings of 2026-09-14 to
+// 2026-09-19, to the test program: a card from SW-02 that BirdNET has
+// finished with, one from SW-03 still being analyzed, and one from SW-05
+// being deleted. The detections are chosen to sit on each edge the range
+// tools have to get right.
 func seedWeek(t *testing.T, s db.Store) {
 	t.Helper()
 	ctx := t.Context()
-	card := func(pulledOn, recorderID, name, status, first string, nights int) string {
+	// Recording from 20:00 Pacific on the first evening to 05:00 after the
+	// last.
+	card := func(pulledOn, recorderID, name, status, firstEvening string, evenings int) string {
 		t.Helper()
+		evening, _ := time.ParseInLocation(time.DateOnly, firstEvening, pacific)
+		first, last := evening.Add(20*time.Hour), evening.AddDate(0, 0, evenings).Add(5*time.Hour)
 		u := db.Upload{
 			ID: db.UploadID(pulledOn, recorderID), RecorderID: recorderID,
 			Recorder: db.RecorderSnapshot{Name: name}, PulledOn: pulledOn, Status: status,
-		}
-		start, _ := time.Parse(time.DateOnly, first)
-		for i := range nights {
-			u.Nights = append(u.Nights, db.Night{Date: start.AddDate(0, 0, i).Format(time.DateOnly), Files: 12})
+			FirstRecordingAt: &first, LastRecordingAt: &last, FileCount: evenings * 9,
 		}
 		if _, err := s.CreateUpload(ctx, u); err != nil {
 			t.Fatal(err)
@@ -51,7 +53,7 @@ func seedWeek(t *testing.T, s db.Store) {
 	going := card("2026-09-21", "SW-05", "Soaring Eagle", db.StatusDeleting, "2026-09-15", 2)
 
 	n := 0
-	det := func(recorder, night, at, scientific, common string, confidence float64, status string) db.Detection {
+	det := func(recorder, at, scientific, common string, confidence float64, status string) db.Detection {
 		t.Helper()
 		when, err := time.Parse(time.RFC3339, at)
 		if err != nil {
@@ -59,36 +61,36 @@ func seedWeek(t *testing.T, s db.Store) {
 		}
 		n++
 		return db.Detection{
-			AudioFileID: "af_week_" + string(rune('a'+n)), RecorderID: recorder, DetectedAt: when, Night: night,
+			AudioFileID: "af_week_" + string(rune('a'+n)), RecorderID: recorder, DetectedAt: when,
 			ScientificName: scientific, CommonName: common, Confidence: confidence, ReviewStatus: status,
 		}
 	}
-	corrected := det("SW-02", "2026-09-17", "2026-09-18T04:00:00Z", "Bubo virginianus", "Great Horned Owl", 0.6, db.ReviewConfirmed)
+	corrected := det("SW-02", "2026-09-18T04:00:00Z", "Bubo virginianus", "Great Horned Owl", 0.6, db.ReviewConfirmed)
 	corrected.Review = &db.Review{CorrectedScientificName: "Strix varia", CorrectedCommonName: "Barred Owl"}
-	perch := det("SW-02", "2026-09-15", "2026-09-16T05:30:00Z", "Strix varia", "Barred Owl", 0.95, db.ReviewUnreviewed)
+	perch := det("SW-02", "2026-09-16T05:30:00Z", "Strix varia", "Barred Owl", 0.95, db.ReviewUnreviewed)
 	perch.Model = db.ModelPerch
 	for card, ds := range map[string][]db.Detection{
 		done: {
-			// 22:30 and 03:10 Pacific, the night of the 15th.
-			det("SW-02", "2026-09-15", "2026-09-16T05:30:00Z", "Strix varia", "Barred Owl", 0.91, db.ReviewUnreviewed),
-			det("SW-02", "2026-09-15", "2026-09-16T10:10:00Z", "Strix varia", "Barred Owl", 0.55, db.ReviewConfirmed),
+			// 22:30 Pacific on the 15th, and 03:10 on the 16th.
+			det("SW-02", "2026-09-16T05:30:00Z", "Strix varia", "Barred Owl", 0.91, db.ReviewUnreviewed),
+			det("SW-02", "2026-09-16T10:10:00Z", "Strix varia", "Barred Owl", 0.55, db.ReviewConfirmed),
 			// A reviewer said no.
-			det("SW-02", "2026-09-16", "2026-09-17T08:00:00Z", "Strix varia", "Barred Owl", 0.80, db.ReviewRejected),
-			det("SW-02", "2026-09-16", "2026-09-17T06:00:00Z", "Bubo virginianus", "Great Horned Owl", 0.40, db.ReviewUnreviewed),
-			// 11:30 the morning after the 19th: still the 19th's night.
-			det("SW-02", "2026-09-19", "2026-09-20T18:30:00Z", "Turdus migratorius", "American Robin", 0.70, db.ReviewUnreviewed),
-			// 13:00 that day: the 20th's night, out of range.
-			det("SW-02", "2026-09-20", "2026-09-20T20:00:00Z", "Turdus migratorius", "American Robin", 0.70, db.ReviewUnreviewed),
-			// 04:00 on the 14th: the 13th's night, out of range.
-			det("SW-02", "2026-09-13", "2026-09-14T11:00:00Z", "Strix varia", "Barred Owl", 0.99, db.ReviewUnreviewed),
+			det("SW-02", "2026-09-17T08:00:00Z", "Strix varia", "Barred Owl", 0.80, db.ReviewRejected),
+			det("SW-02", "2026-09-17T06:00:00Z", "Bubo virginianus", "Great Horned Owl", 0.40, db.ReviewUnreviewed),
+			// 11:30 Pacific on the 20th: just inside a range to noon.
+			det("SW-02", "2026-09-20T18:30:00Z", "Turdus migratorius", "American Robin", 0.70, db.ReviewUnreviewed),
+			// 13:00 that day: out of it.
+			det("SW-02", "2026-09-20T20:00:00Z", "Turdus migratorius", "American Robin", 0.70, db.ReviewUnreviewed),
+			// 04:00 on the 14th: before a range from noon.
+			det("SW-02", "2026-09-14T11:00:00Z", "Strix varia", "Barred Owl", 0.99, db.ReviewUnreviewed),
 			corrected,
 			perch,
 		},
 		analyzing: {
-			det("SW-03", "2026-09-15", "2026-09-16T09:00:00Z", "Megascops kennicottii", "Western Screech-Owl", 0.75, db.ReviewUnreviewed),
+			det("SW-03", "2026-09-16T09:00:00Z", "Megascops kennicottii", "Western Screech-Owl", 0.75, db.ReviewUnreviewed),
 		},
 		going: {
-			det("SW-05", "2026-09-15", "2026-09-16T06:00:00Z", "Strix varia", "Barred Owl", 0.9, db.ReviewUnreviewed),
+			det("SW-05", "2026-09-16T06:00:00Z", "Strix varia", "Barred Owl", 0.9, db.ReviewUnreviewed),
 		},
 	} {
 		if err := s.UpsertDetections(ctx, card, ds); err != nil {
@@ -117,7 +119,9 @@ func callAs(email string) *mcp.CallToolRequest {
 	return &mcp.CallToolRequest{Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: email}}}
 }
 
-var theWeek = mcpFilter{From: "2026-09-14", To: "2026-09-19"}
+// theWeek is the week of evenings 14th to 19th, as a caller would ask for it
+// -- noon to noon, so each evening keeps the morning after it.
+var theWeek = mcpFilter{Since: "2026-09-14T12:00:00-07:00", Until: "2026-09-20T12:00:00-07:00"}
 
 func TestDetectionSummary(t *testing.T) {
 	h, _ := toolHandlers(t)
@@ -126,15 +130,17 @@ func TestDetectionSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// In range and not rejected: both barred owls of the 15th, the corrected
-	// one, the horned owl, the robin on the morning edge, and the screech-owl.
-	// Not the deleting card's, Perch's, or either night out of range.
+	// In range and not rejected: the barred owls of the 15th and 16th, the
+	// corrected one, the horned owl, the robin just before noon, and the
+	// screech-owl. Not the deleting card's, Perch's, or either one outside
+	// the range.
 	want := SummaryTotals{Detections: 6, Species: 4, Confirmed: 2, Unreviewed: 4, Rejected: 1}
 	if out.Totals != want {
 		t.Errorf("totals = %+v, want %+v", out.Totals, want)
 	}
-	if out.Range.From != "2026-09-14" || out.Range.To != "2026-09-19" || out.Range.Nights != 6 || out.TimeZone != "America/Los_Angeles" {
-		t.Errorf("range = %+v in %s, want the six nights asked for, Pacific", out.Range, out.TimeZone)
+	if out.Range.Since.Format(time.RFC3339) != "2026-09-14T12:00:00-07:00" || out.Range.Until.Format(time.RFC3339) != "2026-09-20T12:00:00-07:00" ||
+		out.Range.TimeZone != "America/Los_Angeles" {
+		t.Errorf("range = %+v, want the instants asked for, in Pacific", out.Range)
 	}
 
 	var names []string
@@ -145,9 +151,9 @@ func TestDetectionSummary(t *testing.T) {
 		t.Fatalf("species = %v, want the most heard first, then by name", names)
 	}
 	owl := out.Species[0]
-	if owl.Detections != 3 || owl.Nights != 2 || owl.Recorders["SW-02"] != 3 || owl.Confirmed != 2 || owl.Unreviewed != 1 {
-		t.Errorf("barred owl = %d detections on %d nights, %v, %d confirmed, %d unreviewed; want 3 on 2, all SW-02, the correction counted",
-			owl.Detections, owl.Nights, owl.Recorders, owl.Confirmed, owl.Unreviewed)
+	if owl.Detections != 3 || owl.Days != 3 || owl.Recorders["SW-02"] != 3 || owl.Confirmed != 2 || owl.Unreviewed != 1 {
+		t.Errorf("barred owl = %d detections on %d days, %v, %d confirmed, %d unreviewed; want 3 on 3, all SW-02, the correction counted",
+			owl.Detections, owl.Days, owl.Recorders, owl.Confirmed, owl.Unreviewed)
 	}
 	if owl.MaxConfidence != 0.91 || owl.MeanConfidence != 0.687 {
 		t.Errorf("barred owl confidence = max %v mean %v, want 0.91 and 0.687", owl.MaxConfidence, owl.MeanConfidence)
@@ -162,32 +168,52 @@ func TestDetectionSummary(t *testing.T) {
 		t.Errorf("barred owl first heard %s, want 22:30 Pacific on the 15th", got)
 	}
 
-	wantNights := []NightTally{
-		{Night: "2026-09-15", RecorderID: "SW-02", Detections: 2, Species: 1},
-		{Night: "2026-09-15", RecorderID: "SW-03", Detections: 1, Species: 1},
-		{Night: "2026-09-16", RecorderID: "SW-02", Detections: 1, Species: 1},
-		{Night: "2026-09-17", RecorderID: "SW-02", Detections: 1, Species: 1},
-		{Night: "2026-09-19", RecorderID: "SW-02", Detections: 1, Species: 1},
+	// Calendar days, Pacific: the 16th has the owl at 03:10 and the horned
+	// owl at 23:00.
+	wantDays := []DayTally{
+		{Date: "2026-09-15", RecorderID: "SW-02", Detections: 1, Species: 1},
+		{Date: "2026-09-16", RecorderID: "SW-02", Detections: 2, Species: 2},
+		{Date: "2026-09-16", RecorderID: "SW-03", Detections: 1, Species: 1},
+		{Date: "2026-09-17", RecorderID: "SW-02", Detections: 1, Species: 1},
+		{Date: "2026-09-20", RecorderID: "SW-02", Detections: 1, Species: 1},
 	}
-	if !slices.Equal(out.Nights, wantNights) {
-		t.Errorf("nights = %+v, want %+v", out.Nights, wantNights)
+	if !slices.Equal(out.Days, wantDays) {
+		t.Errorf("days = %+v, want %+v", out.Days, wantDays)
 	}
 
-	// Coverage comes from the cards: SW-02's card is analyzed, SW-03's is
-	// still going, SW-05's only card in range is being deleted, and retired
-	// SW-09 has none, so it isn't listed.
+	// Coverage is the cards with recordings in range: SW-02's, analyzed, and
+	// SW-03's, still going. SW-05's only card in range is being deleted and
+	// its last one ended days before, so it has none; retired SW-09 has none
+	// and isn't listed.
 	cov := map[string]RecorderCoverage{}
 	for _, c := range out.Coverage {
 		cov[c.RecorderID] = c
 	}
-	if len(cov) != 3 || len(cov["SW-02"].Analyzed) != 6 || len(cov["SW-02"].Missing) != 0 {
-		t.Errorf("coverage = %+v, want SW-02, SW-03 and SW-05, with SW-02 analyzed all week", out.Coverage)
+	if len(cov) != 3 {
+		t.Errorf("coverage = %+v, want SW-02, SW-03 and SW-05", out.Coverage)
 	}
-	if c := cov["SW-03"]; len(c.Pending) != 5 || !slices.Equal(c.Missing, []string{"2026-09-14"}) {
-		t.Errorf("SW-03 coverage = %+v, want five nights pending and the 14th missing", c)
+	if c := cov["SW-02"].Cards; len(c) != 1 || c[0].Card != "OWL-20260920-SR02" || !c[0].Analyzed ||
+		c[0].FirstRecordingAt.Format(time.RFC3339) != "2026-09-14T20:00:00-07:00" || c[0].LastRecordingAt.Format(time.RFC3339) != "2026-09-20T05:00:00-07:00" {
+		t.Errorf("SW-02 coverage = %+v, want its week's card, analyzed, 20:00 on the 14th to 05:00 on the 20th", c)
 	}
-	if c := cov["SW-05"]; len(c.Missing) != 6 || c.RecorderName != "Soaring Eagle – West Loop" {
-		t.Errorf("SW-05 coverage = %+v, want every night missing, under its current name", c)
+	if c := cov["SW-03"].Cards; len(c) != 1 || c[0].Analyzed {
+		t.Errorf("SW-03 coverage = %+v, want its card, still being analyzed", c)
+	}
+	if c := cov["SW-05"]; len(c.Cards) != 0 || c.RecorderName != "Soaring Eagle – West Loop" {
+		t.Errorf("SW-05 coverage = %+v, want no cards, under its current name", c)
+	}
+
+	// Asked in UTC, the same detections fall on UTC's days and hours.
+	utc := theWeek
+	utc.TimeZone = "UTC"
+	_, out, err = h.toolDetectionSummary(t.Context(), callAs("jane@example.com"), utc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owl = out.Species[0]
+	if owl.Days != 2 || owl.ByHour[5] != 1 || owl.FirstHeard.Format(time.RFC3339) != "2026-09-16T05:30:00Z" ||
+		out.Range.Since.Format(time.RFC3339) != "2026-09-14T19:00:00Z" {
+		t.Errorf("in UTC, barred owl = %d days, by hour %v, first %s, range from %s; want UTC's", owl.Days, owl.ByHour, owl.FirstHeard, out.Range.Since)
 	}
 }
 
@@ -221,10 +247,13 @@ func TestDetectionSummaryFilters(t *testing.T) {
 		says   string
 	}{
 		{"an unknown recorder", mcpFilter{Recorders: []string{"SW-99"}}, "list_recorders"},
-		{"a backwards range", mcpFilter{From: "2026-09-19", To: "2026-09-14"}, "on or before"},
-		{"a long range", mcpFilter{From: "2026-08-01", To: "2026-09-19"}, "at most 31"},
-		{"a bad date", mcpFilter{To: "19 September"}, "YYYY-MM-DD"},
+		{"a backwards range", mcpFilter{Since: "2026-09-19T00:00:00Z", Until: "2026-09-14T00:00:00Z"}, "before 'until'"},
+		{"a long range", mcpFilter{Since: "2026-08-01T00:00:00Z", Until: "2026-09-19T00:00:00Z"}, "at most 31"},
+		{"a date with no time", mcpFilter{Until: "2026-09-19"}, "RFC 3339"},
+		{"a time with no offset", mcpFilter{Since: "2026-09-12T20:00:00"}, "RFC 3339"},
 		{"a confidence over 1", mcpFilter{MinConfidence: 1.5}, "from 0 to 1"},
+		{"an unknown zone", mcpFilter{TimeZone: "Mars/Olympus_Mons"}, "IANA"},
+		{"the server's zone", mcpFilter{TimeZone: "Local"}, "IANA"},
 	} {
 		_, _, err := h.toolDetectionSummary(ctx, callAs("jane@example.com"), tc.filter)
 		var refused errMCP
@@ -234,17 +263,17 @@ func TestDetectionSummaryFilters(t *testing.T) {
 	}
 }
 
-func TestMCPRangeDefaultsToTheLastWeekOfNights(t *testing.T) {
-	// 10 a.m. Pacific on the 25th: last night was the 24th's.
+func TestMCPRangeDefaultsToTheLastWeek(t *testing.T) {
 	now := time.Date(2026, time.September, 25, 17, 0, 0, 0, time.UTC)
 	rng, err := mcpFilter{}.resolve(now, nil)
-	if err != nil || rng.From != "2026-09-18" || rng.To != "2026-09-24" || rng.Nights != 7 {
-		t.Errorf("default range = %+v, %v; want the seven nights 18th to 24th", rng, err)
+	if err != nil || !rng.Until.Equal(now) || !rng.Since.Equal(now.Add(-7*24*time.Hour)) ||
+		rng.Until.Format(time.RFC3339) != "2026-09-25T10:00:00-07:00" {
+		t.Errorf("default range = %+v, %v; want the seven days to now, written in Pacific", rng, err)
 	}
-	// Across the change from daylight time, a night is still a night.
-	rng, _ = mcpFilter{From: "2026-10-30", To: "2026-11-02"}.resolve(now, nil)
-	if rng.Nights != 4 || len(rng.nightList()) != 4 || rng.nightList()[3] != "2026-11-02" {
-		t.Errorf("a range over the clocks going back = %+v, want four nights", rng)
+	// Naming only the end takes the week before it.
+	rng, _ = mcpFilter{Until: "2026-09-01T00:00:00Z"}.resolve(now, nil)
+	if rng.Since.UTC().Format(time.RFC3339) != "2026-08-25T00:00:00Z" {
+		t.Errorf("a range with only an end starts %s, want the week before it", rng.Since)
 	}
 }
 
@@ -261,14 +290,20 @@ func TestListRecorders(t *testing.T) {
 	if len(got) != 4 || !got["SW-09"].Retired {
 		t.Errorf("recorders = %+v, want all four, SW-09 marked retired", out.Recorders)
 	}
-	// The deleting card's nights don't count; SW-05's latest is its older card.
-	if r := got["SW-02"]; r.LatestNight != "2026-09-19" || r.LatestAnalyzedNight != "2026-09-19" {
+	at := func(t *time.Time) string {
+		if t == nil {
+			return ""
+		}
+		return t.UTC().Format(time.RFC3339)
+	}
+	// The deleting card doesn't count; SW-05's latest is its older card.
+	if r := got["SW-02"]; at(r.LatestRecordingAt) != "2026-09-20T12:00:00Z" || at(r.LatestAnalyzedRecordingAt) != "2026-09-20T12:00:00Z" {
 		t.Errorf("SW-02 = %+v, want its week's card as the latest", r)
 	}
-	if r := got["SW-03"]; r.LatestNight != "2026-09-19" || r.LatestAnalyzedNight != "2026-08-20" {
+	if r := got["SW-03"]; at(r.LatestRecordingAt) != "2026-09-20T12:00:00Z" || at(r.LatestAnalyzedRecordingAt) != "2026-08-21T12:00:00Z" {
 		t.Errorf("SW-03 = %+v, want the week still analyzing, and its August card the latest analyzed", r)
 	}
-	if r := got["SW-05"]; r.LatestNight != "2026-09-12" {
+	if r := got["SW-05"]; at(r.LatestRecordingAt) != "2026-09-13T12:00:00Z" {
 		t.Errorf("SW-05 = %+v, want its September card, not the one being deleted", r)
 	}
 }
@@ -332,8 +367,8 @@ func TestDetectionsExport(t *testing.T) {
 	for _, r := range rows[1:] {
 		byTime[r[col("heardAt")]] = r
 	}
-	if r := byTime["2026-09-20T11:30:00-07:00"]; r == nil || r[col("night")] != "2026-09-19" || r[col("recorderName")] != "Marymoor – card name" {
-		t.Errorf("the morning robin = %v, want it on the 19th's night, named as its card has it", r)
+	if r := byTime["2026-09-20T11:30:00-07:00"]; r == nil || r[col("recorderName")] != "Marymoor – card name" {
+		t.Errorf("the robin before noon = %v, want it in range, named as its card has it", r)
 	}
 	if r := byTime["2026-09-17T21:00:00-07:00"]; r == nil || r[col("scientificName")] != "Strix varia" || r[col("birdnetScientificName")] != "Bubo virginianus" || r[col("reviewStatus")] != db.ReviewConfirmed {
 		t.Errorf("the corrected owl = %v, want the correction and BirdNET's label side by side", r)
@@ -373,7 +408,7 @@ func TestDetectionsExport(t *testing.T) {
 type failingScan struct{ db.Store }
 
 func (failingScan) EachDetection(_ context.Context, _ db.DetectionFilter, fn func(db.Detection) error) error {
-	fn(db.Detection{ID: "det_1", Night: "2026-09-15"})
+	fn(db.Detection{ID: "det_1"})
 	return errors.New("cosmos: connection reset")
 }
 
@@ -392,7 +427,7 @@ func TestAnExportThatFailsPartWayIsAborted(t *testing.T) {
 			t.Errorf("a failed export recovered %v, want http.ErrAbortHandler", r)
 		}
 	}()
-	h.exportDetections(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, strings.TrimPrefix(out.URL, testPublicURL), nil))
+	h.serveMCPExport(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, strings.TrimPrefix(out.URL, testPublicURL), nil))
 }
 
 // TestMCPWithTheSDKClient connects the MCP SDK's own client to a real server
@@ -486,7 +521,7 @@ func TestMCPWithTheSDKClient(t *testing.T) {
 	}
 
 	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
-		Name: "detection_summary", Arguments: map[string]any{"from": "2026-09-14", "to": "2026-09-19", "recorders": []string{"SW-02"}},
+		Name: "detection_summary", Arguments: map[string]any{"since": theWeek.Since, "until": theWeek.Until, "recorders": []string{"SW-02"}},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("detection_summary = %v, %+v", err, res)
@@ -505,7 +540,7 @@ func TestMCPWithTheSDKClient(t *testing.T) {
 		t.Errorf("a summary for an unknown recorder = %v, %+v; want a tool error the model can read", err, res)
 	}
 
-	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "detections_export", Arguments: map[string]any{"from": "2026-09-14", "to": "2026-09-19"}})
+	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "detections_export", Arguments: map[string]any{"since": theWeek.Since, "until": theWeek.Until}})
 	if err != nil || res.IsError {
 		t.Fatalf("detections_export = %v, %+v", err, res)
 	}

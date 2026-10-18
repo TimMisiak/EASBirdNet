@@ -130,7 +130,7 @@ function initial() {
     upload: null,
     /**
      * The card's files in the order they are sent, once the card has been read
-     * in this tab: {path, bytes, night, file, state, sent, error, compressing}.
+     * in this tab: {path, bytes, date, file, state, sent, error, compressing}.
      * state is "waiting", "sending", "done", "already" (the server had it
      * before this tab sent anything) or "failed"; compressing is true while a
      * file that is sending is still being encoded. sent is in the card's
@@ -186,13 +186,7 @@ function registration(card) {
     stationId: state.stationId,
     pulledOn: state.pulledOn,
     notes: state.notes,
-    nights: card.nights.map(({ date, files, bytes, flag }) => ({
-      date,
-      files,
-      bytes,
-      ...(flag ? { flag } : {}),
-    })),
-    files: card.files.map(({ path, bytes, night }) => ({ path, bytes, night })),
+    files: card.files.map(({ path, bytes }) => ({ path, bytes })),
   };
 }
 

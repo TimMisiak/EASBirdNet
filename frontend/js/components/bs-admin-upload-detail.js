@@ -298,7 +298,7 @@ class AdminUploadDetail extends BaseElement {
                    <thead>
                      <tr>
                        <th scope="col">File</th>
-                       <th scope="col">Night</th>
+                       <th scope="col">Recorded</th>
                        <th scope="col" style="text-align: right;">Size</th>
                        <th scope="col">Status</th>
                        <th scope="col" style="text-align: right;">Detections</th>
@@ -341,7 +341,7 @@ class AdminUploadDetail extends BaseElement {
             <span class="path">${escapeHTML(file.path).replaceAll("/", "/<wbr>")}</span>
           </span>
         </td>
-        <td class="nowrap">${escapeHTML(shortDate(file.night))}</td>
+        <td class="nowrap">${file.recordedAt ? escapeHTML(dateAtTime(file.recordedAt)) : "—"}</td>
         <td class="num">${escapeHTML(byteSize(file.bytes))}</td>
         <td>
           <bs-chip kind="${chip.kind}">${escapeHTML(chip.label)}</bs-chip>

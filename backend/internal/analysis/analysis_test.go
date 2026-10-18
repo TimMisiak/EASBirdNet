@@ -222,7 +222,7 @@ func (f *fixture) card(status string, paths ...string) {
 	}
 	var docs []db.AudioFile
 	for _, p := range paths {
-		doc := db.AudioFile{RecorderID: "SW-02", Path: p, SizeBytes: 100, Night: "2026-09-12", Status: db.AudioUploaded}
+		doc := db.AudioFile{RecorderID: "SW-02", Path: p, SizeBytes: 100, Status: db.AudioUploaded}
 		if !strings.Contains(p, "missing") {
 			doc.BlobName = storage.Name(ref + "/" + strings.ReplaceAll(path.Base(p), ".", "_"))
 			local := filepath.Join(f.dir, filepath.FromSlash(doc.BlobName))
@@ -340,9 +340,9 @@ func TestACardIsAnalyzedFileByFile(t *testing.T) {
 		t.Fatalf("got %d detections for the owl file, want 2", len(dets))
 	}
 	d := dets[0]
-	if want := start.Add(732 * time.Second); !d.DetectedAt.Equal(want) || d.Night != "2026-09-12" || d.RecorderID != "SW-02" ||
+	if want := start.Add(732 * time.Second); !d.DetectedAt.Equal(want) || d.RecorderID != "SW-02" ||
 		d.ReviewStatus != db.ReviewUnreviewed || d.EndSec != 735 || d.Confidence == 0 {
-		t.Errorf("detection = %+v; want heard at %v, unreviewed, on the file's night", d, want)
+		t.Errorf("detection = %+v; want heard at %v, unreviewed, the file's start plus its offset", d, want)
 	}
 	// Each detection's clip is cut around it and stored under its id.
 	for _, d := range dets {
@@ -521,7 +521,7 @@ func TestRunPicksUpWhereARestartLeftOff(t *testing.T) {
 	blob := storage.Name(later + "/q")
 	os.MkdirAll(filepath.Join(f.dir, "uploads", later), 0o755)
 	os.WriteFile(filepath.Join(f.dir, filepath.FromSlash(blob)), []byte(quietFile), 0o644)
-	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "q.wav", Night: "2026-09-13", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
+	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "q.wav", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
 		t.Fatal(err)
 	}
 	f.queue.Enqueue(later)
@@ -685,7 +685,7 @@ func TestAFailedFileWaitsItsTurnWithoutHoldingUpOthers(t *testing.T) {
 	blob := storage.Name(later + "/o")
 	os.MkdirAll(filepath.Join(f.dir, "uploads", later), 0o755)
 	os.WriteFile(filepath.Join(f.dir, filepath.FromSlash(blob)), []byte(owlFile), 0o644)
-	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "o.wav", Night: "2026-09-12", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
+	if err := f.store.UpsertAudioFiles(t.Context(), later, []db.AudioFile{{Path: "o.wav", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.queue.drain(t.Context()); err != nil {
@@ -876,7 +876,7 @@ func TestRecordedAt(t *testing.T) {
 		"20260115_220000_001(+0100).wav":      "2026-01-15T21:00:00Z",
 	}
 	for p, want := range cases {
-		got, ok := RecordedAt(p)
+		got, ok := db.RecordedAt(p)
 		switch {
 		case want == "" && ok:
 			t.Errorf("RecordedAt(%q) = %v, want none", p, got)

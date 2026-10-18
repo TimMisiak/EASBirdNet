@@ -670,3 +670,64 @@ func TestRequestLoggerRecordsStatusAndBytes(t *testing.T) {
 		t.Errorf("logged %+v, want a PATCH answered 204 with a 5-byte body", line)
 	}
 }
+
+// TestStartupDatesCardsFromTheirFiles holds the one-time pass over cards
+// registered before cards carried their recording times: each is dated from
+// its files' names, a card already dated is left alone, and a card whose
+// names carry no time stays undated.
+func TestStartupDatesCardsFromTheirFiles(t *testing.T) {
+	ctx := t.Context()
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	dated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, u := range []db.Upload{
+		{ID: "OWL-20260914-SR02", RecorderID: "SW-02", Status: db.StatusInReview},
+		{ID: "OWL-20260914-SR03", RecorderID: "SW-03", Status: db.StatusInReview},
+		{ID: "OWL-20260914-SR04", RecorderID: "SW-04", Status: db.StatusInReview, FirstRecordingAt: &dated, LastRecordingAt: &dated},
+	} {
+		if _, err := store.CreateUpload(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analyzed := time.Date(2026, 9, 13, 3, 0, 0, 0, time.UTC)
+	for ref, files := range map[string][]db.AudioFile{
+		"OWL-20260914-SR02": {
+			{Path: "DATA/Marymoor_20260912_200000(-0700).WAV"},
+			{Path: "DATA/Marymoor_20260913_050000(-0700).WAV"},
+			// Analysis read this one's start from the audio already.
+			{Path: "DATA/later.WAV", RecordedAt: &analyzed},
+			// Off the card's list: not the card's recording.
+			{Path: "DATA/Marymoor_20260920_050000(-0700).WAV", StatusDetail: db.AudioDetailNotOnCard},
+		},
+		"OWL-20260914-SR03": {{Path: "DATA/a.WAV"}},
+		"OWL-20260914-SR04": {{Path: "DATA/Marymoor_20260912_200000(-0700).WAV"}},
+	} {
+		if err := store.UpsertAudioFiles(ctx, ref, files); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := backfillRecordingTimes(ctx, store, log); err != nil {
+		t.Fatal(err)
+	}
+	at := func(ref string) string {
+		u, _ := store.GetUpload(ctx, ref)
+		if u.FirstRecordingAt == nil {
+			return "undated"
+		}
+		return u.FirstRecordingAt.UTC().Format(time.RFC3339) + " to " + u.LastRecordingAt.UTC().Format(time.RFC3339)
+	}
+	for ref, want := range map[string]string{
+		"OWL-20260914-SR02": "2026-09-13T03:00:00Z to 2026-09-13T12:00:00Z",
+		"OWL-20260914-SR03": "undated",
+		"OWL-20260914-SR04": "2026-01-01T00:00:00Z to 2026-01-01T00:00:00Z",
+	} {
+		if got := at(ref); got != want {
+			t.Errorf("%s = %s, want %s", ref, got, want)
+		}
+	}
+}

@@ -164,7 +164,7 @@ func TestANewCardDoesNotWaitBehindPerch(t *testing.T) {
 			blob := storage.Name(later + "/q")
 			os.MkdirAll(filepath.Join(f.dir, "uploads", later), 0o755)
 			os.WriteFile(filepath.Join(f.dir, filepath.FromSlash(blob)), []byte("later.wav"), 0o644)
-			if err := f.store.UpsertAudioFiles(context.Background(), later, []db.AudioFile{{Path: "later.wav", Night: "2026-09-13", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
+			if err := f.store.UpsertAudioFiles(context.Background(), later, []db.AudioFile{{Path: "later.wav", Status: db.AudioUploaded, BlobName: blob}}); err != nil {
 				return birdnet.File{}, err
 			}
 		}

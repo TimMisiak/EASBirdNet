@@ -236,7 +236,7 @@ class UploadDetails extends BaseElement {
             <ul>
               <li>Card in the reader, reader plugged into this computer</li>
               <li>Laptop plugged into power</li>
-              <li>A full card (about 14 nights, ~128 GB) takes roughly 2–3 hours on home Wi-Fi — wired is faster</li>
+              <li>A full card (about two weeks of recording, ~128 GB) takes roughly 2–3 hours on home Wi-Fi — wired is faster</li>
               <li>Keep this tab open; you can use other apps meanwhile</li>
             </ul>
           </div>

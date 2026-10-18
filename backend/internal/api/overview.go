@@ -49,9 +49,8 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 			program.Recorders++
 		}
 	}
-	// A recorder-night is counted once however many cards list it.
-	year := yearStart.Format("2006-")
-	nights := map[[2]string]bool{}
+	// A card's recordings count for the year its first one started in, or
+	// that it was pulled in when no file name said.
 	stationName := map[string]string{}
 	// A card being deleted counts for nothing, nor does what was heard on it.
 	deleting := map[string]bool{}
@@ -61,17 +60,18 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 			continue
 		}
 		stationName[u.ID] = u.Recorder.Name
-		for _, n := range u.Nights {
-			if strings.HasPrefix(n.Date, year) {
-				nights[[2]string{u.RecorderID, n.Date}] = true
-			}
+		year := u.PulledOn
+		if u.FirstRecordingAt != nil {
+			year = u.FirstRecordingAt.In(pacific).Format(time.DateOnly)
+		}
+		if strings.HasPrefix(year, yearStart.Format("2006-")) {
+			program.Recordings += u.FileCount
 		}
 	}
-	program.NightsRecorded = len(nights)
 
 	type tally struct {
 		Species
-		nights   map[string]bool
+		days     map[string]bool
 		stations map[string]int
 	}
 	bySpecies := map[string]*tally{}
@@ -90,13 +90,13 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 		if t == nil {
 			t = &tally{
 				Species:  Species{ScientificName: scientific, CommonName: common},
-				nights:   map[string]bool{},
+				days:     map[string]bool{},
 				stations: map[string]int{},
 			}
 			bySpecies[scientific] = t
 		}
 		t.Detections++
-		t.nights[d.Night] = true
+		t.days[dateOf(d.DetectedAt)] = true
 		// Where the card says it was recorded, not where the unit is now.
 		name := stationName[d.UploadID]
 		if name == "" {
@@ -110,7 +110,7 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 
 	species := make([]Species, 0, len(bySpecies))
 	for _, t := range bySpecies {
-		t.Nights = len(t.nights)
+		t.Days = len(t.days)
 		t.Stations = make([]string, 0, len(t.stations))
 		for name := range t.stations {
 			t.Stations = append(t.Stations, name)

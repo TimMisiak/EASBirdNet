@@ -94,9 +94,13 @@ type Upload struct {
 	UserID   string           `json:"userId"`
 	UserName string           `json:"userName"`
 
-	PulledOn string  `json:"pulledOn"` // YYYY-MM-DD
-	Notes    string  `json:"notes,omitempty"`
-	Nights   []Night `json:"nights"`
+	PulledOn string `json:"pulledOn"` // YYYY-MM-DD
+	Notes    string `json:"notes,omitempty"`
+	// FirstRecordingAt and LastRecordingAt are when the card's first and last
+	// recordings started, read from the file names when the card is
+	// registered (RecordedAt). They are absent when no file name says.
+	FirstRecordingAt *time.Time `json:"firstRecordingAt,omitempty"`
+	LastRecordingAt  *time.Time `json:"lastRecordingAt,omitempty"`
 
 	FileCount     int   `json:"fileCount"`
 	TotalBytes    int64 `json:"totalBytes"`
@@ -140,16 +144,6 @@ type RecorderSnapshot struct {
 	Name      string  `json:"name"`
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
-}
-
-// Night is one dusk-to-dawn block of recording found on a card.
-type Night struct {
-	Date  string `json:"date"` // YYYY-MM-DD, the evening the night began
-	Files int    `json:"files"`
-	Bytes int64  `json:"bytes"`
-	// Flag is "" when the night looks normal, otherwise a short reason the
-	// volunteer should eyeball it ("short", "partial").
-	Flag string `json:"flag,omitempty"`
 }
 
 // Analysis records how BirdNET was run over a card, so a detection can be
@@ -241,8 +235,8 @@ type AudioFile struct {
 	// Path is the file's path relative to the card root, with forward slashes.
 	Path      string `json:"path"`
 	SizeBytes int64  `json:"sizeBytes"`
-	Night     string `json:"night"` // YYYY-MM-DD, the evening the night began
-	// RecordedAt is when the recording started, when it is known.
+	// RecordedAt is when the recording started: from its file name when the
+	// card is registered (RecordedAt), and from the audio when it is read.
 	RecordedAt  *time.Time `json:"recordedAt,omitempty"`
 	DurationSec float64    `json:"durationSec,omitempty"`
 	SampleRate  int        `json:"sampleRate,omitempty"`
@@ -302,7 +296,6 @@ type Detection struct {
 	RecorderID  string `json:"recorderId"`
 	// DetectedAt is the file's start time plus StartSec.
 	DetectedAt     time.Time `json:"detectedAt"`
-	Night          string    `json:"night"` // YYYY-MM-DD
 	StartSec       float64   `json:"startSec"`
 	EndSec         float64   `json:"endSec"`
 	ScientificName string    `json:"scientificName"`

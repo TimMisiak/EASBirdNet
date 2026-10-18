@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, panels, tables, typography } from "../shared-styles.js";
-import { byteSize, count, duration, longDate, megabits, nightRange, shortDate } from "../format.js";
+import { byteSize, count, duration, longDate, megabits, dateRange, shortDate } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 import * as session from "../session.js";
@@ -8,9 +8,9 @@ import * as speedTest from "../speed-test.js";
 
 /**
  * <bs-upload-check> -- step 2: what we found on the card, before anything is
- * sent. The point of the screen is the night-by-night table: a volunteer knows
- * whether a short night means flat batteries, and we don't, so the odd nights
- * are highlighted and left for them to explain in the notes.
+ * sent. The point of the screen is the day-by-day table: a volunteer knows
+ * whether a short day means flat batteries, and we don't, so the odd days are
+ * highlighted and left for them to explain in the notes.
  *
  * "Test connection" is here, with the card chosen and nothing yet sent, so a
  * volunteer whose uploads crawl can see whether it's the card reader or the
@@ -85,8 +85,10 @@ class UploadCheck extends BaseElement {
       return;
     }
 
-    const nights = upload.nights ?? [];
-    const flagged = nights.filter((n) => n.flag).length;
+    // The days come from the card as it was just read: the server keeps the
+    // files, not how they fall across days.
+    const days = card?.days ?? [];
+    const flagged = days.filter((d) => d.flag === "short").length;
     // A resumed card only has what's missing left to send.
     const remaining = upload.totalBytes - upload.bytesUploaded;
     const already = upload.filesUploaded;
@@ -141,7 +143,7 @@ class UploadCheck extends BaseElement {
       </div>
 
       <div class="stats">
-        ${stat(count(nights.length), `nights · ${nightRange(nights)}`)}
+        ${stat(count(days.length), `days · ${dateRange(days[0]?.date, days.at(-1)?.date)}`)}
         ${
           already
             ? stat(count(upload.fileCount - already), `of ${count(upload.fileCount)} audio files left`)
@@ -157,14 +159,14 @@ class UploadCheck extends BaseElement {
             <table>
               <thead>
                 <tr>
-                  <th scope="col">Night</th>
+                  <th scope="col">Recorded on</th>
                   <th scope="col" style="text-align: right;">Files</th>
                   <th scope="col" style="text-align: right;">Size</th>
                   <th scope="col">Check</th>
                 </tr>
               </thead>
               <tbody>
-                ${nights.map(nightRow).join("")}
+                ${days.map(dayRow).join("")}
               </tbody>
             </table>
           </div>
@@ -204,7 +206,7 @@ class UploadCheck extends BaseElement {
             flagged
               ? `<div class="panel panel--notice">
                    <p>
-                     ${flagged === 1 ? "One night looks" : `${count(flagged)} nights look`} unusual.
+                     ${flagged === 1 ? "One day has" : `${count(flagged)} days have`} fewer recordings than the rest.
                      That's fine — just check the notes say why, or
                      <a href="/app/upload">edit the details</a>.
                    </p>
@@ -276,17 +278,18 @@ function verdict({ read, parallel }) {
 }
 
 const REASONS = {
-  short: "⚠ Short night — fewer files than the others",
-  partial: "⚠ Partial — card was pulled this morning",
+  short: "⚠ Fewer files than the other days",
+  first: "First day on the card",
+  last: "Last day on the card",
 };
 
-function nightRow(night) {
+function dayRow(day) {
   return `
-    <tr data-flagged="${Boolean(night.flag)}">
-      <td>${escapeHTML(shortDate(night.date))}</td>
-      <td class="num" style="font-size: 0.8125rem;">${count(night.files)}</td>
-      <td class="num muted" style="font-size: 0.8125rem;">${byteSize(night.bytes)}</td>
-      <td class="check">${escapeHTML(REASONS[night.flag] ?? "✓ looks normal")}</td>
+    <tr data-flagged="${day.flag === "short"}">
+      <td>${escapeHTML(shortDate(day.date))}</td>
+      <td class="num" style="font-size: 0.8125rem;">${count(day.files)}</td>
+      <td class="num muted" style="font-size: 0.8125rem;">${byteSize(day.bytes)}</td>
+      <td class="check">${escapeHTML(REASONS[day.flag] ?? "✓ looks normal")}</td>
     </tr>
   `;
 }

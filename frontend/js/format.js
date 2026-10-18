@@ -60,7 +60,7 @@ export function longDate(value) {
   return d ? dateOnly.format(d) : "";
 }
 
-/** "Sep 7" -- for the night-by-night lists, where the year is obvious. */
+/** "Sep 7" -- for the day-by-day lists, where the year is obvious. */
 export function shortDate(value) {
   const d = toDate(value);
   return d ? dayMonth.format(d) : "";
@@ -82,12 +82,11 @@ export function clock(seconds) {
   return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
 }
 
-/** "Aug 24 – Sep 6" for a card's span of nights. */
-export function nightRange(nights) {
-  if (!nights?.length) return "";
-  const first = shortDate(nights[0].date);
-  const last = shortDate(nights[nights.length - 1].date);
-  return first === last ? first : `${first} – ${last}`;
+/** "Aug 24 – Sep 6" for a span of dates or times, or one date when they share it. */
+export function dateRange(from, to) {
+  const first = shortDate(from);
+  const last = shortDate(to);
+  return first === last ? first : [first, last].filter(Boolean).join(" – ");
 }
 
 /** "about 40 minutes left", rounded the way a person would say it. */

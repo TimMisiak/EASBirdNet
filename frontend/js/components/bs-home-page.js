@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "01",
     title: "Recorders listen",
-    body: "A SwiftOne at each station records one-hour files from dusk to dawn, about 14 nights on a card.",
+    body: "A SwiftOne at each station records one-hour files from dusk to dawn, about two weeks on a card.",
   },
   {
     n: "02",
@@ -26,7 +26,7 @@ const STEPS = [
   {
     n: "03",
     title: "BirdNET listens back",
-    body: "The model scans every night of audio and flags anything that might be an owl.",
+    body: "The model scans every hour of audio and flags anything that might be an owl.",
   },
   {
     n: "04",
@@ -189,12 +189,12 @@ class HomePage extends BaseElement {
             <h1>We leave recorders in the woods and listen for owls.</h1>
             <p>
               Volunteers carry SD cards home from five stations across the Eastside. Every
-              night of audio runs through BirdNET, and trained volunteers confirm what the
+              hour of audio runs through BirdNET, and trained volunteers confirm what the
               model heard before it appears here.
             </p>
             <div class="figures">
               ${figure(program.recorders, "recorders in the field")}
-              ${figure(program.nightsRecorded, "nights recorded this year")}
+              ${figure(program.recordings, "recordings this year")}
               ${figure(program.confirmedDetections, "confirmed owl detections")}
             </div>
           </div>
@@ -209,7 +209,7 @@ class HomePage extends BaseElement {
 
       <section id="detections" tabindex="-1">
         <div class="section-head">
-          <h2>Confirmed in the last ${data?.windowDays ?? 7} nights</h2>
+          <h2>Confirmed in the last ${data?.windowDays ?? 7} days</h2>
           ${data ? `<div class="updated">updated ${escapeHTML(stamp(data.updatedAt))}</div>` : ""}
         </div>
         ${

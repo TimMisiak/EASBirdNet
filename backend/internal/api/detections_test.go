@@ -28,7 +28,7 @@ func TestListEveryDetection(t *testing.T) {
 			t.Fatal(err)
 		}
 		return db.Detection{
-			AudioFileID: "af_list", DetectedAt: when, Night: "2026-08-19", StartSec: float64(when.Hour()),
+			AudioFileID: "af_list", DetectedAt: when, StartSec: float64(when.Hour()),
 			ScientificName: scientific, CommonName: common, Confidence: confidence,
 		}
 	}
@@ -78,7 +78,7 @@ func TestListEveryDetection(t *testing.T) {
 		}
 	}
 	if d := all.Detections[0]; d.CommonName != "Western Screech-Owl" || d.Reference != "OWL-20260913-SR05" ||
-		d.StationName != "Soaring Eagle – East Loop" || d.Night != "2026-09-12" {
+		d.StationName != "Soaring Eagle – East Loop" {
 		t.Errorf("newest = %+v, want the screech-owl on OWL-20260913-SR05, at the card's station name", d)
 	}
 	// BirdNET's labels, not a reviewer's correction.
@@ -158,7 +158,7 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.UpsertDetections(t.Context(), "OWL-20260821-SR03", []db.Detection{{
-		AudioFileID: "af_old", DetectedAt: old, Night: "2026-05-31", StartSec: 9,
+		AudioFileID: "af_old", DetectedAt: old, StartSec: 9,
 		ScientificName: "Tyto alba", CommonName: "Barn Owl", Confidence: 0.8,
 	}}); err != nil {
 		t.Fatal(err)
@@ -300,8 +300,8 @@ func TestExportDetections(t *testing.T) {
 		t.Errorf("export = %d rows (%s), want the list's %d in its order (%s)",
 			len(got.Detections), ids(got.Detections), list.Total, ids(list.Detections))
 	}
-	if d := got.Detections[0]; d.StationName == "" || d.Night == "" || d.Reference == "" {
-		t.Errorf("exported row = %+v, want its card, station and night as the list has them", d)
+	if d := got.Detections[0]; d.StationName == "" || d.DetectedAt.IsZero() || d.Reference == "" {
+		t.Errorf("exported row = %+v, want its card, station and time as the list has them", d)
 	}
 	if got.Sort != sortConfidence || got.Order != "asc" || got.Model != db.ModelBirdNET || got.Window != nil ||
 		got.Until != nil || !got.ExportedAt.Equal(testNow) {
@@ -348,7 +348,7 @@ func TestPerchDetectionsAreListedApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	perch := db.Detection{
-		Model: db.ModelPerch, AudioFileID: "af_perch", DetectedAt: testNow.Add(-24 * time.Hour), Night: "2026-09-12", StartSec: 5, EndSec: 10,
+		Model: db.ModelPerch, AudioFileID: "af_perch", DetectedAt: testNow.Add(-24 * time.Hour), StartSec: 5, EndSec: 10,
 		ScientificName: "Megascops kennicottii", CommonName: "Western Screech-Owl", Confidence: 0.6, ReviewStatus: db.ReviewConfirmed,
 	}
 	if err := store.UpsertDetections(ctx, ref, []db.Detection{perch}); err != nil {

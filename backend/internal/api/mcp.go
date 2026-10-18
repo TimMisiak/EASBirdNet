@@ -25,62 +25,72 @@ import (
 // The MCP endpoint is how an LLM tool reads Birdsense, as whoever connected
 // it (oauth.go). It has three tools, all read-only:
 //
-//   - list_recorders: the recorders, and the latest night each has data for.
-//   - detection_summary: a range of nights, aggregated here -- by species, by
-//     night and recorder, by hour -- small enough to go into a model's
-//     context whole. A week of five recorders is ~140,000 detections, which
-//     no context holds; its summary is a few thousand tokens.
-//   - detections_export: a link to the same range as CSV, one row per
+//   - list_recorders: the recorders, and when each one last recorded.
+//   - detection_summary: a span of time, aggregated here -- by species, by
+//     day and recorder, by hour -- small enough to go into a model's context
+//     whole. A week of five recorders is ~140,000 detections, which no
+//     context holds; its summary is a few thousand tokens.
+//   - detections_export: a link to the same span as CSV, one row per
 //     detection, for a client that can fetch it and work on it in code.
 //
-// Both range tools take the same filters (mcpFilter) and read the range
+// A span is two instants the caller names, and nothing else: which hours of
+// which days make up "last week's nights" is the caller's to work out. The
+// time zone the caller names is only how the answer counts days and hours
+// and writes its times.
+//
+// Both range tools take the same filters (mcpFilter) and read the span
 // through once with db.EachDetection, a page at a time: no ceiling, because
-// nothing holds the range. What bounds the read is maxMCPNights and mcpScans.
+// nothing holds the span. What bounds the read is maxMCPSpan and mcpScans.
 
 const (
-	// defaultMCPNights is the range a request that names none gets: the week
-	// of nights before today.
-	defaultMCPNights = 7
-	// maxMCPNights bounds one request's range. A month of five recorders is
+	// defaultMCPSpan is the span a request that names none gets: the week
+	// before now.
+	defaultMCPSpan = 7 * 24 * time.Hour
+	// maxMCPSpan bounds one request's span. A month of five recorders is
 	// ~600,000 detections: a minute or two of reading, which is about what a
 	// client will wait for a tool.
-	maxMCPNights = 31
+	maxMCPSpan = 31 * 24 * time.Hour
 	// mcpScans is how many range reads run at once. Each is a cross-partition
-	// read of the whole range, so two at once are already most of what
+	// read of the whole span, so two at once are already most of what
 	// serverless Cosmos will serve before throttling; a third waits its turn.
 	mcpScans = 2
 	// exportLinkLife is how long a detections_export link works. The link is
 	// the credential, so it lives long enough to be fetched and no longer.
 	exportLinkLife = 30 * time.Minute
 	exportPath     = mcpPath + "/export"
+	// defaultMCPZone is the time zone an answer is given in when the request
+	// names none: where the recorders are.
+	defaultMCPZone = "America/Los_Angeles"
 )
 
 // mcpInstructions is what a client is told about the server as a whole.
-const mcpInstructions = `Birdsense holds BirdNET detections of bird calls from Eastside Audubon's acoustic recorders around East King County, Washington.
+const mcpInstructions = `Birdsense holds BirdNET detections of bird calls from Eastside Audubon's acoustic recorders around East King County, Washington (Pacific time, America/Los_Angeles).
 
-Times are Pacific (America/Los_Angeles). Recorders run dusk to dawn, so data is grouped by night: a night is named by the date of the evening it began, and runs from noon that day to noon the next.
+Every time range is two RFC 3339 timestamps, since (inclusive) and until (exclusive), and nothing else: choose the instants that cover what you mean. Recorders usually record from dusk to dawn, so an evening and the morning after it fall on two dates. Answers give every time with its UTC offset, and count days and hours in the timeZone you ask for (Pacific by default).
 
-Cards are collected from the recorders every week or two, so the most recent nights often have no data yet. detection_summary's coverage says which nights each recorder has analyzed data for, which are still being uploaded or analyzed, and which have none -- read it before drawing conclusions from low counts.
+Cards are collected from the recorders every week or two, so recent times often have no data yet. detection_summary's coverage lists the cards with recordings in your range, when each card's first and last recordings started, and whether BirdNET has finished with it -- read it before drawing conclusions from low counts.
 
 Each detection has a review status: unreviewed (BirdNET's word alone), confirmed (a volunteer listened and agreed), or rejected (a volunteer listened and it wasn't that species). A reviewer's correction replaces BirdNET's species. Confidence is BirdNET's score, 0 to 1; low-confidence detections are often wrong.
 
-Start with list_recorders, then detection_summary for the nights you want. Use detections_export when you need every row and can fetch a URL and process CSV in code.`
+Start with list_recorders, then detection_summary for the span you want. Use detections_export when you need every row and can fetch a URL and process CSV in code.`
 
-// mcpFilter is the range both range tools take.
+// mcpFilter is the span and filters both range tools take.
 type mcpFilter struct {
-	From          string   `json:"from,omitempty" jsonschema:"the first night to include, YYYY-MM-DD: the date of the evening it began, Pacific time. Defaults to six nights before 'to'."`
-	To            string   `json:"to,omitempty" jsonschema:"the last night to include, YYYY-MM-DD, inclusive. Defaults to last night."`
+	Since         string   `json:"since,omitempty" jsonschema:"the start of the range, inclusive, as an RFC 3339 timestamp with its offset, e.g. 2026-09-14T12:00:00-07:00. Defaults to 7 days before 'until'."`
+	Until         string   `json:"until,omitempty" jsonschema:"the end of the range, exclusive, as an RFC 3339 timestamp with its offset. Defaults to now. At most 31 days after 'since'."`
 	MinConfidence float64  `json:"minConfidence,omitempty" jsonschema:"only detections BirdNET scored at or above this, from 0 to 1. Defaults to 0: everything stored."`
 	Recorders     []string `json:"recorders,omitempty" jsonschema:"recorder ids, from list_recorders, to include. Omit for every recorder."`
+	TimeZone      string   `json:"timeZone,omitempty" jsonschema:"the IANA time zone the answer gives times in and counts days and hours by, e.g. America/Los_Angeles (the default)."`
 }
 
-// mcpRange is an mcpFilter read and checked.
+// mcpRange is an mcpFilter read and checked. Its times are in its zone, so
+// they marshal with that zone's offset.
 type mcpRange struct {
-	From          string   `json:"from"`
-	To            string   `json:"to"`
-	Nights        int      `json:"nights"`
-	MinConfidence float64  `json:"minConfidence"`
-	Recorders     []string `json:"recorders,omitempty"`
+	Since         time.Time `json:"since"`
+	Until         time.Time `json:"until"`
+	TimeZone      string    `json:"timeZone"`
+	MinConfidence float64   `json:"minConfidence"`
+	Recorders     []string  `json:"recorders,omitempty"`
 }
 
 // errMCP is a tool call that was asked for something it can't answer. Its
@@ -89,43 +99,30 @@ type errMCP struct{ msg string }
 
 func (e errMCP) Error() string { return e.msg }
 
-// night is a night's date as a time, at midnight Pacific.
-func parseNight(s string) (time.Time, error) {
-	return time.ParseInLocation(time.DateOnly, s, pacific)
-}
-
-// noon is when a night begins: noon Pacific on the date it is named for. A
-// night runs noon to noon, which is how the card scan assigns files to one
-// (card-scan.js: a file belongs to the date 12 hours before it began).
-func noon(night time.Time) time.Time {
-	return time.Date(night.Year(), night.Month(), night.Day(), 12, 0, 0, 0, pacific)
-}
-
 // resolve checks a filter against the clock and the recorders there are.
 func (f mcpFilter) resolve(now time.Time, recorders []db.Recorder) (mcpRange, error) {
-	today := now.In(pacific)
-	to := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, pacific).AddDate(0, 0, -1)
-	if f.To != "" {
-		t, err := parseNight(f.To)
-		if err != nil {
-			return mcpRange{}, errMCP{"'to' must be a date, YYYY-MM-DD"}
-		}
-		to = t
+	zone := cmp.Or(f.TimeZone, defaultMCPZone)
+	loc, err := time.LoadLocation(zone)
+	if err != nil || zone == "Local" {
+		return mcpRange{}, errMCP{fmt.Sprintf("there is no time zone %q; name an IANA zone like America/Los_Angeles", f.TimeZone)}
 	}
-	from := to.AddDate(0, 0, -(defaultMCPNights - 1))
-	if f.From != "" {
-		t, err := parseNight(f.From)
-		if err != nil {
-			return mcpRange{}, errMCP{"'from' must be a date, YYYY-MM-DD"}
+	until := now.Truncate(time.Second)
+	if f.Until != "" {
+		if until, err = time.Parse(time.RFC3339, f.Until); err != nil {
+			return mcpRange{}, errMCP{"'until' must be an RFC 3339 timestamp with its offset, like 2026-09-21T12:00:00-07:00"}
 		}
-		from = t
 	}
-	nights := int(math.Round(to.Sub(from).Hours()/24)) + 1
+	since := until.Add(-defaultMCPSpan)
+	if f.Since != "" {
+		if since, err = time.Parse(time.RFC3339, f.Since); err != nil {
+			return mcpRange{}, errMCP{"'since' must be an RFC 3339 timestamp with its offset, like 2026-09-14T12:00:00-07:00"}
+		}
+	}
 	switch {
-	case nights < 1:
-		return mcpRange{}, errMCP{"'from' must be on or before 'to'"}
-	case nights > maxMCPNights:
-		return mcpRange{}, errMCP{fmt.Sprintf("that is %d nights; ask for at most %d at a time", nights, maxMCPNights)}
+	case !since.Before(until):
+		return mcpRange{}, errMCP{"'since' must be before 'until'"}
+	case until.Sub(since) > maxMCPSpan:
+		return mcpRange{}, errMCP{fmt.Sprintf("that is %.1f days; ask for at most %d at a time", until.Sub(since).Hours()/24, int(maxMCPSpan.Hours()/24))}
 	case f.MinConfidence < 0 || f.MinConfidence > 1:
 		return mcpRange{}, errMCP{"minConfidence must be from 0 to 1"}
 	}
@@ -144,40 +141,26 @@ func (f mcpFilter) resolve(now time.Time, recorders []db.Recorder) (mcpRange, er
 	}
 	slices.Sort(picked)
 	return mcpRange{
-		From: from.Format(time.DateOnly), To: to.Format(time.DateOnly), Nights: nights,
+		Since: since.In(loc), Until: until.In(loc), TimeZone: loc.String(),
 		MinConfidence: f.MinConfidence, Recorders: picked,
 	}, nil
 }
 
-// filter is the store query for a range. The instants are widened by a couple
-// of hours either side, and contains trims by night: an hour-long file that
-// starts just before noon is the earlier night's to its end.
+// zone is the range's time zone; resolve checked it loads.
+func (r mcpRange) zone() *time.Location {
+	loc, _ := time.LoadLocation(r.TimeZone)
+	return loc
+}
+
+// filter is the store query for a range.
 func (r mcpRange) filter() db.DetectionFilter {
-	from, _ := parseNight(r.From)
-	to, _ := parseNight(r.To)
 	return db.DetectionFilter{
-		Since:         noon(from).Add(-2 * time.Hour),
-		Until:         noon(to.AddDate(0, 0, 1)).Add(2 * time.Hour),
-		MinConfidence: r.MinConfidence,
+		Since: r.Since, Until: r.Until, MinConfidence: r.MinConfidence,
 		// BirdNET's alone: Perch is a second opinion stored beside it, and the
 		// two together would count most birds twice (CLAUDE.md, *Perch*).
 		Model:       db.ModelBirdNET,
 		RecorderIDs: r.Recorders,
 	}
-}
-
-func (r mcpRange) contains(night string) bool {
-	return night >= r.From && night <= r.To
-}
-
-// nightList is every night in the range, in order.
-func (r mcpRange) nightList() []string {
-	from, _ := parseNight(r.From)
-	out := make([]string, r.Nights)
-	for i := range out {
-		out[i] = from.AddDate(0, 0, i).Format(time.DateOnly)
-	}
-	return out
 }
 
 func (r mcpRange) includes(recorderID string) bool {
@@ -198,20 +181,20 @@ func (h *handlers) mcpHandler() http.Handler {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_recorders",
 		Title:       "List recorders",
-		Description: "Every recorder, retired ones included: its id (which the other tools filter by), name, position, and the latest night it has data for. Call this first to learn the recorder ids.",
+		Description: "Every recorder, retired ones included: its id (which the other tools filter by), name, position, and when its most recent recording on any card -- and on a card BirdNET has finished with -- started. Call this first to learn the recorder ids.",
 		Annotations: readOnly,
 	}, h.toolListRecorders)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  "detection_summary",
 		Title: "Summarize detections",
-		Description: "Aggregates BirdNET's detections over a range of nights (at most 31; the last 7 by default): totals; which nights each recorder has data for; detections per night and recorder; and per species, its count, nights, recorders, confidence, review counts, detections by hour of night, and a link to its most confident detection, where a person can hear the clip. " +
+		Description: "Aggregates BirdNET's detections between two timestamps (at most 31 days apart; the last 7 days by default): totals; the cards with recordings in the range, per recorder, and whether BirdNET has finished with each; detections per day and recorder; and per species, its count, days, recorders, confidence, review counts, detections by hour of the day, and a link to its most confident detection, where a person can hear the clip. Days and hours are counted in timeZone. " +
 			"Rejected detections are counted in totals.rejected and left out of everything else. To compare with an earlier period, call it again with that range.",
 		Annotations: readOnly,
 	}, h.toolDetectionSummary)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  "detections_export",
 		Title: "Export detections as CSV",
-		Description: "A link to every BirdNET detection in a range of nights as CSV, one row per detection, rejected ones included -- for analysis in code, when you can fetch a URL. It doesn't put the rows in this conversation: a week can be over 100,000 rows. " +
+		Description: "A link to every BirdNET detection between two timestamps as CSV, one row per detection, rejected ones included -- for analysis in code, when you can fetch a URL. It doesn't put the rows in this conversation: a week can be over 100,000 rows. " +
 			"The link works for 30 minutes and needs no other credentials. Columns: " + strings.Join(exportColumns, ", ") + ".",
 		Annotations: readOnly,
 	}, h.toolDetectionsExport)
@@ -265,10 +248,11 @@ type RecorderInfo struct {
 	Longitude float64 `json:"longitude"`
 	AddedOn   string  `json:"addedOn"`
 	Retired   bool    `json:"retired,omitempty"`
-	// LatestNight is the latest night on any of its cards, and
-	// LatestAnalyzedNight the latest on a card BirdNET has finished with.
-	LatestNight         string `json:"latestNight,omitempty"`
-	LatestAnalyzedNight string `json:"latestAnalyzedNight,omitempty"`
+	// LatestRecordingAt is when its most recent recording on any card
+	// started, and LatestAnalyzedRecordingAt the same on a card BirdNET has
+	// finished with.
+	LatestRecordingAt         *time.Time `json:"latestRecordingAt,omitempty"`
+	LatestAnalyzedRecordingAt *time.Time `json:"latestAnalyzedRecordingAt,omitempty"`
 }
 
 type recordersOut struct {
@@ -284,16 +268,19 @@ func (h *handlers) toolListRecorders(ctx context.Context, req *mcp.CallToolReque
 	if err != nil {
 		return nil, recordersOut{}, h.toolFailed("list_recorders", req, err)
 	}
-	latest, analyzed := map[string]string{}, map[string]string{}
+	latest, analyzed := map[string]*time.Time{}, map[string]*time.Time{}
+	later := func(into map[string]*time.Time, id string, t *time.Time) {
+		if t != nil && (into[id] == nil || t.After(*into[id])) {
+			into[id] = t
+		}
+	}
 	for _, u := range uploads {
 		if u.Status == db.StatusDeleting {
 			continue
 		}
-		for _, n := range u.Nights {
-			latest[u.RecorderID] = max(latest[u.RecorderID], n.Date)
-			if analysisDone(u.Status) {
-				analyzed[u.RecorderID] = max(analyzed[u.RecorderID], n.Date)
-			}
+		later(latest, u.RecorderID, u.LastRecordingAt)
+		if analysisDone(u.Status) {
+			later(analyzed, u.RecorderID, u.LastRecordingAt)
 		}
 	}
 	out := recordersOut{Recorders: make([]RecorderInfo, len(recorders))}
@@ -301,7 +288,7 @@ func (h *handlers) toolListRecorders(ctx context.Context, req *mcp.CallToolReque
 		out.Recorders[i] = RecorderInfo{
 			ID: r.ID, Name: r.Name, Latitude: r.Latitude, Longitude: r.Longitude,
 			AddedOn: dateOf(r.CreatedAt), Retired: r.RetiredAt != nil,
-			LatestNight: latest[r.ID], LatestAnalyzedNight: analyzed[r.ID],
+			LatestRecordingAt: latest[r.ID], LatestAnalyzedRecordingAt: analyzed[r.ID],
 		}
 	}
 	return nil, out, nil
@@ -332,11 +319,10 @@ func (h *handlers) toolFailed(tool string, req *mcp.CallToolRequest, err error) 
 // SummaryOut is detection_summary's answer.
 type SummaryOut struct {
 	Range    mcpRange           `json:"range"`
-	TimeZone string             `json:"timeZone"`
 	Totals   SummaryTotals      `json:"totals"`
 	Coverage []RecorderCoverage `json:"coverage"`
-	// Nights is each recorder's count for each night it heard anything.
-	Nights  []NightTally     `json:"nights"`
+	// Days is each recorder's count for each day it heard anything.
+	Days    []DayTally       `json:"days"`
 	Species []SpeciesSummary `json:"species"`
 }
 
@@ -350,20 +336,29 @@ type SummaryTotals struct {
 	Rejected   int `json:"rejected"`
 }
 
-// RecorderCoverage is which of the range's nights a recorder has data for:
-// on a card BirdNET has finished with (analyzed), on one still being
-// uploaded or analyzed (pending), or on no card yet (missing).
+// RecorderCoverage is the cards a recorder has with recordings in the range.
+// A recorder with none has no data there yet.
 type RecorderCoverage struct {
-	RecorderID   string   `json:"recorderId"`
-	RecorderName string   `json:"recorderName"`
-	Analyzed     []string `json:"nightsAnalyzed"`
-	Pending      []string `json:"nightsPending"`
-	Missing      []string `json:"nightsMissing"`
+	RecorderID   string         `json:"recorderId"`
+	RecorderName string         `json:"recorderName"`
+	Cards        []CardCoverage `json:"cards"`
 }
 
-// NightTally is one recorder's night.
-type NightTally struct {
-	Night      string `json:"night"`
+// CardCoverage is one card's recordings. A card holds recordings from when
+// its first one started to when its last one ended, one file's length after
+// LastRecordingAt; between those, any gap is a recorder that didn't record.
+type CardCoverage struct {
+	Card             string    `json:"card"`
+	FirstRecordingAt time.Time `json:"firstRecordingAt"`
+	LastRecordingAt  time.Time `json:"lastRecordingAt"`
+	// Analyzed is BirdNET having finished with the card; until it has, the
+	// card's detections are still coming in.
+	Analyzed bool `json:"analyzed"`
+}
+
+// DayTally is one recorder's day.
+type DayTally struct {
+	Date       string `json:"date"` // YYYY-MM-DD, in the range's time zone
 	RecorderID string `json:"recorderId"`
 	Detections int    `json:"detections"`
 	Species    int    `json:"species"`
@@ -374,7 +369,8 @@ type SpeciesSummary struct {
 	ScientificName string `json:"scientificName"`
 	CommonName     string `json:"commonName"`
 	Detections     int    `json:"detections"`
-	Nights         int    `json:"nights"`
+	// Days is how many dates, in the range's time zone, it was heard on.
+	Days int `json:"days"`
 	// Recorders is its detections by recorder id.
 	Recorders      map[string]int `json:"recorders"`
 	Confirmed      int            `json:"confirmed"`
@@ -384,7 +380,7 @@ type SpeciesSummary struct {
 	FirstHeard     time.Time      `json:"firstHeard"`
 	LastHeard      time.Time      `json:"lastHeard"`
 	// ByHour is its detections by the hour of the day they were heard, from
-	// 0 (midnight to 1 a.m.) to 23, Pacific.
+	// 0 (midnight to 1 a.m.) to 23, in the range's time zone.
 	ByHour [24]int      `json:"byHour"`
 	Best   DetectionRef `json:"best"`
 }
@@ -420,7 +416,7 @@ func (h *handlers) toolDetectionSummary(ctx context.Context, req *mcp.CallToolRe
 	s := newSummary(rng, h.oauth.issuer)
 	going := deletingCards(uploads)
 	err = h.store.EachDetection(ctx, rng.filter(), func(d db.Detection) error {
-		if !going[d.UploadID] && rng.contains(d.Night) {
+		if !going[d.UploadID] {
 			s.add(d)
 		}
 		return nil
@@ -429,7 +425,7 @@ func (h *handlers) toolDetectionSummary(ctx context.Context, req *mcp.CallToolRe
 		return nil, SummaryOut{}, h.toolFailed("detection_summary", req, err)
 	}
 	out := s.result(coverage(rng, recorders, uploads))
-	h.log.Info("MCP detection summary", "email", mcpUser(req), "from", rng.From, "to", rng.To,
+	h.log.Info("MCP detection summary", "email", mcpUser(req), "since", rng.Since, "until", rng.Until,
 		"recorders", len(rng.Recorders), "detections", out.Totals.Detections+out.Totals.Rejected,
 		"took", time.Since(started).Round(time.Millisecond))
 	return nil, out, nil
@@ -450,26 +446,27 @@ func deletingCards(uploads []db.Upload) map[string]bool {
 // summary is detection_summary's tally while the range is read.
 type summary struct {
 	rng       mcpRange
+	loc       *time.Location
 	publicURL string
 	totals    SummaryTotals
 	species   map[string]*speciesTally
-	// nights counts by night and recorder, with the species heard in each.
-	nights map[[2]string]*nightTally
+	// days counts by date and recorder, with the species heard in each.
+	days map[[2]string]*dayTally
 }
 
 type speciesTally struct {
 	SpeciesSummary
-	nights  map[string]bool
+	days    map[string]bool
 	confSum float64
 }
 
-type nightTally struct {
+type dayTally struct {
 	detections int
 	species    map[string]bool
 }
 
 func newSummary(rng mcpRange, publicURL string) *summary {
-	return &summary{rng: rng, publicURL: publicURL, species: map[string]*speciesTally{}, nights: map[[2]string]*nightTally{}}
+	return &summary{rng: rng, loc: rng.zone(), publicURL: publicURL, species: map[string]*speciesTally{}, days: map[[2]string]*dayTally{}}
 }
 
 func (s *summary) add(d db.Detection) {
@@ -490,13 +487,14 @@ func (s *summary) add(d db.Detection) {
 	if t == nil {
 		t = &speciesTally{
 			SpeciesSummary: SpeciesSummary{ScientificName: scientific, CommonName: common, Recorders: map[string]int{}},
-			nights:         map[string]bool{},
+			days:           map[string]bool{},
 		}
 		s.species[scientific] = t
 	}
-	heard := d.DetectedAt.In(pacific)
+	heard := d.DetectedAt.In(s.loc)
+	date := heard.Format(time.DateOnly)
 	t.Detections++
-	t.nights[d.Night] = true
+	t.days[date] = true
 	t.Recorders[d.RecorderID]++
 	if d.ReviewStatus == db.ReviewConfirmed {
 		t.Confirmed++
@@ -519,11 +517,11 @@ func (s *summary) add(d db.Detection) {
 		}
 	}
 
-	key := [2]string{d.Night, d.RecorderID}
-	n := s.nights[key]
+	key := [2]string{date, d.RecorderID}
+	n := s.days[key]
 	if n == nil {
-		n = &nightTally{species: map[string]bool{}}
-		s.nights[key] = n
+		n = &dayTally{species: map[string]bool{}}
+		s.days[key] = n
 	}
 	n.detections++
 	n.species[scientific] = true
@@ -531,18 +529,18 @@ func (s *summary) add(d db.Detection) {
 
 func (s *summary) result(cov []RecorderCoverage) SummaryOut {
 	out := SummaryOut{
-		Range: s.rng, TimeZone: pacific.String(), Totals: s.totals, Coverage: cov,
-		Nights: make([]NightTally, 0, len(s.nights)), Species: make([]SpeciesSummary, 0, len(s.species)),
+		Range: s.rng, Totals: s.totals, Coverage: cov,
+		Days: make([]DayTally, 0, len(s.days)), Species: make([]SpeciesSummary, 0, len(s.species)),
 	}
 	out.Totals.Species = len(s.species)
-	for key, n := range s.nights {
-		out.Nights = append(out.Nights, NightTally{Night: key[0], RecorderID: key[1], Detections: n.detections, Species: len(n.species)})
+	for key, n := range s.days {
+		out.Days = append(out.Days, DayTally{Date: key[0], RecorderID: key[1], Detections: n.detections, Species: len(n.species)})
 	}
-	slices.SortFunc(out.Nights, func(a, b NightTally) int {
-		return cmp.Or(cmp.Compare(a.Night, b.Night), cmp.Compare(a.RecorderID, b.RecorderID))
+	slices.SortFunc(out.Days, func(a, b DayTally) int {
+		return cmp.Or(cmp.Compare(a.Date, b.Date), cmp.Compare(a.RecorderID, b.RecorderID))
 	})
 	for _, t := range s.species {
-		t.Nights = len(t.nights)
+		t.Days = len(t.days)
 		t.MaxConfidence = round3(t.MaxConfidence)
 		t.MeanConfidence = round3(t.confSum / float64(t.Detections))
 		out.Species = append(out.Species, t.SpeciesSummary)
@@ -554,53 +552,37 @@ func (s *summary) result(cov []RecorderCoverage) SummaryOut {
 	return out
 }
 
-// coverage is which nights of the range each recorder has data for, from the
-// cards' own lists of nights. The recorders are the ones asked for, or every
-// recorder still in the field and any retired one with a card in range.
+// coverage is, per recorder, the cards with recordings in the range: those
+// whose first recording started before the range ends and whose last started
+// within a day before it begins -- a recording can't run longer than that,
+// and a card whose last file began earlier holds nothing in range. The
+// recorders are the ones asked for, or every recorder still in the field and
+// any retired one with a card in range.
 func coverage(rng mcpRange, recorders []db.Recorder, uploads []db.Upload) []RecorderCoverage {
-	analyzed, pending := map[string]map[string]bool{}, map[string]map[string]bool{}
-	names := map[string]string{}
-	for _, r := range recorders {
-		names[r.ID] = r.Name
-	}
+	loc := rng.zone()
+	cards := map[string][]CardCoverage{}
 	for _, u := range uploads {
-		if u.Status == db.StatusDeleting || !rng.includes(u.RecorderID) {
+		if u.Status == db.StatusDeleting || !rng.includes(u.RecorderID) || u.FirstRecordingAt == nil || u.LastRecordingAt == nil {
 			continue
 		}
-		into := pending
-		if analysisDone(u.Status) {
-			into = analyzed
+		if !u.FirstRecordingAt.Before(rng.Until) || u.LastRecordingAt.Before(rng.Since.Add(-24*time.Hour)) {
+			continue
 		}
-		for _, n := range u.Nights {
-			if !rng.contains(n.Date) {
-				continue
-			}
-			if into[u.RecorderID] == nil {
-				into[u.RecorderID] = map[string]bool{}
-			}
-			into[u.RecorderID][n.Date] = true
-		}
+		cards[u.RecorderID] = append(cards[u.RecorderID], CardCoverage{
+			Card: u.ID, FirstRecordingAt: u.FirstRecordingAt.In(loc), LastRecordingAt: u.LastRecordingAt.In(loc),
+			Analyzed: analysisDone(u.Status),
+		})
 	}
-
-	var ids []string
+	out := []RecorderCoverage{}
 	for _, r := range recorders {
-		if rng.includes(r.ID) && (len(rng.Recorders) > 0 || r.RetiredAt == nil || analyzed[r.ID] != nil || pending[r.ID] != nil) {
-			ids = append(ids, r.ID)
+		if !rng.includes(r.ID) || (len(rng.Recorders) == 0 && r.RetiredAt != nil && cards[r.ID] == nil) {
+			continue
 		}
-	}
-	out := make([]RecorderCoverage, 0, len(ids))
-	for _, id := range ids {
-		c := RecorderCoverage{RecorderID: id, RecorderName: names[id], Analyzed: []string{}, Pending: []string{}, Missing: []string{}}
-		for _, night := range rng.nightList() {
-			switch {
-			case analyzed[id][night]:
-				c.Analyzed = append(c.Analyzed, night)
-			case pending[id][night]:
-				c.Pending = append(c.Pending, night)
-			default:
-				c.Missing = append(c.Missing, night)
-			}
+		c := RecorderCoverage{RecorderID: r.ID, RecorderName: r.Name, Cards: cards[r.ID]}
+		if c.Cards == nil {
+			c.Cards = []CardCoverage{}
 		}
+		slices.SortFunc(c.Cards, func(a, b CardCoverage) int { return a.FirstRecordingAt.Compare(b.FirstRecordingAt) })
 		out = append(out, c)
 	}
 	return out
@@ -631,7 +613,7 @@ type exportLink struct {
 }
 
 var exportColumns = []string{
-	"id", "card", "recorderId", "recorderName", "night", "heardAt", "startSec", "endSec",
+	"id", "card", "recorderId", "recorderName", "heardAt", "startSec", "endSec",
 	"scientificName", "commonName", "birdnetScientificName", "birdnetCommonName",
 	"confidence", "reviewStatus", "url",
 }
@@ -653,26 +635,32 @@ func (h *handlers) toolDetectionsExport(ctx context.Context, req *mcp.CallToolRe
 		Range:     rng,
 		Columns:   exportColumns,
 	}
-	name := fmt.Sprintf("birdsense-detections-%s-to-%s.csv", rng.From, rng.To)
+	name := exportName(rng)
 	res := &mcp.CallToolResult{Content: []mcp.Content{
 		&mcp.TextContent{Text: fmt.Sprintf(
-			"Every BirdNET detection from the nights of %s to %s is at the link below, as CSV with a header row (columns: %s). "+
+			"Every BirdNET detection from %s until %s is at the link below, as CSV with a header row (columns: %s). "+
 				"Fetch it with an HTTP GET -- in code, e.g. curl -o %s '<url>' -- within 30 minutes; it needs no other credentials. "+
-				"heardAt is Pacific time with its offset. scientificName and commonName are after review; birdnet* are BirdNET's own label. "+
+				"heardAt is in %s, with its offset. scientificName and commonName are after review; birdnet* are BirdNET's own label. "+
 				"Rows are in no particular order.\n\n%s",
-			rng.From, rng.To, strings.Join(exportColumns, ", "), name, out.URL)},
-		&mcp.ResourceLink{URI: out.URL, Name: name, Title: "Detections, " + rng.From + " to " + rng.To, MIMEType: "text/csv"},
+			rng.Since.Format(time.RFC3339), rng.Until.Format(time.RFC3339), strings.Join(exportColumns, ", "), name, rng.TimeZone, out.URL)},
+		&mcp.ResourceLink{URI: out.URL, Name: name, Title: "Detections, " + rng.Since.Format(time.RFC3339) + " to " + rng.Until.Format(time.RFC3339), MIMEType: "text/csv"},
 	}}
-	h.log.Info("MCP export link issued", "email", mcpUser(req), "from", rng.From, "to", rng.To, "recorders", len(rng.Recorders))
+	h.log.Info("MCP export link issued", "email", mcpUser(req), "since", rng.Since, "until", rng.Until, "recorders", len(rng.Recorders))
 	return res, out, nil
 }
 
-// exportDetections serves an export link: the range as CSV, streamed as it
-// is read, so a week costs a page of memory rather than the week. The link
-// is the credential (it is signed, says who asked for what, and lapses after
+// exportName is the file an export saves as.
+func exportName(rng mcpRange) string {
+	stamp := func(t time.Time) string { return t.Format("20060102T1504") }
+	return fmt.Sprintf("birdsense-detections-%s-%s.csv", stamp(rng.Since), stamp(rng.Until))
+}
+
+// serveMCPExport serves an export link: the range as CSV, streamed as it is
+// read, so a week costs a page of memory rather than the week. The link is
+// the credential (it is signed, says who asked for what, and lapses after
 // exportLinkLife), because whatever fetches it -- code in a model's sandbox --
 // holds no token. It still answers only while its person is on the roster.
-func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) serveMCPExport(w http.ResponseWriter, r *http.Request) {
 	var link exportLink
 	if err := verifyJSON(h.oauth.exports, r.URL.Query().Get("token"), h.now(), &link); err != nil {
 		h.problem(w, http.StatusUnauthorized, "that export link is unknown or has expired; ask for a new one")
@@ -687,6 +675,7 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	rng := link.Range
+	loc := rng.zone()
 	uploads, err := h.store.ListUploads(ctx, db.UploadFilter{})
 	if err != nil {
 		h.fail(w, r, err)
@@ -705,7 +694,7 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="birdsense-detections-%s-to-%s.csv"`, rng.From, rng.To))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, exportName(rng)))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Vary", "Accept-Encoding")
 	var body io.Writer = w
@@ -720,14 +709,14 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request) {
 
 	started, rows := time.Now(), 0
 	err = h.store.EachDetection(ctx, rng.filter(), func(d db.Detection) error {
-		if going[d.UploadID] || !rng.contains(d.Night) {
+		if going[d.UploadID] {
 			return nil
 		}
 		scientific, common := d.Species()
 		rows++
 		out.Write([]string{
-			d.ID, d.UploadID, d.RecorderID, cmp.Or(station[d.UploadID], d.RecorderID), d.Night,
-			d.DetectedAt.In(pacific).Format(time.RFC3339),
+			d.ID, d.UploadID, d.RecorderID, cmp.Or(station[d.UploadID], d.RecorderID),
+			d.DetectedAt.In(loc).Format(time.RFC3339),
 			strconv.FormatFloat(d.StartSec, 'f', -1, 64), strconv.FormatFloat(d.EndSec, 'f', -1, 64),
 			scientific, common, d.ScientificName, d.CommonName,
 			strconv.FormatFloat(round3(d.Confidence), 'f', -1, 64), d.ReviewStatus,
@@ -748,6 +737,6 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request) {
 		}
 		panic(http.ErrAbortHandler)
 	}
-	h.log.Info("MCP export served", "email", link.Email, "from", rng.From, "to", rng.To,
+	h.log.Info("MCP export served", "email", link.Email, "since", rng.Since, "until", rng.Until,
 		"rows", rows, "took", time.Since(started).Round(time.Millisecond))
 }

@@ -110,19 +110,21 @@ func seedProgram(t *testing.T, s db.Store) {
 		must(err)
 	}
 
-	card := func(recorderID, stationName, email, pulledOn, status, firstNight string, nights, filesUploaded int) {
+	// A card of a recorder's nights, dusk to dawn: from 20:00 Pacific on the
+	// first day to 05:00 the morning after the last evening.
+	card := func(recorderID, stationName, email, pulledOn, status, firstEvening string, nights, filesUploaded int) {
 		t.Helper()
-		first, err := time.Parse("2006-01-02", firstNight)
+		evening, err := time.ParseInLocation("2006-01-02", firstEvening, pacific)
 		must(err)
+		first := evening.Add(20 * time.Hour).UTC()
+		last := evening.AddDate(0, 0, nights).Add(5 * time.Hour).UTC()
 		u := db.Upload{
 			ID: db.UploadID(pulledOn, recorderID), RecorderID: recorderID,
 			Recorder: db.RecorderSnapshot{Name: stationName},
 			UserID:   users[email].ID, UserName: users[email].Name,
 			PulledOn: pulledOn, Status: status, StartedAt: testNow.AddDate(0, 0, -30),
 		}
-		for i := range nights {
-			u.Nights = append(u.Nights, db.Night{Date: first.AddDate(0, 0, i).Format("2006-01-02"), Files: 24, Bytes: 2400})
-		}
+		u.FirstRecordingAt, u.LastRecordingAt = &first, &last
 		u.FileCount, u.TotalBytes = 24*nights, int64(2400*nights)
 		u.FilesUploaded, u.BytesUploaded = filesUploaded, int64(100*filesUploaded)
 		_, err = s.CreateUpload(ctx, u)
@@ -134,12 +136,12 @@ func seedProgram(t *testing.T, s db.Store) {
 	card("SW-05", "Soaring Eagle – East Loop", "m.lee@example.com", "2026-09-13", db.StatusNeedsAttention, "2026-09-10", 3, 72)
 
 	review := &db.Review{UserID: users["dana@eastsideaudubon.org"].ID, UserName: "Dana Coordinator", At: testNow}
-	det := func(night, at, scientific, common, status string) db.Detection {
+	det := func(at, scientific, common, status string) db.Detection {
 		t.Helper()
 		when, err := time.Parse(time.RFC3339, at)
 		must(err)
 		d := db.Detection{
-			AudioFileID: "af_" + at, DetectedAt: when, Night: night,
+			AudioFileID: "af_" + at, DetectedAt: when,
 			ScientificName: scientific, CommonName: common, Confidence: 0.9, ReviewStatus: status,
 		}
 		if status != db.ReviewUnreviewed {
@@ -148,17 +150,17 @@ func seedProgram(t *testing.T, s db.Store) {
 		}
 		return d
 	}
-	corrected := det("2026-09-10", "2026-09-11T08:00:00Z", "Bubo virginianus", "Great Horned Owl", db.ReviewConfirmed)
+	corrected := det("2026-09-11T08:00:00Z", "Bubo virginianus", "Great Horned Owl", db.ReviewConfirmed)
 	corrected.Review.CorrectedScientificName, corrected.Review.CorrectedCommonName = "Strix varia", "Barred Owl"
 	must(s.UpsertDetections(ctx, "OWL-20260913-SR05", []db.Detection{
-		det("2026-09-12", "2026-09-13T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
-		det("2026-09-11", "2026-09-12T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
+		det("2026-09-13T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
+		det("2026-09-12T10:00:00Z", "Strix varia", "Barred Owl", db.ReviewConfirmed),
 		corrected,
-		det("2026-09-12", "2026-09-13T11:00:00Z", "Strix varia", "Barred Owl", db.ReviewRejected),
-		det("2026-09-12", "2026-09-13T12:00:00Z", "Megascops kennicottii", "Western Screech-Owl", db.ReviewUnreviewed),
+		det("2026-09-13T11:00:00Z", "Strix varia", "Barred Owl", db.ReviewRejected),
+		det("2026-09-13T12:00:00Z", "Megascops kennicottii", "Western Screech-Owl", db.ReviewUnreviewed),
 	}))
 	must(s.UpsertDetections(ctx, "OWL-20260821-SR03", []db.Detection{
-		det("2026-08-19", "2026-08-20T09:00:00Z", "Aegolius acadicus", "Northern Saw-whet Owl", db.ReviewConfirmed),
+		det("2026-08-20T09:00:00Z", "Aegolius acadicus", "Northern Saw-whet Owl", db.ReviewConfirmed),
 	}))
 }
 
@@ -371,16 +373,18 @@ func TestPublicOverview(t *testing.T) {
 	if body.WindowDays != 7 {
 		t.Errorf("windowDays = %d, want 7", body.WindowDays)
 	}
-	// Three recorders in the field (SW-09 is retired); 2026's recorder-nights
-	// are 14 + 14 + 3, the December nights being last year; four confirmed
-	// detections this year, the rejected and unreviewed ones not counted.
-	if want := (ProgramStats{Recorders: 3, NightsRecorded: 31, ConfirmedDetections: 4}); body.Program != want {
+	// Three recorders in the field (SW-09 is retired); 2026's recordings are
+	// the files on the three cards that began recording this year, 24 a
+	// night for 14 + 14 + 3 nights, the card begun last December not
+	// counted; four confirmed detections this year, the rejected and
+	// unreviewed ones not counted.
+	if want := (ProgramStats{Recorders: 3, Recordings: 744, ConfirmedDetections: 4}); body.Program != want {
 		t.Errorf("program = %+v, want %+v", body.Program, want)
 	}
 	// The corrected Great Horned Owl counts as the Barred Owl it was confirmed
 	// as, and the station is the name on the card, not the renamed recorder.
 	want := Species{
-		CommonName: "Barred Owl", ScientificName: "Strix varia", Detections: 3, Nights: 3,
+		CommonName: "Barred Owl", ScientificName: "Strix varia", Detections: 3, Days: 3,
 		Stations:       []string{"Soaring Eagle – East Loop"},
 		LastDetectedAt: time.Date(2026, time.September, 13, 10, 0, 0, 0, time.UTC),
 	}
@@ -477,7 +481,7 @@ func TestPublicOverviewIsScannedOncePerMinutePerWindow(t *testing.T) {
 
 func sameSpecies(a, b Species) bool {
 	return a.CommonName == b.CommonName && a.ScientificName == b.ScientificName &&
-		a.Detections == b.Detections && a.Nights == b.Nights &&
+		a.Detections == b.Detections && a.Days == b.Days &&
 		slices.Equal(a.Stations, b.Stations) && a.LastDetectedAt.Equal(b.LastDetectedAt)
 }
 
@@ -667,8 +671,9 @@ func TestUploadsAreScopedToTheVolunteer(t *testing.T) {
 			t.Errorf("volunteer sees %q's card %s", u.VolunteerName, u.Reference)
 		}
 	}
-	if mine[0].Reference != "OWL-20260907-SR02" || len(mine[0].Nights) != 14 {
-		t.Errorf("newest card = %+v, want OWL-20260907-SR02 with its 14 nights", mine[0])
+	if mine[0].Reference != "OWL-20260907-SR02" || mine[0].FirstRecordingAt == nil ||
+		mine[0].FirstRecordingAt.Format(time.RFC3339) != "2026-08-25T03:00:00Z" {
+		t.Errorf("newest card = %+v, want OWL-20260907-SR02, first recording 20:00 Pacific on Aug 24", mine[0])
 	}
 
 	admin := signedIn(t, mux, db.RoleAdmin)
@@ -683,11 +688,9 @@ func TestCreateUpload(t *testing.T) {
 	vol := signedIn(t, mux, db.RoleVolunteer)
 
 	body := `{"stationId":"SW-03","pulledOn":"2026-09-14","notes":" clear night ",
-	          "nights":[{"date":"2026-09-12","files":2,"bytes":100},
-	                    {"date":"2026-09-13","files":1,"bytes":50,"flag":"partial"}],
-	          "files":[{"path":"DATA\\20260912\\a.WAV","bytes":60,"night":"2026-09-12"},
-	                   {"path":"/DATA/20260912/b.WAV","bytes":40,"night":"2026-09-12"},
-	                   {"path":"DATA/20260913/c.WAV","bytes":50,"night":"2026-09-13"}]}`
+	          "files":[{"path":"DATA\\20260912\\Bridle_20260912_220000.WAV","bytes":60},
+	                   {"path":"/DATA/20260912/Bridle_20260913_030000(-0700).WAV","bytes":40},
+	                   {"path":"DATA/20260913/c.WAV","bytes":50}]}`
 	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
@@ -700,8 +703,16 @@ func TestCreateUpload(t *testing.T) {
 	if u.FileCount != 3 || u.TotalBytes != 150 || u.FilesUploaded != 0 || u.Status != db.StatusInProgress {
 		t.Errorf("totals = %d files / %d bytes, %d in, %s; want 3 / 150, none in, in_progress", u.FileCount, u.TotalBytes, u.FilesUploaded, u.Status)
 	}
-	if len(reg.Files) != 3 || reg.Files[0].Path != "DATA/20260912/a.WAV" || reg.Files[1].Path != "DATA/20260912/b.WAV" || reg.Files[2].Status != db.AudioPending {
+	if len(reg.Files) != 3 || reg.Files[0].Path != "DATA/20260912/Bridle_20260912_220000.WAV" || reg.Files[1].Path != "DATA/20260912/Bridle_20260913_030000(-0700).WAV" || reg.Files[2].Status != db.AudioPending {
 		t.Errorf("files = %+v; want the three, card paths normalized, pending", reg.Files)
+	}
+	// Dated by the times in their names; a name without one dates nothing.
+	if f, l := u.FirstRecordingAt, u.LastRecordingAt; f == nil || l == nil ||
+		f.Format(time.RFC3339) != "2026-09-13T05:00:00Z" || l.Format(time.RFC3339) != "2026-09-13T10:00:00Z" {
+		t.Errorf("card recorded %v to %v, want 22:00 Pacific on the 12th to 03:00 on the 13th", f, l)
+	}
+	if reg.Files[0].RecordedAt == nil || reg.Files[2].RecordedAt != nil {
+		t.Errorf("file times = %v, %v; want the named one dated and the unnamed one not", reg.Files[0].RecordedAt, reg.Files[2].RecordedAt)
 	}
 
 	stored, err := store.GetUpload(t.Context(), u.Reference)
@@ -713,28 +724,39 @@ func TestCreateUpload(t *testing.T) {
 		t.Errorf("stored card = %+v; want Jane's, with the recorder copied and nothing received", stored)
 	}
 	files, _ := store.ListAudioFiles(t.Context(), u.Reference)
-	if len(files) != 3 || files[2].RecorderID != "SW-03" || files[2].SizeBytes != 50 || files[2].Night != "2026-09-13" {
+	if len(files) != 3 || files[2].RecorderID != "SW-03" || files[2].SizeBytes != 50 || files[0].RecordedAt == nil {
 		t.Errorf("stored files = %+v", files)
+	}
+}
+
+// TestAPageFromBeforeDaysStillRegistersACard holds the one concession to a
+// page loaded before cards stopped being grouped into nights: it still sends
+// them, and a volunteer resuming a card from it isn't refused for that.
+func TestAPageFromBeforeDaysStillRegistersACard(t *testing.T) {
+	mux, _ := newTestMux(t)
+	vol := signedIn(t, mux, db.RoleVolunteer)
+	body := `{"stationId":"SW-03","pulledOn":"2026-09-14",
+	          "nights":[{"date":"2026-09-12","files":1,"bytes":60,"flag":"partial"}],
+	          "files":[{"path":"DATA/a.WAV","bytes":60,"night":"2026-09-12"}]}`
+	if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusCreated {
+		t.Errorf("a card sent as nights = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
 	}
 }
 
 func TestCreateUploadRejectsBadInput(t *testing.T) {
 	mux, _ := newTestMux(t)
 	vol := signedIn(t, mux, db.RoleVolunteer)
-	const nights = `"nights":[{"date":"2026-09-12","files":2,"bytes":100}]`
-	const files = `"files":[{"path":"a.WAV","bytes":60,"night":"2026-09-12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]`
+	const files = `"files":[{"path":"a.WAV","bytes":60},{"path":"b.WAV","bytes":40}]`
 	for _, body := range []string{
-		`{"stationId":"SW-99","pulledOn":"2026-09-14",` + nights + `,` + files + `}`,
-		`{"stationId":"SW-09","pulledOn":"2026-09-14",` + nights + `,` + files + `}`,
-		`{"stationId":"SW-03","pulledOn":"14/09/2026",` + nights + `,` + files + `}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[],` + files + `}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":-1,"bytes":100}],` + files + `}`,
-		// The file list has to be the card the nights describe.
-		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":100,"night":"2026-09-12"}]}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":60,"night":"2026-09-12"},{"path":"a.WAV","bytes":40,"night":"2026-09-12"}]}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"a.WAV","bytes":60,"night":"Sep 12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]}`,
-		`{"stationId":"SW-03","pulledOn":"2026-09-14",` + nights + `,"files":[{"path":"/","bytes":60,"night":"2026-09-12"},{"path":"b.WAV","bytes":40,"night":"2026-09-12"}]}`,
+		`{"stationId":"SW-99","pulledOn":"2026-09-14",` + files + `}`,
+		`{"stationId":"SW-09","pulledOn":"2026-09-14",` + files + `}`,
+		`{"stationId":"SW-03","pulledOn":"14/09/2026",` + files + `}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","files":[]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14"}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","files":[{"path":"a.WAV","bytes":-1}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","files":[{"path":"a.WAV","bytes":60},{"path":"a.WAV","bytes":40}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","files":[{"path":"/","bytes":60},{"path":"b.WAV","bytes":40}]}`,
+		`{"stationId":"SW-03","pulledOn":"2026-09-14","files":[{"path":"a.WAV","bytes":60,"recordedAt":"2026-09-12T20:00:00Z"}]}`,
 	} {
 		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusBadRequest {
 			t.Errorf("POST %s = %d, want %d", body, rec.Code, http.StatusBadRequest)
@@ -752,18 +774,16 @@ func TestACardCannotDeclareAnImplausibleSize(t *testing.T) {
 
 	const huge = "9223372036854775807" // math.MaxInt64: two of these sum to -2
 	refused := map[string]string{
-		"a 10 TB file": oneNightBody("SW-03", "2026-09-14", "2026-09-12",
-			[]CardFile{{Path: "DATA/a.WAV", Bytes: 10 << 40, Night: "2026-09-12"}}),
-		"a card over the card bound": oneNightBody("SW-03", "2026-09-14", "2026-09-12",
-			[]CardFile{
-				{Path: "DATA/a.WAV", Bytes: maxFileBytes, Night: "2026-09-12"},
-				{Path: "DATA/b.WAV", Bytes: maxCardBytes, Night: "2026-09-12"},
+		"a 10 TB file": filesBody("SW-03", "2026-09-14",
+			[]listedFile{{Path: "DATA/a.WAV", Bytes: 10 << 40}}),
+		"a card over the card bound": filesBody("SW-03", "2026-09-14",
+			[]listedFile{
+				{Path: "DATA/a.WAV", Bytes: maxFileBytes},
+				{Path: "DATA/b.WAV", Bytes: maxCardBytes},
 			}),
 		"sums that overflow int64": `{"stationId":"SW-03","pulledOn":"2026-09-14",
-			"nights":[{"date":"2026-09-12","files":1,"bytes":` + huge + `},
-			          {"date":"2026-09-12","files":1,"bytes":` + huge + `}],
-			"files":[{"path":"DATA/a.WAV","bytes":` + huge + `,"night":"2026-09-12"},
-			         {"path":"DATA/b.WAV","bytes":` + huge + `,"night":"2026-09-12"}]}`,
+			"files":[{"path":"DATA/a.WAV","bytes":` + huge + `},
+			         {"path":"DATA/b.WAV","bytes":` + huge + `}]}`,
 	}
 	for what, body := range refused {
 		if rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol); rec.Code != http.StatusBadRequest {
@@ -772,11 +792,11 @@ func TestACardCannotDeclareAnImplausibleSize(t *testing.T) {
 	}
 
 	// A card the size of a real one, in files the size of real ones.
-	files := make([]CardFile, 400)
+	files := make([]listedFile, 400)
 	for i := range files {
-		files[i] = CardFile{Path: fmt.Sprintf("DATA/20260912/%03d.WAV", i), Bytes: 300 << 20, Night: "2026-09-12"}
+		files[i] = listedFile{Path: fmt.Sprintf("DATA/20260912/%03d.WAV", i), Bytes: 300 << 20}
 	}
-	body := oneNightBody("SW-03", "2026-09-14", "2026-09-12", files)
+	body := filesBody("SW-03", "2026-09-14", files)
 	rec := do(t, mux, http.MethodPost, "/api/v1/uploads", body, vol)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("a 120 GB card = %d, want %d (%s)", rec.Code, http.StatusCreated, rec.Body)
@@ -803,7 +823,11 @@ func TestReRegisteringACardResumesIt(t *testing.T) {
 	// Picking the card up again answers the same list, so the browser can check
 	// a folder against it before registering it.
 	got := decodeInto[registeredBody](t, do(t, mux, http.MethodGet, "/api/v1/uploads/OWL-20260907-SR02", "", jane))
-	if len(got.Files) != len(reg.Files) || got.Files[0] != reg.Files[0] || got.Files[0].Status != db.AudioPending {
+	same := func(a, b CardFile) bool {
+		return a.Path == b.Path && a.Bytes == b.Bytes && a.Status == b.Status &&
+			a.RecordedAt != nil && b.RecordedAt != nil && a.RecordedAt.Equal(*b.RecordedAt)
+	}
+	if len(got.Files) != len(reg.Files) || !same(got.Files[0], reg.Files[0]) || got.Files[0].Status != db.AudioPending {
 		t.Errorf("card's files = %d, first %+v; want the %d registered, pending", len(got.Files), got.Files[0], len(reg.Files))
 	}
 
@@ -1101,7 +1125,7 @@ func TestAddStationRejectsBadIDs(t *testing.T) {
 	// And a card can't be registered against an id no recorder could have.
 	vol := signedIn(t, mux, db.RoleVolunteer)
 	rec := do(t, mux, http.MethodPost, "/api/v1/uploads",
-		`{"stationId":"SW/02","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":1,"bytes":100}],"files":[{"path":"a.wav","sizeBytes":100}]}`, vol)
+		`{"stationId":"SW/02","pulledOn":"2026-09-14","files":[{"path":"a.wav","bytes":100}]}`, vol)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("card for an unusable station id = %d, want %d (%s)", rec.Code, http.StatusBadRequest, rec.Body)
 	}
@@ -1198,7 +1222,7 @@ func TestRemoveStation(t *testing.T) {
 	// A new card can't be registered against it.
 	vol := signedIn(t, mux, db.RoleVolunteer)
 	rec = do(t, mux, http.MethodPost, "/api/v1/uploads",
-		`{"stationId":"SW-05","pulledOn":"2026-09-14","nights":[{"date":"2026-09-12","files":24,"bytes":100}]}`, vol)
+		`{"stationId":"SW-05","pulledOn":"2026-09-14","files":[{"path":"a.wav","bytes":100}]}`, vol)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("card for a removed recorder = %d, want %d", rec.Code, http.StatusBadRequest)
 	}

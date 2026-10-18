@@ -1,6 +1,6 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, typography } from "../shared-styles.js";
-import { byteSize, count, duration, longDate, megabits, nightRange } from "../format.js";
+import { byteSize, count, dateRange, duration, longDate, megabits } from "../format.js";
 import { navigate } from "../router.js";
 import * as flow from "../upload-flow.js";
 
@@ -58,7 +58,6 @@ class UploadDone extends BaseElement {
       this.shadowRoot.innerHTML = this.#loadError ? lookupFailed(this.#loadError) : `<p class="lede">One moment…</p>`;
       return;
     }
-    const nights = upload.nights ?? [];
     const speed = flow.averageBytesPerSecond();
     const packed = flow.compression();
 
@@ -105,7 +104,7 @@ class UploadDone extends BaseElement {
         <dl class="summary">
           ${entry("Reference", upload.reference)}
           ${entry("Recorder", `${upload.stationId} · ${upload.stationName}`)}
-          ${entry("Nights", `${count(nights.length)} · ${nightRange(nights)}`)}
+          ${upload.firstRecordingAt ? entry("Recorded", dateRange(upload.firstRecordingAt, upload.lastRecordingAt)) : ""}
           ${entry("Files received", `${count(upload.filesUploaded)} of ${count(upload.fileCount)} · ${byteSize(upload.totalBytes)}`)}
           ${speed ? entry("Upload speed", `${megabits(speed)} average · ${duration(flow.minutesElapsed())}`) : ""}
           ${packed ? entry("Compression", compression(packed)) : ""}
@@ -117,7 +116,7 @@ class UploadDone extends BaseElement {
       <div class="panel panel--callout next">
         <h3>What happens next</h3>
         <p style="font-size: 0.90625rem; line-height: 1.65; color: var(--bs-text-soft);">
-          BirdNET is running on your ${count(nights.length)} nights now — it usually finishes
+          BirdNET is running on your ${count(upload.fileCount)} recordings now — it usually finishes
           overnight. You'll get a second email with the results for this card, and any owl
           detections go to the review volunteers before they appear on the public page.
         </p>

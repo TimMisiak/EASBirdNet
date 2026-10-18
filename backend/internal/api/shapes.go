@@ -40,26 +40,18 @@ type Species struct {
 	CommonName     string    `json:"commonName"`
 	ScientificName string    `json:"scientificName"`
 	Detections     int       `json:"detections"`
-	Nights         int       `json:"nights"`
+	Days           int       `json:"days"` // dates heard on, Pacific
 	Stations       []string  `json:"stations"`
 	LastDetectedAt time.Time `json:"lastDetectedAt"`
 }
 
 // ProgramStats are the three headline numbers on the public page.
 type ProgramStats struct {
-	Recorders           int `json:"recorders"`
-	NightsRecorded      int `json:"nightsRecorded"`
+	Recorders int `json:"recorders"`
+	// Recordings is how many files have come in off cards whose recording
+	// began this year.
+	Recordings          int `json:"recordings"`
 	ConfirmedDetections int `json:"confirmedDetections"`
-}
-
-// Night is one dusk-to-dawn block of recording found on a card.
-type Night struct {
-	Date  string `json:"date"` // YYYY-MM-DD, the evening the night began
-	Files int    `json:"files"`
-	Bytes int64  `json:"bytes"`
-	// Flag is "" when the night looks normal, otherwise a short reason the
-	// volunteer should eyeball it ("short", "partial").
-	Flag string `json:"flag,omitempty"`
 }
 
 // QueueStatus is where BirdNET analysis stands on this server: not a stored
@@ -77,17 +69,20 @@ type QueueStatus struct {
 
 // Upload is one SD card on its way from a station into storage.
 type Upload struct {
-	Reference     string  `json:"reference"`
-	StationID     string  `json:"stationId"`
-	StationName   string  `json:"stationName"`
-	VolunteerName string  `json:"volunteerName"`
-	PulledOn      string  `json:"pulledOn"` // YYYY-MM-DD
-	Notes         string  `json:"notes"`
-	Nights        []Night `json:"nights"`
-	FileCount     int     `json:"fileCount"`
-	FilesUploaded int     `json:"filesUploaded"`
-	TotalBytes    int64   `json:"totalBytes"`
-	BytesUploaded int64   `json:"bytesUploaded"`
+	Reference     string `json:"reference"`
+	StationID     string `json:"stationId"`
+	StationName   string `json:"stationName"`
+	VolunteerName string `json:"volunteerName"`
+	PulledOn      string `json:"pulledOn"` // YYYY-MM-DD
+	Notes         string `json:"notes"`
+	// FirstRecordingAt and LastRecordingAt are when the card's first and last
+	// recordings started, where the file names say.
+	FirstRecordingAt *time.Time `json:"firstRecordingAt,omitempty"`
+	LastRecordingAt  *time.Time `json:"lastRecordingAt,omitempty"`
+	FileCount        int        `json:"fileCount"`
+	FilesUploaded    int        `json:"filesUploaded"`
+	TotalBytes       int64      `json:"totalBytes"`
+	BytesUploaded    int64      `json:"bytesUploaded"`
 	// FilesAnalyzed, FilesFailed and DetectionCount are BirdNET's progress
 	// through the card once it has been received.
 	FilesAnalyzed  int `json:"filesAnalyzed"`
@@ -129,7 +124,6 @@ type Analysis struct {
 type AudioFile struct {
 	ID    string `json:"id"`
 	Path  string `json:"path"`
-	Night string `json:"night"` // YYYY-MM-DD
 	Bytes int64  `json:"bytes"`
 	// Encoding is how the browser sent it: "" as it was on the card, or
 	// db.EncodingFLAC. StoredBytes is what that came to in storage.
@@ -184,7 +178,6 @@ type ListedDetection struct {
 	Detection
 	Reference   string `json:"reference"`
 	StationName string `json:"stationName"`
-	Night       string `json:"night"` // YYYY-MM-DD
 }
 
 // DetectionWindow is the date range the server bounded a list of every card's
@@ -232,13 +225,13 @@ type Review struct {
 	At time.Time `json:"at"`
 }
 
-// CardFile is one audio file on a card. The browser lists them when it
-// registers a card, and gets them back with where each one stands.
+// CardFile is one audio file on a card, as the browser gets it back after
+// registering the card (listedFile): where each one stands.
 type CardFile struct {
-	Path   string `json:"path"` // relative to the card's root, forward slashes
-	Bytes  int64  `json:"bytes"`
-	Night  string `json:"night"`            // YYYY-MM-DD, the evening the night began
-	Status string `json:"status,omitempty"` // db.AudioPending, db.AudioUploaded, ...; ignored on the way in
+	Path       string     `json:"path"` // relative to the card's root, forward slashes
+	Bytes      int64      `json:"bytes"`
+	RecordedAt *time.Time `json:"recordedAt,omitempty"` // when its name says it started
+	Status     string     `json:"status"`               // db.AudioPending, db.AudioUploaded, ...
 }
 
 // pacific is the program's timezone: the day someone was added is the day it
@@ -281,13 +274,10 @@ func personOf(u db.User) Person {
 // name are the copies taken then, not the recorder's or person's today. The
 // retention policy is the server's, not the card's, so it is passed in.
 func uploadOf(u db.Upload, keep retention.Policy) Upload {
-	nights := make([]Night, len(u.Nights))
-	for i, n := range u.Nights {
-		nights[i] = Night(n)
-	}
 	return Upload{
 		Reference: u.ID, StationID: u.RecorderID, StationName: u.Recorder.Name,
-		VolunteerName: u.UserName, PulledOn: u.PulledOn, Notes: u.Notes, Nights: nights,
+		VolunteerName: u.UserName, PulledOn: u.PulledOn, Notes: u.Notes,
+		FirstRecordingAt: u.FirstRecordingAt, LastRecordingAt: u.LastRecordingAt,
 		FileCount: u.FileCount, FilesUploaded: u.FilesUploaded,
 		TotalBytes: u.TotalBytes, BytesUploaded: u.BytesUploaded,
 		FilesAnalyzed: u.FilesAnalyzed, FilesFailed: u.FilesFailed, DetectionCount: u.DetectionCount,
@@ -306,10 +296,10 @@ func analysisOf(a *db.Analysis) *Analysis {
 
 func audioFileOf(f db.AudioFile) AudioFile {
 	out := AudioFile{
-		ID: f.ID, Path: f.Path, Night: f.Night, Bytes: f.SizeBytes,
+		ID: f.ID, Path: f.Path, Bytes: f.SizeBytes,
 		Encoding: f.Encoding, StoredBytes: f.StoredBytes,
 		Status: f.Status, StatusDetail: f.StatusDetail,
-		RecordedAt: f.RecordedAt, UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
+		RecordedAt: recordedAt(f), UploadedAt: f.UploadedAt, AnalyzedAt: f.AnalyzedAt,
 		AudioDeletedAt: f.AudioDeletedAt, DetectionCount: f.DetectionCount,
 	}
 	if p := f.Perch; p != nil {
@@ -333,8 +323,20 @@ func detectionOf(d db.Detection) Detection {
 	return out
 }
 
+// recordedAt is when a file's recording started: as stored, or from its name
+// for a file registered before registration stored it.
+func recordedAt(f db.AudioFile) *time.Time {
+	if f.RecordedAt != nil {
+		return f.RecordedAt
+	}
+	if t, ok := db.RecordedAt(f.Path); ok {
+		return &t
+	}
+	return nil
+}
+
 func cardFileOf(f db.AudioFile) CardFile {
-	return CardFile{Path: f.Path, Bytes: f.SizeBytes, Night: f.Night, Status: f.Status}
+	return CardFile{Path: f.Path, Bytes: f.SizeBytes, RecordedAt: recordedAt(f), Status: f.Status}
 }
 
 // cardFilesOf is a card's list as it was last read off the card: every file

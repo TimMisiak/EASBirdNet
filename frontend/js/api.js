@@ -68,12 +68,12 @@ export const fetchStations = () => get("/stations");
 
 /** The signed-in volunteer's own cards, newest first. */
 export const fetchMyUploads = () => get("/uploads");
-/** One of the volunteer's cards, and each file on its list with its status ({path, bytes, night, status}). */
+/** One of the volunteer's cards, and each file on its list with its status ({path, bytes, recordedAt, status}). */
 export const fetchUpload = (reference) => get(`/uploads/${encodeURIComponent(reference)}`);
 
 /**
  * Register a card that is about to be sent, with the files read off it
- * ({path, bytes, night}). Returns the card with its reference, and each file
+ * ({path, bytes}). Returns the card with its reference, and each file
  * with its status on the server, so a resume sends only what's missing.
  */
 export const createUpload = (body) => request("POST", "/uploads", body);

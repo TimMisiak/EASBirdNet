@@ -53,7 +53,7 @@ class AdminUploads extends UploadsTable {
       CELLS.referenceLink,
       CELLS.volunteer,
       CELLS.station,
-      CELLS.nights,
+      CELLS.recorded,
       CELLS.files,
       CELLS.detections,
       CELLS.status,

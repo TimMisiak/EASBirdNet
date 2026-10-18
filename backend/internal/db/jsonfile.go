@@ -517,7 +517,7 @@ func (s *jsonFile) save() error {
 }
 
 // clone deep-copies a document, so nothing a caller does to a returned value
-// (appending to Nights, say) reaches the stored copy. A JSON round trip is the
+// (through a pointer field, say) reaches the stored copy. A JSON round trip is the
 // same copy Cosmos DB makes, which keeps the two backends honest.
 func clone[T any](v T) T {
 	b, err := json.Marshal(v)

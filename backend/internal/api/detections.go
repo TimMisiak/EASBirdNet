@@ -186,7 +186,7 @@ func (h *handlers) stationsOf(ctx context.Context, ds []db.Detection) (map[strin
 func listedOf(d db.Detection, stations map[string]string) ListedDetection {
 	return ListedDetection{
 		Detection: detectionOf(d), Reference: d.UploadID,
-		StationName: cmp.Or(stations[d.UploadID], d.RecorderID), Night: d.Night,
+		StationName: cmp.Or(stations[d.UploadID], d.RecorderID),
 	}
 }
 

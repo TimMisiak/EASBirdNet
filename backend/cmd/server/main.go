@@ -685,12 +685,16 @@ func readAuth(cfg *config) error {
 }
 
 // prepareDatabase is everything the server writes on its own before it serves:
-// the bootstrap admin, and in dev mode the placeholder program if the database
-// is still empty after that. Outside dev mode the bootstrap admin is the only
-// write the server ever makes unasked.
+// the bootstrap admin, recording times for cards registered before cards had
+// them, and in dev mode the placeholder program if the database is still
+// empty after that. Outside dev mode those first two are the only writes the
+// server ever makes unasked.
 func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
 	if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
 		return fmt.Errorf("bootstrapping the roster: %w", err)
+	}
+	if err := backfillRecordingTimes(ctx, store, log); err != nil {
+		return fmt.Errorf("dating cards from their files: %w", err)
 	}
 	if !cfg.Dev {
 		return nil
@@ -701,6 +705,60 @@ func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.
 	}
 	if seeded {
 		log.Info("seeded an empty dev database with placeholder people and recorders", "path", cfg.DB.LocalPath)
+	}
+	return nil
+}
+
+// backfillRecordingTimes gives a card registered before cards were dated by
+// their recordings its first and last recording times, read from its files'
+// names as registration now does. It only touches cards without them, so
+// after the first start it is one query and nothing else -- except for a card
+// whose file names carry no time, which is read again each start and left as
+// it is.
+//
+// Cards used to be dated by "nights" instead, which nothing reads any more;
+// the field is left in the old documents, unread, rather than rewritten.
+func backfillRecordingTimes(ctx context.Context, store db.Store, log *slog.Logger) error {
+	uploads, err := store.ListUploads(ctx, db.UploadFilter{})
+	if err != nil {
+		return err
+	}
+	for _, u := range uploads {
+		if u.FirstRecordingAt != nil || u.Status == db.StatusDeleting {
+			continue
+		}
+		files, err := store.ListAudioFiles(ctx, u.ID)
+		if err != nil {
+			return err
+		}
+		var first, last *time.Time
+		for _, f := range files {
+			t := f.RecordedAt
+			if t == nil {
+				if named, ok := db.RecordedAt(f.Path); ok {
+					t = &named
+				}
+			}
+			if t == nil || f.StatusDetail == db.AudioDetailNotOnCard {
+				continue
+			}
+			if first == nil || t.Before(*first) {
+				first = t
+			}
+			if last == nil || t.After(*last) {
+				last = t
+			}
+		}
+		if first == nil {
+			continue
+		}
+		if _, err := store.UpdateUpload(ctx, u.ID, func(u *db.Upload) error {
+			u.FirstRecordingAt, u.LastRecordingAt = first, last
+			return nil
+		}); err != nil {
+			return err
+		}
+		log.Info("dated a card by its recordings", "card", u.ID, "first", first, "last", last)
 	}
 	return nil
 }

@@ -33,39 +33,31 @@ type registeredBody struct {
 	Files  []CardFile `json:"files"`
 }
 
-// cardBody is a POST /api/v1/uploads body for a card with nights of perNight
-// files, 100 bytes each, the first night on firstNight.
-func cardBody(stationID, pulledOn, notes, firstNight string, nights, perNight int) string {
-	first, err := time.Parse("2006-01-02", firstNight)
+// cardBody is a POST /api/v1/uploads body for a card with a folder a day for
+// days days, the first on firstDay, of perDay files of 100 bytes each, named
+// for when they were recorded as a recorder names them: a minute apart from
+// 20:00 Pacific.
+func cardBody(stationID, pulledOn, notes, firstDay string, days, perDay int) string {
+	first, err := time.ParseInLocation("2006-01-02", firstDay, pacific)
 	if err != nil {
 		panic(err)
 	}
-	var ns []Night
-	var fs []CardFile
-	for i := range nights {
-		date := first.AddDate(0, 0, i).Format("2006-01-02")
-		ns = append(ns, Night{Date: date, Files: perNight, Bytes: int64(100 * perNight)})
-		for j := range perNight {
-			path := fmt.Sprintf("DATA/%s/%03d.WAV", strings.ReplaceAll(date, "-", ""), j)
-			fs = append(fs, CardFile{Path: path, Bytes: 100, Night: date})
+	var fs []listedFile
+	for i := range days {
+		day := first.AddDate(0, 0, i)
+		for j := range perDay {
+			at := day.Add(20*time.Hour + time.Duration(j)*time.Minute)
+			path := fmt.Sprintf("DATA/%s/%s.WAV", day.Format("20060102"), at.Format("20060102_150405"))
+			fs = append(fs, listedFile{Path: path, Bytes: 100})
 		}
 	}
-	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "notes": notes, "nights": ns, "files": fs})
+	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "notes": notes, "files": fs})
 	return string(b)
 }
 
-// oneNightBody is a POST /api/v1/uploads body for a card holding one night of
-// the files given, summed into it the way the browser sums them.
-func oneNightBody(stationID, pulledOn, night string, files []CardFile) string {
-	var bytes int64
-	for _, f := range files {
-		bytes += f.Bytes
-	}
-	b, _ := json.Marshal(map[string]any{
-		"stationId": stationID, "pulledOn": pulledOn,
-		"nights": []Night{{Date: night, Files: len(files), Bytes: bytes}},
-		"files":  files,
-	})
+// filesBody is a POST /api/v1/uploads body for a card holding the files given.
+func filesBody(stationID, pulledOn string, files []listedFile) string {
+	b, _ := json.Marshal(map[string]any{"stationId": stationID, "pulledOn": pulledOn, "files": files})
 	return string(b)
 }
 
@@ -411,7 +403,7 @@ func TestReRegisteringACardKeepsTheFilesAlreadyIn(t *testing.T) {
 		t.Errorf("re-registered = %d uploaded, files %+v; want the first file kept", again.Upload.FilesUploaded, again.Files)
 	}
 
-	// A different folder that shares only the later nights: the first night's
+	// A different folder that shares only the later days: the first day's
 	// file is off the list and no longer counts, and the new one is pending.
 	moved := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-13", 3, 1))
 	paths := []string{}
@@ -457,9 +449,9 @@ func TestReRegisteringAFileAtADifferentLengthReplacesWhatWasStored(t *testing.T)
 		t.Fatalf("received file = %+v, %v", stored, err)
 	}
 
-	longer := oneNightBody("SW-03", "2026-09-14", "2026-09-12", []CardFile{
-		{Path: first, Bytes: 150, Night: "2026-09-12"},
-		{Path: second, Bytes: 100, Night: "2026-09-12"},
+	longer := filesBody("SW-03", "2026-09-14", []listedFile{
+		{Path: first, Bytes: 150},
+		{Path: second, Bytes: 100},
 	})
 	if u := s.register(jane, longer).Upload; u.FilesUploaded != 0 || u.TotalBytes != 250 {
 		t.Errorf("after the longer list = %d files, %d bytes; want 0 of 250", u.FilesUploaded, u.TotalBytes)

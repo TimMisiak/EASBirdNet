@@ -41,9 +41,13 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
   two timestamps: creates set both, and updates and upserts set `updatedAt`.
 - **Instants** are RFC 3339 strings in UTC, e.g. `"2026-09-13T10:12:00Z"`.
   Cosmos compares them as strings, which orders correctly only to whole seconds.
-- **Calendar dates** are `YYYY-MM-DD` strings: `pulledOn`, and a `night` (the
-  *evening* a night began, so a 3 a.m. file belongs to the day before). Sent as
-  a timestamp, a date lands on the previous day for every reader west of UTC.
+- **Calendar dates** are `YYYY-MM-DD` strings: `pulledOn` alone. Sent as a
+  timestamp, a date lands on the previous day for every reader west of UTC.
+  Everything else that says when is an instant.
+- **No nights.** Documents written before cards were dated by their
+  recordings still carry `uploads.nights`, `audioFiles.night` and
+  `detections.night` (the evening a dusk-to-dawn night began). Nothing reads
+  them; they go when a document is next replaced.
 - **Optional fields** (marked `?` below) are left out of the document when
   empty, not stored as `null` or `""`.
 - **Cosmos system properties** (`_rid`, `_etag`, `_ts`, ...) are added by
@@ -138,9 +142,10 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `userName`       | string   | Copy of the volunteer's name at registration time. |
 | `pulledOn`       | date     | The day the card came out of the recorder. |
 | `notes?`         | string   | Free text from the volunteer ("Batteries at 20% when swapped"). |
-| `nights`         | array    | Per-night manifest the browser read off the card; see below. |
-| `fileCount`      | integer  | Sum of `nights[].files`. |
-| `totalBytes`     | integer  | Sum of `nights[].bytes`. |
+| `firstRecordingAt?` | instant | When the card's first recording started, from its file names (`db.RecordedAt`) at registration. Absent when no name carries a time. Cards registered before this field are given it from their files' names when the server starts. |
+| `lastRecordingAt?`  | instant | When its last recording started; it ran for one file's length after that. |
+| `fileCount`      | integer  | How many files the browser listed off the card. |
+| `totalBytes`     | integer  | Their total size. |
 | `filesUploaded`  | integer  | The card's audio files in `uploaded`, `analyzing` or `analyzed` status, counted by the server as each file lands. Capped at `fileCount`. |
 | `bytesUploaded`  | integer  | Their total size. Capped at `totalBytes`. |
 | `filesAnalyzed`  | integer  | The card's listed audio files in `analyzed` status, recounted by the analysis queue after each file. |
@@ -159,15 +164,6 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `createdAt`      | instant  | When the card was first registered. |
 | `updatedAt`      | instant  | |
 
-**`nights[]`**, one dusk-to-dawn block of recording:
-
-| Field   | Type    | Notes |
-|---------|---------|-------|
-| `date`  | date    | The evening the night began. |
-| `files` | integer | |
-| `bytes` | integer | |
-| `flag?` | string  | `short` (well under a typical night) or `partial` (a short last night). Absent when normal. |
-
 **`analysis`**:
 
 | Field           | Type    | Notes |
@@ -181,7 +177,7 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `perchModel?`   | string  | The Perch model that ran after BirdNET, `Perch_v2`, set when Perch finishes its first file. Absent when Perch wasn't on. Perch uses `minConfidence` and `overlapSec` too; `sensitivity` is BirdNET's alone. |
 
 Every file is analyzed with the recorder's position (the `recorder` copy) and
-the BirdNET week of its night, so BirdNET's geo model narrows the species to
+the BirdNET week of when it was recorded (Pacific), so BirdNET's geo model narrows the species to
 those expected there and then. Perch, when it runs, is narrowed to the same
 species, matched by scientific name.
 
@@ -194,10 +190,8 @@ species, matched by scientific name.
   "userName": "Jane Volunteer",
   "pulledOn": "2026-09-07",
   "notes": "Batteries at 20% when swapped.",
-  "nights": [
-    { "date": "2026-08-24", "files": 24, "bytes": 9192000000 },
-    { "date": "2026-08-30", "files": 11, "bytes": 4213000000, "flag": "short" }
-  ],
+  "firstRecordingAt": "2026-08-25T03:00:00Z",
+  "lastRecordingAt": "2026-08-31T12:00:00Z",
   "fileCount": 35,
   "totalBytes": 13405000000,
   "filesUploaded": 20,
@@ -241,8 +235,7 @@ interruption produces the same ids instead of duplicates.
 | `recorderId`     | string  | → `recorders.id`, copied from the upload for convenience. |
 | `path`           | string  | Path on the card relative to its root, forward slashes, e.g. `DATA/20260824/20260825_040000.WAV`. |
 | `sizeBytes`      | integer | The file's length on the card, which is what the card's totals and counts add up, however it was sent. |
-| `night`          | date    | The evening the recording's night began. |
-| `recordedAt?`    | instant | Recording start, when known. The analysis queue fills it in from the file name (`20260723_160624`, local time, with an optional `(-0700)` offset; Pacific without one). |
+| `recordedAt?`    | instant | Recording start, when known: from the file name (`20260723_160624`, local time, with an optional `(-0700)` offset; Pacific without one) when the card is registered, or by the analysis queue for a file registered before that. |
 | `durationSec?`   | number  | Filled in by the analysis queue, which reads it while cutting clips. |
 | `sampleRate?`    | integer | Hz, filled in the same way. |
 | `blobName?`      | string  | Where the audio is stored, set when its last byte lands; see [Blob naming](#blob-naming). |
@@ -286,7 +279,6 @@ finishes without it.
   "recorderId": "SW-02",
   "path": "DATA/20260824/20260825_040000.WAV",
   "sizeBytes": 383000000,
-  "night": "2026-08-24",
   "recordedAt": "2026-08-25T11:00:00Z",
   "durationSec": 3600,
   "sampleRate": 48000,
@@ -343,8 +335,7 @@ overwrites rather than duplicates.
 | `uploadId`       | string  | → `uploads.id`. **Partition key.** |
 | `audioFileId`    | string  | → `audioFiles.id` |
 | `recorderId`     | string  | → `recorders.id` |
-| `detectedAt`     | instant | Recording start (`audioFiles.recordedAt`) + `startSec`. For a file whose name has no time, midnight Pacific at the start of its `night`. |
-| `night`          | date    | The evening the night began. |
+| `detectedAt`     | instant | Recording start (`audioFiles.recordedAt`) + `startSec`. For a file whose name has no time, midnight Pacific at the start of the day the card was pulled -- the only date known. |
 | `startSec`       | number  | Start of the run's first window, seconds into the file. |
 | `endSec`         | number  | End of its last window. |
 | `scientificName` | string  | As BirdNET labelled it, e.g. `Strix varia`. Perch's labels are the same scientific names. |
@@ -392,7 +383,6 @@ they are what a threshold or model change gets measured against.
   "audioFileId": "af_5b1e0f9d2c7a4e38b6d1f0a9c3e2b7d4",
   "recorderId": "SW-02",
   "detectedAt": "2026-08-25T11:12:12Z",
-  "night": "2026-08-24",
   "startSec": 732,
   "endSec": 735,
   "scientificName": "Strix varia",
@@ -599,9 +589,9 @@ public summary), following these rules:
 | `upload.audioDeletedAt`, `files[].audioDeletedAt` | the stored fields of the same name |
 | `upload.audioExpiresAt` | computed, not stored: `uploads.receivedAt` + the server's retention window. Left out once the audio has gone, while the card is still being analyzed, or when retention is off |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
-| `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `nights` = distinct `night`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
+| `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `days` = distinct Pacific dates of `detectedAt`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
 | `program.recorders` | recorders with no `retiredAt` |
-| `program.nightsRecorded` | distinct (`recorderId`, `nights[].date`) across all uploads, dated this calendar year (Pacific) |
+| `program.recordings` | sum of `fileCount` over the uploads (not being deleted) whose `firstRecordingAt` -- or `pulledOn`, without one -- falls in this calendar year (Pacific) |
 | `program.confirmedDetections` | `detections` where `reviewStatus = confirmed`, heard this calendar year (Pacific). BirdNET's alone, like `species[]` |
 
 What the write routes do to documents:
@@ -610,13 +600,13 @@ What the write routes do to documents:
 |-------|--------|
 | `GET /stations`, `GET /admin/people`, `GET /dev/people` | Leave out retired recorders and removed users. |
 | `POST /session` | Sets `lastSignInAt`. A removed user can't sign in, and their open session stops working. |
-| `POST /uploads` | Creates the upload, and a `pending` audio file for each file listed. The list has to add up to `nights`. If that id exists and is the caller's, it is a resume: `notes` are replaced and the `recorder`/`userName` copies are kept. If the card is already received, the same list (paths and sizes) answers the card as it is, and a different list is a 409: it is another card with that recorder and pull date. If the card was still transferring, `nights` and the totals are replaced too, `status` goes back to `in_progress`, and the audio files are matched to the new list by path and size: a listed file already in at the same size stays in, and one at the same size that had been taken off the list is `uploaded` again on the bytes it already has; a listed file at a different size is a different recording, so what was stored for it is deleted before its document goes back to `pending` (the document is the only thing naming that blob); any other listed file is `pending`, and a file no longer listed becomes `failed`. The uploaded counts are then recounted. Someone else's card is a 409. A list no card could hold -- a file over 32 GiB, or a card over 1 TiB or 50,000 files -- is a 400, as is one that doesn't add up. Answers the card and its listed files. |
+| `POST /uploads` | Creates the upload, and a `pending` audio file for each file listed, each with `recordedAt` from its name; the card's `firstRecordingAt`/`lastRecordingAt`, `fileCount` and `totalBytes` come from the same list. A page from before cards were dated by their recordings still sends `nights` and a `night` per file, which are read and ignored. If that id exists and is the caller's, it is a resume: `notes` are replaced and the `recorder`/`userName` copies are kept. If the card is already received, the same list (paths and sizes) answers the card as it is, and a different list is a 409: it is another card with that recorder and pull date. If the card was still transferring, the recording times and the totals are replaced too, `status` goes back to `in_progress`, and the audio files are matched to the new list by path and size: a listed file already in at the same size stays in, and one at the same size that had been taken off the list is `uploaded` again on the bytes it already has; a listed file at a different size is a different recording, so what was stored for it is deleted before its document goes back to `pending` (the document is the only thing naming that blob); any other listed file is `pending`, and a file no longer listed becomes `failed`. The uploaded counts are then recounted. Someone else's card is a 409. A list no card could hold -- a file over 32 GiB, or a card over 1 TiB or 50,000 files -- is a 400, as is a file listed twice. Answers the card and its listed files. |
 | `GET /uploads/{ref}` | Answers the card and its listed files with their `status`, the same list `POST /uploads` answers. The browser checks a card chosen again against it before registering it. |
 | `POST /uploads/{ref}/progress` | Sets `status` to the client's `in_progress` or `interrupted`, only while the card is one of those. The client can't report counts. |
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. A WAV may instead be sent as FLAC, with metadata `encoding: flac` and `samples`, the samples per channel the WAV holds (its `data` chunk over its block size): its length is then the FLAC's, which has to be at least a FLAC header and at most what a FLAC of the listed length could be (`maxFLACBytes`), and `samples` no more than the listed length. Any other `encoding`, or `flac` for anything but a `.wav`, is a 400. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | For a file sent as FLAC, first reads its STREAMINFO, and refuses it -- a 400 `ERR_FILE_FLAC`, with the upload's bytes deleted and the file left `pending` -- unless it holds exactly `samples` samples: not a FLAC, a total of 0 (a header never patched once the encode ended, which libsndfile reads as endless), or any other total (an encode cut short). Then sets the audio file's `status` to `uploaded` with `uploadedAt`, `blobName`, `encoding` and `storedBytes`, then adds it to `filesUploaded` and `bytesUploaded` -- only the write that changes the file's status counts it. When that brings `filesUploaded` to `fileCount`, recounts both from the card's audio files, and when none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list, and `queue`. |
-| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`, `model=birdnet\|perch`) as `{detections, total, species, window?}`. One model's detections at a time: BirdNET's unless `model=perch`, since the two models heard the same audio and a list of both would show most birds twice. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), `stationName` (a `GetUpload` of each card on the page, `recorder.name`) and `night`. `species[]` counts every match in the window before the species filter. |
+| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`, `model=birdnet\|perch`) as `{detections, total, species, window?}`. One model's detections at a time: BirdNET's unless `model=perch`, since the two models heard the same audio and a list of both would show most birds twice. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), and `stationName` (a `GetUpload` of each card on the page, `recorder.name`). `species[]` counts every match in the window before the species filter. |
 | `GET /detections/export` | Answers every detection `GET /detections`' parameters match, in its order, as a file to save (`Content-Disposition: attachment`): one object, `{exportedAt, model, since, until?, status?, minConfidence?, species?, sort, order, window?, total, detections}`, each row as the list's. `limit` and `offset` don't apply. Bounded by the same window and `MaxDetectionScan`, with the same 400. |
 | `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's -- BirdNET's, or Perch's with `model=perch` -- in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
