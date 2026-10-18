@@ -25,7 +25,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections;
 │       │               and the Dispatcher that starts the job's workers
 │       ├── azjob/      Starts and counts the analysis job's executions (ARM REST)
-│       ├── api/        JSON handlers under /api/v1/
+│       ├── api/        JSON handlers under /api/v1/; the MCP endpoint and its OAuth server
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── deletion/   Removes the cards a coordinator deletes, in the background
@@ -203,6 +203,15 @@ POST   /api/v1/admin/stations
 PUT    DELETE /api/v1/admin/stations/{id} rename, move or remove a recorder
 GET    /api/v1/dev/people                 the roster, dev mode only
 POST   /api/v1/session                    sign in as anyone on it, dev mode only
+
+POST   /api/v1/mcp                        MCP, for an LLM tool: a bearer token from the OAuth routes below
+GET    /api/v1/mcp/export?token=          a detections_export link: a range as CSV
+GET    /.well-known/oauth-protected-resource[/api/v1/mcp]   which authorization server the MCP endpoint trusts
+GET    /.well-known/oauth-authorization-server              where the OAuth endpoints are
+POST   /api/v1/oauth/register             an MCP client registers itself
+GET    POST /api/v1/oauth/authorize       to the consent page; Allow or Cancel from it
+GET    /api/v1/oauth/request?request=     what the consent page shows
+POST   /api/v1/oauth/token                a code or a refresh token for tokens
 ```
 
 Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
@@ -265,6 +274,9 @@ widening the dates -- more recorders will do it, and so will a whole season on
 one screen or a species tally that has to count what the window leaves out.
 Then the answer is a precomputed summary document and a query the database
 pages itself, not a wider window and a higher ceiling.
+The MCP tools (*LLM tools connect over MCP*) are the one reader with no
+ceiling, because they hold nothing: `Store.EachDetection` hands over a page
+at a time, and the summary keeps tallies, the export writes rows as they come.
 
 **The landing page is answered a minute at a time.** `GET /public/overview`
 needs no session, and answering it reads every recorder, every card and every
@@ -302,6 +314,12 @@ whole router; `<bs-app>` holds the route table (exact paths, plus `prefix`
 routes for a path with an id on the end) and the two guards (signed in,
 and admin for `/admin/*`). Guards are convenience only -- the API enforces the
 same rules, so guessing a path gets you a 401 or 403, not data.
+The sign-in guard sends someone to `/signin?next=<where they were going>`, and
+both sign-ins go there afterwards -- the dev picker by navigating, the OIDC
+flow by carrying it in its state cookie -- so a link into the app survives
+signing in, and so does `/connect`, the MCP consent page. `next` is held to a
+path on this site on both sides (`localPath` in Go), or sign-in would be an
+open redirect.
 A route may `redirect` instead of naming a page, as a path or as a function of
 the path; the detections tab was two tabs once, so `/admin/detections` and
 `/admin/detections/{reference}/{id}` redirect to the `/app` ones, filters and
@@ -355,6 +373,61 @@ it. That is the only re-check there is -- `session.load()` runs once, at
 startup -- so a page that makes no API call won't notice.
 *Revisit when:* a provider has to be something other than Google or Microsoft,
 or sessions need to be listed and revoked one at a time.
+
+**LLM tools connect over MCP, and Birdsense is the OAuth server.** The weekly
+report is written by an LLM tool reading the data as someone on the roster, so
+`POST /api/v1/mcp` serves MCP (the official Go SDK, `modelcontextprotocol/go-sdk`,
+stateless and plain JSON) behind a bearer token, and `internal/api/oauth.go`
+is the OAuth 2.1 authorization server that issues it -- a claude.ai custom
+connector, or anything else that follows the MCP authorization spec, needs
+only the URL. It can't be Microsoft or Google: neither lets a client register
+itself, and what lets anyone in is the roster. So the authorization endpoint
+checks the client, then hands a signed request to `/connect`
+(`<bs-connect-page>`), which is behind ordinary sign-in and asks "let this app
+read Birdsense as you?"; Allow mints a code, and the token endpoint swaps it,
+with PKCE (S256, required), for an hour's access token and a refresh token.
+Like the session cookie, nothing is stored. A client's registration *is* its
+`client_id` (signed, with a random id so two alike are two); a client that
+registers with a secret gets a MAC of its id; a code is single-use by an
+in-memory list of the spent ones, which only has to outlast the code's minute
+(one replica); and tokens are signed values, each kind under its own key
+derived from `BIRDSENSE_SESSION_KEY` (`keyset.derive`), so no token passes for
+a cookie or for another kind of token. Every token use checks the roster, so
+removing someone ends their connections, and rotating the session key ends
+everyone's. A connection lasts 90 days from Allow, as a session does;
+refreshing doesn't extend it. Redirect URIs must be https, or http on
+loopback (any port, RFC 8252); custom schemes aren't taken.
+Three read-only tools, sized for a week of nights at a time:
+- `list_recorders`: ids, names, positions, and each one's latest night of data.
+- `detection_summary`: a range of nights (noon to noon Pacific, as the card
+  scan assigns files; at most 31, the last 7 by default), filtered by minimum
+  confidence and recorders, aggregated in Go into a few thousand tokens --
+  totals, per-night counts, per species (count, nights, recorders, confidence,
+  reviews, by hour, its best detection's link) and *coverage*: which nights
+  each recorder has analyzed data for, which are still pending, which have no
+  card. Coverage matters because cards arrive a week or two late, and a
+  model reading counts without it reports a quiet recorder as fewer birds.
+  Rejected detections count only in `totals.rejected`; a reviewer's
+  correction replaces BirdNET's species. BirdNET's alone, never Perch's.
+- `detections_export`: the same range as CSV, one row per detection, behind a
+  link the tool returns rather than rows in the conversation -- a week is
+  ~140,000 rows, ~4M tokens, which no context holds. The link is signed with
+  who asked and for what, lasts 30 minutes, and is the only credential the
+  fetch needs, because what fetches it (code in a model's sandbox) holds no
+  token. It is streamed (gzip if asked), and a read that fails part way
+  aborts the response rather than leaving a short file that looks whole.
+Both range tools read through `Store.EachDetection`, two at a time at most
+(`mcpScans`), so memory is a page and Cosmos sees two cross-partition reads.
+Gotchas: the link is a credential in a URL, so it must stay out of logs --
+`fail()` logs the path, not the query, which is why the token is a query
+parameter. And claude.ai's code sandbox only reaches domains its network
+egress settings allow, so the export works there only once the Birdsense
+domain is added; the summary needs nothing.
+*Revisit when:* someone needs to end one connection without ending the rest
+(a stored grant per connection, listed under the person), a client registers
+with a Client ID Metadata Document instead of DCR, or the same ranges are
+asked for often enough that a cached per-week summary is worth its
+invalidation.
 
 **Card audio goes over tus, through the app.** A card is ~128 GB in files of a
 few hundred MB, sent over home connections that drop. The browser sends each
@@ -903,6 +976,12 @@ keeps the database and the audio in two named volumes):
 HOST_PORT=8080 docker compose up --build
 ```
 
+MCP locally: the endpoint is `http://localhost:8080/api/v1/mcp`, and dev
+mode's roster picker is the sign-in the consent page sends you through.
+`claude mcp add --transport http birdsense http://localhost:8080/api/v1/mcp`
+adds it to Claude Code. A claude.ai connector needs a public https URL, so it
+is tried against a deployment.
+
 Checks before committing:
 
 ```sh
@@ -970,6 +1049,10 @@ minimum confidence and the days heard, and opens the same detection page, where 
 through the list as filtered and sorted rather than through the file. It
 opens on the past week, with those dates in its own date fields, and widening
 them past what one replica will read says so rather than failing.
+An LLM tool can connect over MCP as anyone on the roster (*LLM tools connect
+over MCP*) and read summaries and CSV exports of a range of nights; it can't
+change anything. claude.ai's connector hasn't been tried against a deployment
+yet -- the flow is tested end to end with the MCP SDK's own client.
 Anyone signed in can review. Everyone works in the same shell
 (`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
 My uploads, their own cards, where an unfinished one is resumed; and

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -251,6 +253,9 @@ type authState struct {
 	State    string `json:"s"`
 	Nonce    string `json:"n"`
 	Verifier string `json:"v"`
+	// Next is the page to land on once signed in, when it isn't the app's
+	// front door: the MCP consent page, say, which sent them to sign in.
+	Next string `json:"x,omitempty"`
 }
 
 const authStateCookie = "bs_auth"
@@ -273,6 +278,9 @@ func (h *handlers) authStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := authState{Provider: name, State: randomToken(), Nonce: randomToken(), Verifier: oauth2.GenerateVerifier()}
+	if next := r.URL.Query().Get("next"); localPath(next) {
+		state.Next = next
+	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		h.fail(w, r, err)
@@ -346,8 +354,20 @@ func (h *handlers) authCallback(w http.ResponseWriter, r *http.Request) {
 	h.setSession(w, me)
 	h.log.Info("signed in", "provider", name, "email", me.Email, "role", me.Role)
 	// Where the app puts someone on arrival, as the sign-in page does. One set
-	// of tabs, whatever the role, so there is one landing for both.
-	http.Redirect(w, r, "/app", http.StatusFound)
+	// of tabs, whatever the role, so there is one landing for both -- unless
+	// they were sent to sign in from somewhere they mean to go back to.
+	http.Redirect(w, r, cmp.Or(state.Next, "/app"), http.StatusFound)
+}
+
+// localPath says whether next is a path on this site, and so safe to send
+// someone to after signing in. Anything else -- another origin, or a
+// scheme-relative "//elsewhere" -- would make the sign-in an open redirect.
+func localPath(next string) bool {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return false
+	}
+	u, err := url.Parse(next)
+	return err == nil && u.Scheme == "" && u.Host == "" && !strings.ContainsFunc(next, unicode.IsControl)
 }
 
 // signInRefused is a sign-in that failed for a reason the person should see,

@@ -269,6 +269,7 @@ func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, de
 	api.Register(mux, api.Options{
 		Store: store, Files: files, Queue: queue, Deleter: deleter, Log: log,
 		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
+		PublicURL: cfg.Auth.PublicURL,
 	})
 	web.Register(mux, cfg.StaticDir, log)
 	return mux

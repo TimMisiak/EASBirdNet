@@ -312,10 +312,59 @@ func (s *cosmosStore) GetDetection(ctx context.Context, uploadID, id string) (De
 
 // ListDetections is a single-partition query when f.UploadID is set and a
 // cross-partition one otherwise (the public overview, the list of every
-// detection). Timestamps are compared as RFC 3339 strings, which only order
-// correctly to the whole second, so the query widens Since and Until by a second
-// and the shared filter trims the result.
+// detection).
 func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]Detection, error) {
+	query, params := detectionQuery(f)
+	found, err := scanDocs[Detection](ctx, s.detections, f.UploadID, MaxDetectionScan, query, params...)
+	if err != nil {
+		return nil, err
+	}
+	out := found[:0]
+	for _, d := range found {
+		if f.match(d) {
+			out = append(out, d)
+		}
+	}
+	sortDetections(out)
+	return out, nil
+}
+
+// EachDetection is ListDetections' query read a page at a time: each page is
+// decoded, handed over and dropped before the next is asked for, so a week of
+// every recorder's detections costs a page of memory rather than the week.
+func (s *cosmosStore) EachDetection(ctx context.Context, f DetectionFilter, fn func(Detection) error) error {
+	query, params := detectionQuery(f)
+	pk := azcosmos.NewPartitionKey()
+	if f.UploadID != "" {
+		pk = azcosmos.NewPartitionKeyString(f.UploadID)
+	}
+	pager := s.detections.NewQueryItemsPager(query, pk, &azcosmos.QueryOptions{QueryParameters: params})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return cosmosErr(err)
+		}
+		for _, item := range page.Items {
+			var d Detection
+			if err := decodeDoc(item, &d); err != nil {
+				return err
+			}
+			if !f.match(d) {
+				continue
+			}
+			if err := fn(d); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// detectionQuery is the query for a DetectionFilter, which the shared match
+// then trims. Timestamps are compared as RFC 3339 strings, which only order
+// correctly to the whole second, so the query widens Since and Until by a
+// second.
+func detectionQuery(f DetectionFilter) (string, []azcosmos.QueryParameter) {
 	var w where
 	if f.AudioFileID != "" {
 		w.add("c.audioFileId = @audioFileId", "@audioFileId", f.AudioFileID)
@@ -342,18 +391,10 @@ func (s *cosmosStore) ListDetections(ctx context.Context, f DetectionFilter) ([]
 	default:
 		w.add("c.model = @model", "@model", f.Model)
 	}
-	found, err := scanDocs[Detection](ctx, s.detections, f.UploadID, MaxDetectionScan, "SELECT * FROM c"+w.sql(), w.params...)
-	if err != nil {
-		return nil, err
+	if len(f.RecorderIDs) > 0 {
+		w.add("ARRAY_CONTAINS(@recorderIds, c.recorderId)", "@recorderIds", f.RecorderIDs)
 	}
-	out := found[:0]
-	for _, d := range found {
-		if f.match(d) {
-			out = append(out, d)
-		}
-	}
-	sortDetections(out)
-	return out, nil
+	return "SELECT * FROM c" + w.sql(), w.params
 }
 
 func (s *cosmosStore) UpsertDetections(ctx context.Context, uploadID string, detections []Detection) error {

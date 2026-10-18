@@ -44,6 +44,17 @@ func newKeyset(secret string) *keyset {
 	return &keyset{key: sum[:]}
 }
 
+// derive is a keyset for one purpose, keyed off this one. A value signed
+// under it verifies under nothing else, so an MCP access token can't be
+// passed off as a session cookie, nor a session cookie as a token, though
+// both come from BIRDSENSE_SESSION_KEY -- and rotating that key still ends
+// them all.
+func (k *keyset) derive(purpose string) *keyset {
+	m := hmac.New(sha256.New, k.key)
+	m.Write([]byte("birdsense/" + purpose))
+	return &keyset{key: m.Sum(nil)}
+}
+
 // randomToken is an unguessable value: the OAuth state, the OIDC nonce, dev's
 // session key, and anything else that has to be unpredictable.
 func randomToken() string {

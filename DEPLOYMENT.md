@@ -468,6 +468,33 @@ Try it locally first: dev mode reads `BIRDSENSE_OIDC_GOOGLE_CLIENT_ID` and
 `_CLIENT_SECRET` from the environment and shows both the provider button and
 the roster picker.
 
+## Connecting an LLM tool (MCP)
+
+Nothing to deploy: the MCP endpoint and its OAuth server are part of the web
+app (CLAUDE.md, *LLM tools connect over MCP*), and take their issuer from
+`BIRDSENSE_PUBLIC_URL`, which sign-in already needs. If that changes -- a
+custom domain, below -- every connection has to be made again, because the
+tokens name the old one.
+
+To add it to claude.ai: *Settings → Connectors → Add custom connector*, with
+the URL `https://<public URL>/api/v1/mcp` and nothing under *Advanced* --
+claude.ai registers itself. Connecting opens Birdsense's own sign-in and then
+its consent page; the person connecting has to be on the roster. On a Team or
+Enterprise plan an owner adds the connector once, and each person still
+connects as themselves.
+
+`detections_export` hands back a link for code to fetch, and claude.ai's code
+sandbox only reaches domains its network egress settings allow: add the
+public URL's host there (an organization owner does, on Team and Enterprise),
+or the export link won't download from inside a chat. `detection_summary`
+needs no such setting.
+
+What it costs: a summary or an export is one cross-partition read of the
+range -- a week of five recorders is ~140,000 detections -- and at most two
+run at once, a page of memory each. Neither has been timed against Cosmos
+yet; the log line each one writes (`MCP detection summary`, `MCP export
+served`) has the row count and how long it took.
+
 ## Custom domain
 
 Out of the box the app answers on `ca-birdsense-prod.<region>.azurecontainerapps.io`,

@@ -321,6 +321,33 @@ func TestJSONFileListFilters(t *testing.T) {
 	if len(birdnets) != 4 || birdnets[0].Model != "" {
 		t.Errorf("BirdNET's = %d, want the four stored with no model", len(birdnets))
 	}
+
+	// A recorder filter keeps that recorder's detections, and EachDetection
+	// hands over what ListDetections lists, in whatever order.
+	elsewhere := mk(later.ID, 4*time.Hour, "Tyto alba", "")
+	elsewhere.RecorderID = "SW-99"
+	if err := s.UpsertDetections(ctx, later.ID, []Detection{elsewhere}); err != nil {
+		t.Fatal(err)
+	}
+	fromThere, _ := s.ListDetections(ctx, DetectionFilter{RecorderIDs: []string{"SW-99"}})
+	if len(fromThere) != 1 || fromThere[0].RecorderID != "SW-99" {
+		t.Errorf("from SW-99 = %d detections, want its one", len(fromThere))
+	}
+	f := DetectionFilter{Model: ModelBirdNET, RecorderIDs: []string{r.ID, "SW-00"}}
+	listed, _ := s.ListDetections(ctx, f)
+	var each []Detection
+	if err := s.EachDetection(ctx, f, func(d Detection) error { each = append(each, d); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	sortDetections(each)
+	if len(each) != 4 || len(listed) != 4 || each[0].ID != listed[0].ID || each[3].ID != listed[3].ID {
+		t.Errorf("EachDetection = %d detections, ListDetections = %d; want the same four", len(each), len(listed))
+	}
+	stop := errors.New("stop")
+	calls := 0
+	if err := s.EachDetection(ctx, f, func(Detection) error { calls++; return stop }); !errors.Is(err, stop) || calls != 1 {
+		t.Errorf("EachDetection after fn fails = %v after %d calls, want fn's error after one", err, calls)
+	}
 }
 
 func TestJSONFileDeleteUpload(t *testing.T) {

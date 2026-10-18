@@ -56,15 +56,23 @@ type Options struct {
 	// Retention is how long a card's originals are kept, so a card can say
 	// when its audio is due to go. The zero value keeps them for good.
 	Retention retention.Policy
+	// PublicURL is where a browser reaches Birdsense (AuthConfig.PublicURL).
+	// It is the MCP authorization server's identity and the base of every
+	// link a tool hands out, so without it the MCP endpoint isn't offered.
+	PublicURL string
 }
 
 // Register mounts the API routes on mux.
 func Register(mux *http.ServeMux, o Options) {
-	register(mux, &handlers{
+	h := &handlers{
 		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
 		retention: o.Retention, now: time.Now,
-	})
+	}
+	if o.PublicURL != "" {
+		h.oauth = newOAuthServer(o.PublicURL, h.keys)
+	}
+	register(mux, h)
 }
 
 // Queue is the analysis queue (internal/analysis). A received card is queued
@@ -83,6 +91,7 @@ type Deleter interface {
 
 func register(mux *http.ServeMux, h *handlers) {
 	h.overview = newOverviewCache()
+	h.scans = make(chan struct{}, mcpScans)
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 	mux.HandleFunc("GET /api/v1/ready", h.ready)
@@ -135,6 +144,24 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("PUT /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.updateStation))
 	mux.HandleFunc("DELETE /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.removeStation))
 
+	// MCP: an LLM tool reading Birdsense as whoever connected it, which is an
+	// OAuth 2.1 authorization server of Birdsense's own (oauth.go) in front of
+	// three read-only tools (mcp.go). The well-known documents are where RFC
+	// 8414 and RFC 9728 say a client looks, so they are the only routes
+	// outside /api/.
+	if h.oauth != nil {
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.authServerMetadata)
+		mux.Handle("/.well-known/oauth-protected-resource", h.oauth.resourceMetadata())
+		mux.Handle("/.well-known/oauth-protected-resource"+mcpPath, h.oauth.resourceMetadata())
+		mux.HandleFunc("POST "+oauthRegisterPath, h.registerClient)
+		mux.HandleFunc("GET "+oauthAuthorizePath, h.authorize)
+		mux.HandleFunc("POST "+oauthAuthorizePath, h.requireSession(h.decideRequest))
+		mux.HandleFunc("GET /api/v1/oauth/request", h.requireSession(h.describeRequest))
+		mux.HandleFunc("POST "+oauthTokenPath, h.token)
+		mux.Handle(mcpPath, h.mcpHandler())
+		mux.HandleFunc("GET "+exportPath, h.exportDetections)
+	}
+
 	// Development only: not registered at all otherwise, so a deployed server
 	// 404s instead of handing the roster to anyone who asks.
 	if h.dev {
@@ -178,6 +205,11 @@ type handlers struct {
 	// overview holds the landing page's answer for a minute at a time. Set by
 	// register, so every mux has one.
 	overview *overviewCache
+	// oauth is the MCP endpoint's authorization server, or nil when there is
+	// no public URL to be one at.
+	oauth *oauthServer
+	// scans holds a slot for each MCP range read in flight (mcpScans).
+	scans chan struct{}
 }
 
 // health is unconditionally ok: it is the liveness and startup probe, and a
@@ -412,14 +444,7 @@ func (h *handlers) signedIn(r *http.Request) (db.User, bool, error) {
 	if err != nil {
 		return db.User{}, false, nil
 	}
-	u, err := h.store.GetUserByEmail(r.Context(), email)
-	switch {
-	case errors.Is(err, db.ErrNotFound):
-		return db.User{}, false, nil
-	case err != nil:
-		return db.User{}, false, err
-	}
-	return u, u.RemovedAt == nil, nil
+	return h.onRoster(r, email)
 }
 
 // requireSession rejects anonymous callers. requireRole additionally checks the

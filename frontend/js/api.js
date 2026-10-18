@@ -151,6 +151,16 @@ export const clipURL = (reference, id) =>
 export const reviewDetection = (reference, id, status) =>
   request("PUT", `/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/review`, { status });
 
+// Connecting an LLM tool over MCP: the consent page's two calls. signed is
+// the authorization request the server signed into the page's URL.
+
+/** Which app is asking to connect, and where it sends them back: {client, redirectHost, user}. */
+export const fetchConnectRequest = (signed) =>
+  get(`/oauth/request?${new URLSearchParams({ request: signed })}`);
+/** Allow or refuse it. Returns {redirect}: where to send the browser, back to the app. */
+export const decideConnectRequest = (signed, approve) =>
+  request("POST", "/oauth/authorize", { request: signed, approve });
+
 export const fetchAllUploads = () => get("/admin/uploads");
 /** One card and every file on it, with where each is in upload and analysis. */
 export const fetchCardFiles = (reference) => get(`/admin/uploads/${encodeURIComponent(reference)}`);
