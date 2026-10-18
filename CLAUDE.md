@@ -189,7 +189,7 @@ GET    /api/v1/uploads/{reference}       one of your cards, with its files and t
 POST   /api/v1/uploads/{reference}/progress   the transfer is running or stopped
 POST   HEAD PATCH /api/v1/tus/{id}        card audio: one tus upload per file
 POST   /api/v1/speedtest                  a body read and thrown away: the upload speed test
-GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one model's: ?model=perch)
+GET    /api/v1/detections                 every card's detections: a window of them, filtered, sorted, a page at a time (one card's: ?card=, all of it; one model's: ?model=perch)
 GET    /api/v1/detections/export      the same, every row rather than a page: a JSON file to save
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
@@ -265,10 +265,18 @@ the few pages it has fetched. That is what lets a detection opened from the
 list have Previous and Next step through the list -- in its order, across
 cards, and on into the next page when a reviewer reaches the end of one --
 without re-running the search on every step. A detection opened from anywhere
-else (a card, a link that carries no list) steps through its file instead.
+else (a link that carries no list) steps through its file instead.
 Neither is a nicety: it is the same read, and holding the page is what keeps a
 reviewer from re-running it on every step. A page's station names are point
 reads of the cards on that page, for the same reason.
+The tab is the one list of detections. A card's page doesn't list what was
+heard on it -- a list there, file by file, was a second way to read the same
+thing with none of the filters -- it links to the tab narrowed to the card,
+`/app/detections?card={reference}`, as does the count in the card lists. One
+card's is the exception to the window: it is a read of the card's own
+partition, so with no dates it answers for the whole card, and the tab opens it
+with its date fields empty and a line saying which card, with a way back to
+every card's.
 *Revisit when:* a reviewer meets the ceiling in ordinary work rather than by
 widening the dates -- more recorders will do it, and so will a whole season on
 one screen or a species tally that has to count what the window leaves out.
@@ -754,9 +762,9 @@ the two models' detections of one bird are two documents
 they were), every list is one model's at a time (`?model=`, BirdNET's by
 default), and the public page counts BirdNET's alone, because a bird both
 heard would otherwise count twice. It is an internal detail, not a choice
-anyone makes: the Detections tab never asks for Perch's, and only a
-coordinator's card page (`<bs-admin-upload-detail>`) shows them, under
-BirdNET's. Three consequences:
+anyone makes: the Detections tab asks for Perch's only when a coordinator's
+card page (`<bs-admin-upload-detail>`) links to them, as
+`/app/detections?card={reference}&model=perch`. Three consequences:
 - **Its step is separate from the file's.** `audioFiles.perch` has its own
   status, attempts and failure, so Perch failing on a file leaves BirdNET's
   result and doesn't put the card in `needs_attention`. A file waiting for
@@ -1065,8 +1073,8 @@ process in development -- runs BirdNET over it, writing
 Perch's detections after them, as a second list (see *Perch is a second
 opinion* above). The coordinator's card page
 (`/admin/uploads/{ref}`) shows each file's status, when its recording is due to
-be removed or was, and what was heard in it, and
-each detection has its own page with its clip, a spectrogram, and Confirm and
+be removed or was, and how much was heard in it, and links to the Detections
+tab narrowed to the card; each detection has its own page with its clip, a spectrogram, and Confirm and
 Discard. The Detections tab (`/app/detections`) lists every card's detections,
 sortable by when, species or confidence and filtered by review, species,
 minimum confidence and the days heard, and opens the same detection page, where Previous, Next and the arrow keys step

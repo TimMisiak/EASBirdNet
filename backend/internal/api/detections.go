@@ -73,7 +73,9 @@ type detectionQuery struct {
 // Cosmos can't ORDER BY or OFFSET across partitions from the Go SDK (see
 // SCHEMA.md). The query carries the date, review and confidence filters, so a
 // date range is what keeps it cheap -- which is why a request that names none
-// is answered for the last defaultDetectionsDays, and says so in window.
+// is answered for the last defaultDetectionsDays, and says so in window. A
+// request for one card's is the exception: that is a read of the card's own
+// partition, bounded by the card, so it is answered for all of the card.
 func (h *handlers) listDetections(w http.ResponseWriter, r *http.Request, _ db.User) {
 	q, problem := parseDetectionQuery(r, h.now())
 	if problem != "" {
@@ -228,12 +230,15 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request, _ db
 
 	now := h.now().UTC()
 	head := DetectionExport{
-		ExportedAt: now, Model: q.filter.Model, Since: q.filter.Since,
-		Status: q.filter.ReviewStatus, MinConfidence: q.filter.MinConfidence, Species: q.species,
+		ExportedAt: now, Model: q.filter.Model,
+		Card: q.filter.UploadID, Status: q.filter.ReviewStatus, MinConfidence: q.filter.MinConfidence, Species: q.species,
 		Sort: q.sort, Order: "asc", Total: len(matched),
 	}
 	if q.desc {
 		head.Order = "desc"
+	}
+	if !q.filter.Since.IsZero() {
+		head.Since = &q.filter.Since
 	}
 	if !q.filter.Until.IsZero() {
 		head.Until = &q.filter.Until
@@ -281,16 +286,19 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request, _ db
 //	status         unreviewed, confirmed or rejected
 //	minConfidence  0 to 1
 //	species        a scientific name
+//	card           a card's reference: only what was heard on it
 //	sort           heard (the default), species or confidence
 //	order          asc or desc; heard and confidence default to desc, species to asc
 //	limit, offset  the page; limit defaults to 50 and is at most 500
 //	model          birdnet (the default) or perch: which model's detections
 //
-// A request with no since is answered for the defaultDetectionsDays before
-// until, or before now; q.windowed says that happened. now is the clock.
+// A request with no since and no card is answered for the
+// defaultDetectionsDays before until, or before now; q.windowed says that
+// happened. now is the clock.
 func parseDetectionQuery(r *http.Request, now time.Time) (detectionQuery, string) {
 	v := r.URL.Query()
 	q := detectionQuery{species: v.Get("species"), sort: cmp.Or(v.Get("sort"), sortHeard)}
+	q.filter.UploadID = v.Get("card")
 	limit, offset, problem := parsePage(v)
 	if problem != "" {
 		return q, problem
@@ -342,8 +350,10 @@ func parseDetectionQuery(r *http.Request, now time.Time) (detectionQuery, string
 		return q, "order must be asc or desc"
 	}
 	// No date range asked for: bound it rather than reading every detection
-	// ever stored. See defaultDetectionsDays.
-	if q.filter.Since.IsZero() {
+	// ever stored. See defaultDetectionsDays. One card's are bounded already,
+	// by the card: a read of its own partition, which is what a card's page
+	// links to.
+	if q.filter.Since.IsZero() && q.filter.UploadID == "" {
 		q.filter.Since = cmp.Or(q.filter.Until, now).UTC().Truncate(time.Second).AddDate(0, 0, -defaultDetectionsDays)
 		q.windowed = true
 	}

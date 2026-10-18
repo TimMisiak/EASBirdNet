@@ -44,6 +44,13 @@ import "./bs-chip.js";
  * The filter fields are rendered once and only the results are redrawn, so a
  * date half typed in keeps its focus while the list catches up.
  *
+ * A card's page links here narrowed to that card (?card=OWL-20260914-SR03),
+ * and, for a coordinator, to Perch's detections on it (&model=perch): this
+ * is the one place detections are listed, so a card's are looked at with the
+ * same filters, sorts and stepping as everything else. A card bounds the list
+ * by itself, so it opens on the whole card rather than the past week, and a
+ * line above the filters says what it is narrowed to and undoes it.
+ *
  * “Export as JSON” saves every detection the list holds, not the page shown:
  * the same filters and order, asked of the server whole (GET
  * /detections/export), so a list of 11,201 is a file of 11,201.
@@ -81,9 +88,19 @@ class Detections extends BaseElement {
         this.#change({ sort, order });
       },
       page: (el) => this.#change({ page: Number(el.dataset.page) }),
+      // Back to how the list opened, keeping the card it is narrowed to.
       clear: () => {
-        this.#change({ status: "", species: "", min: 0, ...this.#dates });
+        this.#change({ status: "", species: "", min: 0, ...this.#opening });
         // The fields show what they were set to; put them back.
+        this.render();
+      },
+      // Every card's again, BirdNET's, over the week the tab opens on.
+      every: () => {
+        this.#change({ card: "", model: "", ...this.#dates });
+        this.render();
+      },
+      birdnet: () => {
+        this.#change({ model: "" });
         this.render();
       },
       species: (el) => this.#change({ species: el.value }),
@@ -92,6 +109,11 @@ class Detections extends BaseElement {
       to: (el) => this.#change({ to: el.value }),
       export: () => this.#export(),
     };
+  }
+
+  /** The dates the list opens on: the past week, or for one card, none -- the whole card. */
+  get #opening() {
+    return this.#view.card ? { from: "", to: "" } : this.#dates;
   }
 
   /** Apply a change to the view. Anything but a page change starts again from the first page. */
@@ -212,9 +234,13 @@ class Detections extends BaseElement {
         .export-error { margin: calc(-1 * var(--bs-space-2)) 0 var(--bs-space-4); }
         .empty { color: var(--bs-text-muted); padding: var(--bs-space-5) 0; }
         h1 { margin-bottom: var(--bs-space-5); }
+        .scope { margin: calc(-1 * var(--bs-space-3)) 0 var(--bs-space-5); font-size: 0.90625rem; color: var(--bs-text-body); }
+        .scope .ref { font-size: 0.84375rem; }
+        .scope .btn { margin-left: var(--bs-space-2); }
       </style>
 
       <h1>Detections</h1>
+      ${this.#scope()}
 
       <div class="filters" role="group" aria-label="Review">
         ${STATUSES.map(
@@ -263,7 +289,8 @@ class Detections extends BaseElement {
     const { status, detections, total, species, window: bounded, error } = this.#state;
     // Filtered means narrowed from how the tab opens, so the range it opens on
     // doesn't make a program with nothing in it look like a filter nobody set.
-    const filtered = Boolean(v.status || v.species || v.min) || v.from !== this.#dates.from || v.to !== this.#dates.to;
+    const opening = this.#opening;
+    const filtered = Boolean(v.status || v.species || v.min) || v.from !== opening.from || v.to !== opening.to;
     // What the server bounded the answer to, said once above the list rather
     // than left for someone to notice an old detection missing.
     const note = this.$(".window");
@@ -292,7 +319,9 @@ class Detections extends BaseElement {
     } else if (total === 0) {
       results.innerHTML = filtered
         ? `<p class="empty">No detections match those filters.</p>`
-        : `<p class="empty">BirdNET hasn't heard anything in the last ${DEFAULT_DAYS} days. Detections show up here as each card is analyzed; set “Heard from” to look further back.</p>`;
+        : v.card
+          ? `<p class="empty">${v.model === "perch" ? "Perch" : "BirdNET"} hasn't heard anything on ${escapeHTML(v.card)}. Its detections show up here as each of its files is analyzed.</p>`
+          : `<p class="empty">BirdNET hasn't heard anything in the last ${DEFAULT_DAYS} days. Detections show up here as each card is analyzed; set “Heard from” to look further back.</p>`;
     } else {
       results.innerHTML = `
         ${error ? `<p class="error" role="alert">Couldn't refresh the list: ${escapeHTML(error.message)}</p>` : ""}
@@ -316,6 +345,27 @@ class Detections extends BaseElement {
     }
     // A refresh that failed says so once; the next one clears it.
     if (status === "ready") this.#state.error = null;
+  }
+
+  /**
+   * What the list is narrowed to beyond its filters -- one card, or Perch's
+   * detections rather than BirdNET's -- with the way out of each, or "".
+   */
+  #scope() {
+    const { card, model } = this.#view;
+    if (!card && !model) return "";
+    const ref = card
+      ? session.isAdmin()
+        ? `<a class="ref" href="/admin/uploads/${encodeURIComponent(card)}">${escapeHTML(card)}</a>`
+        : `<span class="ref">${escapeHTML(card)}</span>`
+      : "";
+    const what = model === "perch" ? "Perch's detections, a second opinion," : "Detections";
+    return `
+      <p class="scope">
+        ${what} ${card ? `on card ${ref}` : "on every card"}.
+        ${model ? `<button type="button" class="btn btn--quiet btn--tiny" data-action="birdnet">Show BirdNET's</button>` : ""}
+        ${card ? `<button type="button" class="btn btn--quiet btn--tiny" data-action="every">Show every card</button>` : ""}
+      </p>`;
   }
 
   /** The species select: every species in the list as filtered, and the one picked even if none are left. */

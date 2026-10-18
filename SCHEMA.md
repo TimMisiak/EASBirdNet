@@ -425,8 +425,9 @@ Every read the API needs, and what it costs in Cosmos:
 | A file about to be uploaded | `GetAudioFile` | `audioFiles` | point read |
 | One detection (its page, its clip, a review) | `GetDetection` | `detections` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
-| What was heard in one file (card page, a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
+| What was heard in one file (a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
 | Public species summary | `ListDetections{ReviewStatus: confirmed, Since, Model: birdnet}` | `detections` | cross-partition |
+| One card's detections (Detections tab, `?card=`, linked from the card's page) | `ListDetections{UploadID, Model, Since?, ...}` | `detections` | single partition: the card bounds it, so no default window; still sorted and paged in Go, under `db.MaxDetectionScan` |
 | Every detection (Detections tab) | `ListDetections{Since, Model, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
 | Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
 

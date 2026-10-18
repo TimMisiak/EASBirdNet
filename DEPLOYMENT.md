@@ -1008,9 +1008,10 @@ refuse the TLS handshake.
 queue runs Google's Perch v2 over every file BirdNET has finished with, as a
 step of its own, and stores what it heard beside BirdNET's detections, each
 marked with its model. It is an internal detail: volunteers never choose a
-model, and the Detections tab they share with coordinators is BirdNET's alone.
-Only a coordinator's card page shows it -- how far Perch has got with each
-file, and what it heard under BirdNET's. Nothing else changes: the public page counts BirdNET's confirmed detections
+model, and the Detections tab they share with coordinators is BirdNET's
+unless asked otherwise. Only a coordinator's card page shows it -- how far
+Perch has got with each file, and a link to what it heard on the card, which is
+the Detections tab narrowed to the card and to Perch's. Nothing else changes: the public page counts BirdNET's confirmed detections
 only, since a bird both models heard would otherwise count twice, and Perch
 failing on a file leaves BirdNET's result on it and the card doesn't need
 attention for it (SCHEMA.md, `audioFiles.perch`).

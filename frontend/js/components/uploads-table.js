@@ -58,10 +58,18 @@ export const CELLS = {
     right: true,
     cell: (u) => `<td class="num muted">${count(u.filesUploaded)} / ${count(u.fileCount)}</td>`,
   },
+  /** Linked to the Detections tab, narrowed to the card, once it has any. */
   detections: {
     head: "Detections",
     right: true,
-    cell: (u) => `<td class="num muted">${u.analysis ? count(u.detectionCount) : "—"}</td>`,
+    cell: (u) =>
+      `<td class="num muted">${
+        !u.analysis
+          ? "—"
+          : u.detectionCount > 0
+            ? `<a href="/app/detections?card=${encodeURIComponent(u.reference)}">${count(u.detectionCount)}</a>`
+            : count(u.detectionCount)
+      }</td>`,
   },
   status: {
     head: "Status",

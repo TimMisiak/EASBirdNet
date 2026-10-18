@@ -191,12 +191,14 @@ type DetectionWindow struct {
 // DetectionExport is the head of the file GET /detections/export answers:
 // what was asked for, and how many detections matched it. The detections
 // themselves follow it in the same object, as "detections", a ListedDetection
-// each. Since is always set, as the request's own or the window's.
+// each. Since is the request's own or the window's, and absent only for one
+// card's detections asked for with no dates.
 type DetectionExport struct {
 	ExportedAt    time.Time        `json:"exportedAt"`
 	Model         string           `json:"model"`
-	Since         time.Time        `json:"since"`
+	Since         *time.Time       `json:"since,omitempty"`
 	Until         *time.Time       `json:"until,omitempty"`
+	Card          string           `json:"card,omitempty"`
 	Status        string           `json:"status,omitempty"`
 	MinConfidence float64          `json:"minConfidence,omitempty"`
 	Species       string           `json:"species,omitempty"`

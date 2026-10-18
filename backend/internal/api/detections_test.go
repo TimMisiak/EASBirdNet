@@ -202,6 +202,63 @@ func TestEveryDetectionIsBoundedWithoutDates(t *testing.T) {
 	}
 }
 
+// TestOneCardsDetections is the list a card's page links to: what was heard on
+// that card alone, all of it, because the card bounds the read where the
+// default window would otherwise -- a card's detections sit in its own
+// partition.
+func TestOneCardsDetections(t *testing.T) {
+	mux, _ := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+	list := func(query string) listedBody {
+		t.Helper()
+		rec := do(t, mux, http.MethodGet, "/api/v1/detections?"+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET detections?%s = %d %s", query, rec.Code, rec.Body)
+		}
+		return decodeInto[listedBody](t, rec)
+	}
+
+	// OWL-20260821-SR03's one detection is from August, weeks before the
+	// default window; naming the card is enough to see it.
+	if got := list(""); got.Total != 5 {
+		t.Fatalf("default list = %d, want this week's 5 (the August card's isn't among them)", got.Total)
+	}
+	old := list("card=OWL-20260821-SR03")
+	if old.Total != 1 || old.Window != nil || old.Detections[0].Reference != "OWL-20260821-SR03" ||
+		len(old.Species) != 1 || old.Species[0].CommonName != "Northern Saw-whet Owl" {
+		t.Errorf("the August card = %d detections, window %+v, species %+v; want its one saw-whet and no window",
+			old.Total, old.Window, old.Species)
+	}
+
+	// Only that card's, of the species as well as the rows, and the other
+	// filters still narrow it.
+	sr05 := list("card=OWL-20260913-SR05")
+	if sr05.Total != 5 || len(sr05.Species) != 3 {
+		t.Errorf("OWL-20260913-SR05 = %d detections of %d species, want 5 of 3", sr05.Total, len(sr05.Species))
+	}
+	for _, d := range sr05.Detections {
+		if d.Reference != "OWL-20260913-SR05" {
+			t.Errorf("a detection from %s in OWL-20260913-SR05's list", d.Reference)
+		}
+	}
+	if got := list("card=OWL-20260913-SR05&status=rejected"); got.Total != 1 {
+		t.Errorf("OWL-20260913-SR05's rejected = %d, want 1", got.Total)
+	}
+	if got := list("card=OWL-20260913-SR05&since=2026-09-13T00:00:00Z"); got.Total != 3 || got.Window != nil {
+		t.Errorf("OWL-20260913-SR05 from the 13th = %d, window %+v; want 3, unwindowed", got.Total, got.Window)
+	}
+	if got := list("card=OWL-20990101-XX99"); got.Total != 0 {
+		t.Errorf("a card that isn't there = %d detections, want none", got.Total)
+	}
+
+	// The export says which card it is, and names no dates it wasn't given.
+	rec := do(t, mux, http.MethodGet, "/api/v1/detections/export?card=OWL-20260821-SR03", "", admin)
+	head := decodeInto[DetectionExport](t, rec)
+	if rec.Code != http.StatusOK || head.Card != "OWL-20260821-SR03" || head.Since != nil || head.Window != nil || head.Total != 1 {
+		t.Errorf("export of the August card = %d, head %+v; want the card, no since, no window, 1 row", rec.Code, head)
+	}
+}
+
 // TestCardDetectionsArePaged holds the cap on GET /detections/{ref}: a card
 // carries tens of thousands of detections and the whole card is the default
 // ask, so the answer is a page with the count beside it.
