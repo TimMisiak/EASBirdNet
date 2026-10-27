@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,12 +22,59 @@ import (
 // began", "the day a card was pulled") are YYYY-MM-DD strings: sent as a
 // timestamp, a date lands on the previous day for every reader west of UTC.
 
-// Roles. A volunteer can upload cards; an admin can also manage the roster and
-// the recorders.
+// Access levels, a user's Role. An admin can do everything, whatever their
+// Roles say; a volunteer can do what their Roles give them.
 const (
 	RoleVolunteer = "volunteer"
 	RoleAdmin     = "admin"
 )
+
+// Volunteer roles, a user's Roles: what someone does, and so which parts of
+// the app they reach. Someone may hold several. A birding expert is a reviewer
+// as well, whether or not Roles also says reviewer (Has).
+const (
+	// RoleFieldVolunteer pulls cards from recorders and uploads them.
+	RoleFieldVolunteer = "field_volunteer"
+	// RoleReviewer hears and reviews detections.
+	RoleReviewer = "reviewer"
+	// RoleBirdingExpert reviews, with the tools a reviewer doesn't get.
+	RoleBirdingExpert = "birding_expert"
+)
+
+// VolunteerRoles is every volunteer role, in the order Roles is stored in.
+var VolunteerRoles = []string{RoleFieldVolunteer, RoleReviewer, RoleBirdingExpert}
+
+// Has says whether u may do what role allows: an admin may do everything, a
+// birding expert may also review, and otherwise it is whether Roles names it.
+// RoleAdmin is a role here too, so a route can ask for it the same way.
+func (u User) Has(role string) bool {
+	switch {
+	case u.Role == RoleAdmin:
+		return true
+	case role == RoleAdmin:
+		return false
+	case role == RoleReviewer && slices.Contains(u.Roles, RoleBirdingExpert):
+		return true
+	}
+	return slices.Contains(u.Roles, role)
+}
+
+// NormalizeRoles is roles as Roles stores them: each once, in VolunteerRoles'
+// order. A name that isn't a volunteer role is an error.
+func NormalizeRoles(roles []string) ([]string, error) {
+	for _, r := range roles {
+		if !slices.Contains(VolunteerRoles, r) {
+			return nil, fmt.Errorf("%q isn't a role: roles are %s", r, strings.Join(VolunteerRoles, ", "))
+		}
+	}
+	out := []string{}
+	for _, r := range VolunteerRoles {
+		if slices.Contains(roles, r) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
 
 // User is someone on the roster. There is no password: the roster is the
 // allow-list, and sign-in is delegated to Google or Microsoft.
@@ -35,7 +83,13 @@ type User struct {
 	// Email is stored trimmed and lower-cased, and is unique across users.
 	Email string `json:"email"`
 	Name  string `json:"name"`
-	Role  string `json:"role"`
+	// Role is the access level, RoleAdmin or RoleVolunteer. It was the whole
+	// access model before Roles, and still means what it did then.
+	Role string `json:"role"`
+	// Roles are the volunteer roles (VolunteerRoles) someone holds. A
+	// volunteer holds at least one; an admin needs none, since Role already
+	// lets them do everything, and keeps theirs for if they stop being one.
+	Roles []string `json:"roles,omitempty"`
 	// Identity is bound the first time the person signs in, so a later sign-in
 	// is matched on the provider's stable subject rather than only the address.
 	Identity     *Identity  `json:"identity,omitempty"`

@@ -2,6 +2,7 @@ import { BaseElement } from "./base-element.js";
 import { controls } from "../shared-styles.js";
 import { navigate } from "../router.js";
 import * as session from "../session.js";
+import { FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
 import "./bs-brand-mark.js";
 
 /**
@@ -39,7 +40,16 @@ class SiteHeader extends BaseElement {
   }
 
   render() {
-    const cta = !session.isSignedIn() ? "Sign in" : session.isAdmin() ? "Admin" : "Upload";
+    // Named for where /app will put them (bs-app.js, home).
+    const cta = !session.isSignedIn()
+      ? "Sign in"
+      : session.isAdmin()
+        ? "Admin"
+        : session.has(FIELD_VOLUNTEER)
+          ? "Upload"
+          : session.has(REVIEWER)
+            ? "Detections"
+            : "Open Birdsense";
 
     this.shadowRoot.innerHTML = `
       <style>

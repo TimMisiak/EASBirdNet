@@ -90,8 +90,11 @@ func seedProgram(t *testing.T, s db.Store) {
 		{Name: "Dana Coordinator", Email: "dana@eastsideaudubon.org", Role: db.RoleAdmin,
 			Identity: &db.Identity{Provider: "microsoft", Subject: "dana-sub"}},
 		{Name: "Ellen Park", Email: "ellen.park@example.com", Role: db.RoleAdmin},
-		{Name: "Jane Volunteer", Email: "jane@example.com", Role: db.RoleVolunteer},
-		{Name: "Marcus Lee", Email: "m.lee@example.com", Role: db.RoleVolunteer},
+		// Jane both sends cards and reviews; Marcus only sends them.
+		{Name: "Jane Volunteer", Email: "jane@example.com", Role: db.RoleVolunteer,
+			Roles: []string{db.RoleFieldVolunteer, db.RoleReviewer}},
+		{Name: "Marcus Lee", Email: "m.lee@example.com", Role: db.RoleVolunteer,
+			Roles: []string{db.RoleFieldVolunteer}},
 	} {
 		created, err := s.CreateUser(ctx, u)
 		must(err)
@@ -525,6 +528,49 @@ func TestAdminRoutesRejectVolunteers(t *testing.T) {
 	}
 }
 
+// TestEachRoleReachesItsOwnRoutes: a field volunteer sends cards, a reviewer
+// hears detections, a birding expert is a reviewer too, and an admin does
+// everything. Each is refused the others' routes, not just shown fewer tabs.
+func TestEachRoleReachesItsOwnRoutes(t *testing.T) {
+	mux, store := newTestMux(t)
+	for _, u := range []db.User{
+		{Name: "Rita Reviewer", Email: "rita@example.com", Role: db.RoleVolunteer, Roles: []string{db.RoleReviewer}},
+		{Name: "Eve Expert", Email: "eve@example.com", Role: db.RoleVolunteer, Roles: []string{db.RoleBirdingExpert}},
+	} {
+		if _, err := store.CreateUser(t.Context(), u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploads := []string{"/api/v1/uploads", "/api/v1/uploads/OWL-20260821-SR03"}
+	detections := []string{"/api/v1/detections", "/api/v1/detections/export", "/api/v1/detections/OWL-20260913-SR05"}
+	for _, tc := range []struct {
+		email              string
+		upload, detections bool
+	}{
+		{"m.lee@example.com", true, false}, // a field volunteer, and the card is his
+		{"rita@example.com", false, true},
+		{"eve@example.com", false, true},
+		{"jane@example.com", true, true},         // both, though the card isn't hers: 404
+		{"dana@eastsideaudubon.org", true, true}, // an admin, with no roles at all
+	} {
+		who := signInAs(t, mux, tc.email)
+		check := func(path string, allowed bool) {
+			rec := do(t, mux, http.MethodGet, path, "", who)
+			if refused := rec.Code == http.StatusForbidden; refused == allowed {
+				t.Errorf("%s GET %s = %d, want allowed %v", tc.email, path, rec.Code, allowed)
+			}
+		}
+		for _, path := range uploads {
+			check(path, tc.upload)
+		}
+		for _, path := range detections {
+			check(path, tc.detections)
+		}
+		check("/api/v1/stations", true)
+		check("/api/v1/admin/people", tc.email == "dana@eastsideaudubon.org")
+	}
+}
+
 func TestSession(t *testing.T) {
 	mux, store := newTestMux(t)
 
@@ -899,7 +945,7 @@ func TestAddPersonRejectsADuplicate(t *testing.T) {
 	mux, _ := newTestMux(t)
 	admin := signedIn(t, mux, db.RoleAdmin)
 	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
-		`{"name":"Jane Again","email":"JANE@example.com","role":"volunteer"}`, admin)
+		`{"name":"Jane Again","email":"JANE@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusConflict)
 	}
@@ -940,6 +986,54 @@ func TestUpdatePerson(t *testing.T) {
 	}
 }
 
+func TestPeopleHaveRoles(t *testing.T) {
+	mux, store := newTestMux(t)
+	admin := signedIn(t, mux, db.RoleAdmin)
+
+	// Stored once each, in the one order, whatever order they were picked in.
+	rec := do(t, mux, http.MethodPost, "/api/v1/admin/people",
+		`{"name":"Alex","email":"alex@example.com","role":"volunteer","roles":["birding_expert","field_volunteer","birding_expert"]}`, admin)
+	alex := decodeInto[personBody](t, rec).Person
+	if want := []string{db.RoleFieldVolunteer, db.RoleBirdingExpert}; rec.Code != http.StatusCreated || !slices.Equal(alex.Roles, want) {
+		t.Fatalf("add = %d %s, want 201 with roles %v", rec.Code, rec.Body, want)
+	}
+	if u := userByEmail(t, store, "alex@example.com"); !slices.Equal(u.Roles, alex.Roles) {
+		t.Errorf("stored roles = %v, want %v", u.Roles, alex.Roles)
+	}
+
+	// An edit replaces them.
+	path := "/api/v1/admin/people/" + alex.ID
+	rec = do(t, mux, http.MethodPut, path, `{"name":"Alex","email":"alex@example.com","role":"volunteer","roles":["reviewer"]}`, admin)
+	if p := decodeInto[personBody](t, rec).Person; rec.Code != http.StatusOK || !slices.Equal(p.Roles, []string{db.RoleReviewer}) {
+		t.Errorf("edit = %d %s, want roles [reviewer]", rec.Code, rec.Body)
+	}
+
+	// A volunteer needs one, and only real ones; an admin needs none.
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"Alex","email":"alex@example.com","role":"volunteer"}`, http.StatusBadRequest},
+		{`{"name":"Alex","email":"alex@example.com","role":"volunteer","roles":[]}`, http.StatusBadRequest},
+		{`{"name":"Alex","email":"alex@example.com","role":"volunteer","roles":["admin"]}`, http.StatusBadRequest},
+		{`{"name":"Alex","email":"alex@example.com","role":"volunteer","roles":["owner"]}`, http.StatusBadRequest},
+		{`{"name":"Alex","email":"alex@example.com","role":"admin"}`, http.StatusOK},
+	} {
+		if rec := do(t, mux, http.MethodPut, path, tc.body, admin); rec.Code != tc.want {
+			t.Errorf("PUT %s = %d, want %d (%s)", tc.body, rec.Code, tc.want, rec.Body)
+		}
+	}
+	if rec := do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"name":"Sam","email":"sam@example.com"}`, admin); rec.Code != http.StatusBadRequest {
+		t.Errorf("add a volunteer with no roles = %d, want 400", rec.Code)
+	}
+
+	// The roster always says which, as a list even when there are none.
+	rec = do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin)
+	if !strings.Contains(rec.Body.String(), `"roles":[]`) || strings.Contains(rec.Body.String(), `"roles":null`) {
+		t.Errorf("roster = %s, want an admin's roles as []", rec.Body)
+	}
+}
+
 func TestUpdatePersonRejectsBadInput(t *testing.T) {
 	mux, store := newTestMux(t)
 	admin := signedIn(t, mux, db.RoleAdmin)
@@ -948,22 +1042,22 @@ func TestUpdatePersonRejectsBadInput(t *testing.T) {
 		body string
 		want int
 	}{
-		{`{"name":"Jane","email":"ellen.park@example.com","role":"volunteer"}`, http.StatusConflict},
+		{`{"name":"Jane","email":"ellen.park@example.com","role":"volunteer","roles":["field_volunteer"]}`, http.StatusConflict},
 		{`{"name":"Jane","email":"jane@example.com","role":"owner"}`, http.StatusBadRequest},
-		{`{"name":"Jane","email":"not an address","role":"volunteer"}`, http.StatusBadRequest},
+		{`{"name":"Jane","email":"not an address","role":"volunteer","roles":["field_volunteer"]}`, http.StatusBadRequest},
 	} {
 		if rec := do(t, mux, http.MethodPut, path, tc.body, admin); rec.Code != tc.want {
 			t.Errorf("PUT %s = %d, want %d", tc.body, rec.Code, tc.want)
 		}
 	}
 	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/usr_0000000000000000",
-		`{"name":"Nobody","email":"nobody@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusNotFound {
+		`{"name":"Nobody","email":"nobody@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin); rec.Code != http.StatusNotFound {
 		t.Errorf("PUT unknown id = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 
 	// A removed person still holds their address, and the error says so.
 	do(t, mux, http.MethodDelete, "/api/v1/admin/people/"+userByEmail(t, store, "m.lee@example.com").ID, "", admin)
-	rec := do(t, mux, http.MethodPut, path, `{"name":"Jane","email":"m.lee@example.com","role":"volunteer"}`, admin)
+	rec := do(t, mux, http.MethodPut, path, `{"name":"Jane","email":"m.lee@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "removed") {
 		t.Errorf("take a removed person's address = %d %s; want 409 saying they were removed", rec.Code, rec.Body)
 	}
@@ -981,7 +1075,7 @@ func TestRemovePerson(t *testing.T) {
 	if rec := do(t, mux, http.MethodDelete, path, "", admin); rec.Code != http.StatusNotFound {
 		t.Errorf("DELETE again = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-	if rec := do(t, mux, http.MethodPut, path, `{"name":"Marcus","email":"m.lee@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusNotFound {
+	if rec := do(t, mux, http.MethodPut, path, `{"name":"Marcus","email":"m.lee@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin); rec.Code != http.StatusNotFound {
 		t.Errorf("PUT a removed person = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 	rec := do(t, mux, http.MethodGet, "/api/v1/admin/people", "", admin)
@@ -1001,11 +1095,11 @@ func TestRemovePerson(t *testing.T) {
 	}
 
 	// Adding the address again brings the same person back.
-	rec = do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"name":"Marcus A. Lee","email":"m.lee@example.com","role":"volunteer"}`, admin)
+	rec = do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"name":"Marcus A. Lee","email":"m.lee@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin)
 	if p := decodeInto[personBody](t, rec).Person; rec.Code != http.StatusCreated || p.ID != marcus.ID || p.Name != "Marcus A. Lee" {
 		t.Errorf("re-add = %d %s; want 201 with id %s", rec.Code, rec.Body, marcus.ID)
 	}
-	if rec := do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"email":"m.lee@example.com"}`, admin); rec.Code != http.StatusConflict {
+	if rec := do(t, mux, http.MethodPost, "/api/v1/admin/people", `{"email":"m.lee@example.com","roles":["field_volunteer"]}`, admin); rec.Code != http.StatusConflict {
 		t.Errorf("re-add twice = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
@@ -1025,11 +1119,11 @@ func TestTheRosterKeepsAnAdmin(t *testing.T) {
 	ellen := userByEmail(t, store, "ellen.park@example.com").ID
 	dana := userByEmail(t, store, "dana@eastsideaudubon.org").ID
 	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+ellen,
-		`{"name":"Ellen Park","email":"ellen.park@example.com","role":"volunteer"}`, admin); rec.Code != http.StatusOK {
+		`{"name":"Ellen Park","email":"ellen.park@example.com","role":"volunteer","roles":["field_volunteer"]}`, admin); rec.Code != http.StatusOK {
 		t.Fatalf("demote Ellen = %d, want %d (%s)", rec.Code, http.StatusOK, rec.Body)
 	}
 	if rec := do(t, mux, http.MethodPut, "/api/v1/admin/people/"+dana,
-		`{"name":"Dana Coordinator","email":"dana@eastsideaudubon.org","role":"volunteer"}`, admin); rec.Code != http.StatusConflict {
+		`{"name":"Dana Coordinator","email":"dana@eastsideaudubon.org","role":"volunteer","roles":["field_volunteer"]}`, admin); rec.Code != http.StatusConflict {
 		t.Errorf("demote the last admin = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }

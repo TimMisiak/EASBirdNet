@@ -737,3 +737,30 @@ func TestAFileMissedByItsCardIsCountedWhenTheCardIsRegisteredAgain(t *testing.T)
 		t.Errorf("registered again: %d files, %d bytes, %s; want 2, 200, processing", u.FilesUploaded, u.BytesUploaded, u.Status)
 	}
 }
+
+// TestCardAudioIsForFieldVolunteers: tus is an upload route like the rest, so
+// someone who stops being a field volunteer mid-card can't go on sending it.
+func TestCardAudioIsForFieldVolunteers(t *testing.T) {
+	s := newTusServer(t)
+	jane := signedIn(t, s.mux, db.RoleVolunteer)
+	reg := s.register(jane, cardBody("SW-03", "2026-09-14", "", "2026-09-12", 2, 1))
+	ref, first, second := reg.Upload.Reference, reg.Files[0].Path, reg.Files[1].Path
+	created := s.create(jane, ref, first, 100)
+	if created.status != http.StatusCreated {
+		t.Fatalf("create = %d (%s)", created.status, created.body)
+	}
+
+	id := userByEmail(t, s.store, "jane@example.com").ID
+	if _, err := s.store.UpdateUser(t.Context(), id, func(u *db.User) error {
+		u.Roles = []string{db.RoleReviewer}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := s.create(jane, ref, second, 100); r.status != http.StatusForbidden {
+		t.Errorf("a reviewer creating an upload = %d, want 403", r.status)
+	}
+	if r := s.patch(jane, created.header.Get("Location"), 0, audio(1)); r.status != http.StatusForbidden {
+		t.Errorf("a reviewer sending a chunk = %d, want 403", r.status)
+	}
+}

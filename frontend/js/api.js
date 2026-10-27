@@ -169,7 +169,7 @@ export const deleteUpload = (reference) =>
   request("DELETE", `/admin/uploads/${encodeURIComponent(reference)}`);
 export const fetchPeople = () => get("/admin/people");
 export const addPerson = (body) => request("POST", "/admin/people", body);
-/** Replace someone's name, email and role. */
+/** Replace someone's name, email, role (admin or volunteer) and roles (roles.js). */
 export const updatePerson = (id, body) =>
   request("PUT", `/admin/people/${encodeURIComponent(id)}`, body);
 /** Take someone off the roster. Refused for yourself and for the last admin. */

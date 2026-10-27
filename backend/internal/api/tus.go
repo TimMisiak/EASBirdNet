@@ -82,12 +82,13 @@ func (h *handlers) tusEndpoint() http.Handler {
 	return h.tusAccess(composer.Core, http.StripPrefix(strings.TrimSuffix(tusPath, "/"), tus))
 }
 
-// tusAccess applies the card rule to the tus endpoint. Creating an upload is
-// checked in beforeFileUpload, where the metadata names the card. Every other
-// request names an upload, and the upload is only reachable by someone who can
-// see the card it was created for.
+// tusAccess applies the card rule to the tus endpoint, for field volunteers as
+// the rest of the upload routes are. Creating an upload is checked in
+// beforeFileUpload, where the metadata names the card. Every other request
+// names an upload, and the upload is only reachable by someone who can see the
+// card it was created for.
 func (h *handlers) tusAccess(uploads tushandler.DataStore, next http.Handler) http.HandlerFunc {
-	return h.requireSession(func(w http.ResponseWriter, r *http.Request, me db.User) {
+	return h.requireRole(db.RoleFieldVolunteer, func(w http.ResponseWriter, r *http.Request, me db.User) {
 		ctx := r.Context()
 		if id := strings.Trim(strings.TrimPrefix(r.URL.Path, tusPath), "/"); id != "" {
 			// Anything that isn't an id the server minted is refused before the

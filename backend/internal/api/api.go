@@ -111,38 +111,52 @@ func register(mux *http.ServeMux, h *handlers) {
 		mux.HandleFunc("GET /api/v1/auth/{provider}/callback", h.authCallback)
 	}
 
-	// Volunteer.
+	// Signed in, whatever the role: the recorders, which uploading a card and
+	// reading the detections both name.
 	mux.HandleFunc("GET /api/v1/stations", h.requireSession(h.listStations))
-	mux.HandleFunc("GET /api/v1/uploads", h.requireSession(h.listUploads))
-	mux.HandleFunc("POST /api/v1/uploads", h.requireSession(h.createUpload))
-	mux.HandleFunc("GET /api/v1/uploads/{reference}", h.requireSession(h.getUpload))
-	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", h.requireSession(h.recordProgress))
+
+	// Field volunteers: their own cards, and sending them.
+	upload := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
+		return h.requireRole(db.RoleFieldVolunteer, next)
+	}
+	mux.HandleFunc("GET /api/v1/uploads", upload(h.listUploads))
+	mux.HandleFunc("POST /api/v1/uploads", upload(h.createUpload))
+	mux.HandleFunc("GET /api/v1/uploads/{reference}", upload(h.getUpload))
+	mux.HandleFunc("POST /api/v1/uploads/{reference}/progress", upload(h.recordProgress))
 	// The upload speed test: a body read and thrown away (speedtest.go).
-	mux.HandleFunc("POST /api/v1/speedtest", h.requireSession(h.speedTest))
-	// Detections are anyone's to hear and review once signed in, on every card.
-	mux.HandleFunc("GET /api/v1/detections", h.requireSession(h.listDetections))
-	// A literal beside {reference}, which is more specific and so wins; no
-	// card's reference can be "export" (db.UploadID).
-	mux.HandleFunc("GET /api/v1/detections/export", h.requireSession(h.exportDetections))
-	mux.HandleFunc("GET /api/v1/detections/{reference}", h.requireSession(h.listCardDetections))
-	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", h.requireSession(h.getDetection))
-	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", h.requireSession(h.getClip))
-	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", h.requireSession(h.reviewDetection))
+	mux.HandleFunc("POST /api/v1/speedtest", upload(h.speedTest))
 	// Card audio, one tus upload per file (see tus.go). tusd routes POST, HEAD
 	// and PATCH itself, so the pattern has no method.
 	mux.Handle(tusPath, h.tusEndpoint())
 
+	// Reviewers (and birding experts, who are reviewers too): every card's
+	// detections, to hear and review.
+	review := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
+		return h.requireRole(db.RoleReviewer, next)
+	}
+	mux.HandleFunc("GET /api/v1/detections", review(h.listDetections))
+	// A literal beside {reference}, which is more specific and so wins; no
+	// card's reference can be "export" (db.UploadID).
+	mux.HandleFunc("GET /api/v1/detections/export", review(h.exportDetections))
+	mux.HandleFunc("GET /api/v1/detections/{reference}", review(h.listCardDetections))
+	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", review(h.getDetection))
+	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", review(h.getClip))
+	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", review(h.reviewDetection))
+
 	// Admin.
-	mux.HandleFunc("GET /api/v1/admin/uploads", h.requireRole(db.RoleAdmin, h.listAllUploads))
-	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.getCardFiles))
-	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", h.requireRole(db.RoleAdmin, h.deleteUpload))
-	mux.HandleFunc("GET /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.listPeople))
-	mux.HandleFunc("POST /api/v1/admin/people", h.requireRole(db.RoleAdmin, h.addPerson))
-	mux.HandleFunc("PUT /api/v1/admin/people/{id}", h.requireRole(db.RoleAdmin, h.updatePerson))
-	mux.HandleFunc("DELETE /api/v1/admin/people/{id}", h.requireRole(db.RoleAdmin, h.removePerson))
-	mux.HandleFunc("POST /api/v1/admin/stations", h.requireRole(db.RoleAdmin, h.addStation))
-	mux.HandleFunc("PUT /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.updateStation))
-	mux.HandleFunc("DELETE /api/v1/admin/stations/{id}", h.requireRole(db.RoleAdmin, h.removeStation))
+	admin := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
+		return h.requireRole(db.RoleAdmin, next)
+	}
+	mux.HandleFunc("GET /api/v1/admin/uploads", admin(h.listAllUploads))
+	mux.HandleFunc("GET /api/v1/admin/uploads/{reference}", admin(h.getCardFiles))
+	mux.HandleFunc("DELETE /api/v1/admin/uploads/{reference}", admin(h.deleteUpload))
+	mux.HandleFunc("GET /api/v1/admin/people", admin(h.listPeople))
+	mux.HandleFunc("POST /api/v1/admin/people", admin(h.addPerson))
+	mux.HandleFunc("PUT /api/v1/admin/people/{id}", admin(h.updatePerson))
+	mux.HandleFunc("DELETE /api/v1/admin/people/{id}", admin(h.removePerson))
+	mux.HandleFunc("POST /api/v1/admin/stations", admin(h.addStation))
+	mux.HandleFunc("PUT /api/v1/admin/stations/{id}", admin(h.updateStation))
+	mux.HandleFunc("DELETE /api/v1/admin/stations/{id}", admin(h.removeStation))
 
 	// MCP: an LLM tool reading Birdsense as whoever connected it, which is an
 	// OAuth 2.1 authorization server of Birdsense's own (oauth.go) in front of
@@ -155,8 +169,10 @@ func register(mux *http.ServeMux, h *handlers) {
 		mux.Handle("/.well-known/oauth-protected-resource"+mcpPath, h.oauth.resourceMetadata())
 		mux.HandleFunc("POST "+oauthRegisterPath, h.registerClient)
 		mux.HandleFunc("GET "+oauthAuthorizePath, h.authorize)
-		mux.HandleFunc("POST "+oauthAuthorizePath, h.requireSession(h.decideRequest))
-		mux.HandleFunc("GET /api/v1/oauth/request", h.requireSession(h.describeRequest))
+		// Connecting an app is reading detections through it, so it is a
+		// reviewer's to allow, and stays so (mayReadDetections).
+		mux.HandleFunc("POST "+oauthAuthorizePath, review(h.decideRequest))
+		mux.HandleFunc("GET /api/v1/oauth/request", review(h.describeRequest))
 		mux.HandleFunc("POST "+oauthTokenPath, h.token)
 		mux.Handle(mcpPath, h.mcpHandler())
 		mux.HandleFunc("GET "+exportPath, h.serveMCPExport)
@@ -448,7 +464,7 @@ func (h *handlers) signedIn(r *http.Request) (db.User, bool, error) {
 }
 
 // requireSession rejects anonymous callers. requireRole additionally checks the
-// role, so an admin-only route can't be reached by guessing the path.
+// role (db.User.Has), so a route can't be reached by guessing the path.
 func (h *handlers) requireSession(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		me, ok, err := h.signedIn(r)
@@ -465,12 +481,21 @@ func (h *handlers) requireSession(next func(http.ResponseWriter, *http.Request, 
 
 func (h *handlers) requireRole(role string, next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
 	return h.requireSession(func(w http.ResponseWriter, r *http.Request, me db.User) {
-		if me.Role != role {
-			h.problem(w, http.StatusForbidden, "admins only")
+		if !me.Has(role) {
+			h.problem(w, http.StatusForbidden, forbidden[role])
 			return
 		}
 		next(w, r, me)
 	})
+}
+
+// forbidden is what requireRole answers someone without the role, in the
+// words of what they were trying to do.
+var forbidden = map[string]string{
+	db.RoleAdmin:          "admins only",
+	db.RoleFieldVolunteer: "uploading cards is for field volunteers; ask a coordinator for that role",
+	db.RoleReviewer:       "detections are for reviewers; ask a coordinator for that role",
+	db.RoleBirdingExpert:  "this is for birding experts; ask a coordinator for that role",
 }
 
 // --- volunteer ---
@@ -865,7 +890,7 @@ func transferring(status string) bool {
 
 // canSee is the card rule: a volunteer sees their own, an admin sees every one.
 func canSee(me db.User, u db.Upload) bool {
-	return me.Role == db.RoleAdmin || u.UserID == me.ID
+	return me.Has(db.RoleAdmin) || u.UserID == me.ID
 }
 
 // getUpload is one card with the files on its list and where each stands, so a
@@ -1178,15 +1203,32 @@ const (
 	msgEmailRemoved = "that address belongs to someone who was removed from the roster; add them again instead"
 	msgLastAdmin    = "the roster needs an admin; make someone else an admin first"
 	msgRemoveSelf   = "you can't remove yourself from the roster"
+	msgNoRoles      = "pick at least one role: a volunteer without one could sign in to nothing"
 )
+
+// rolesOf checks the volunteer roles a roster write names, and answers them as
+// they are stored (db.NormalizeRoles), or a problem to answer with. A volunteer
+// needs one; an admin needn't, but keeps any they are given for if they stop
+// being one.
+func rolesOf(role string, roles []string) ([]string, string) {
+	out, err := db.NormalizeRoles(roles)
+	switch {
+	case err != nil:
+		return nil, err.Error()
+	case role != db.RoleAdmin && len(out) == 0:
+		return nil, msgNoRoles
+	}
+	return out, ""
+}
 
 // addPerson puts someone on the roster. An address that belongs to someone who
 // was removed brings that person back, so their old cards are theirs again.
 func (h *handlers) addPerson(w http.ResponseWriter, r *http.Request, _ db.User) {
 	var body struct {
-		Name  string `json:"name"`
-		Email string `json:"email"`
-		Role  string `json:"role"`
+		Name  string   `json:"name"`
+		Email string   `json:"email"`
+		Role  string   `json:"role"`
+		Roles []string `json:"roles"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -1204,13 +1246,18 @@ func (h *handlers) addPerson(w http.ResponseWriter, r *http.Request, _ db.User) 
 	if role != db.RoleAdmin {
 		role = db.RoleVolunteer
 	}
+	roles, problem := rolesOf(role, body.Roles)
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return
+	}
 
 	ctx := r.Context()
 	existing, err := h.store.GetUserByEmail(ctx, email)
 	var u db.User
 	switch {
 	case errors.Is(err, db.ErrNotFound):
-		u, err = h.store.CreateUser(ctx, db.User{Email: email, Name: name, Role: role})
+		u, err = h.store.CreateUser(ctx, db.User{Email: email, Name: name, Role: role, Roles: roles})
 	case err == nil && existing.RemovedAt == nil:
 		err = db.ErrConflict
 	case err == nil:
@@ -1218,7 +1265,7 @@ func (h *handlers) addPerson(w http.ResponseWriter, r *http.Request, _ db.User) 
 			if u.RemovedAt == nil {
 				return db.ErrConflict // someone else brought them back first
 			}
-			u.RemovedAt, u.Name, u.Role = nil, name, role
+			u.RemovedAt, u.Name, u.Role, u.Roles = nil, name, role, roles
 			return nil
 		})
 	}
@@ -1233,12 +1280,13 @@ func (h *handlers) addPerson(w http.ResponseWriter, r *http.Request, _ db.User) 
 }
 
 // updatePerson changes what a coordinator can change about someone: name,
-// address and role. The provider and the day they were added are facts.
+// address, role and roles. The provider and the day they were added are facts.
 func (h *handlers) updatePerson(w http.ResponseWriter, r *http.Request, me db.User) {
 	var body struct {
-		Name  string `json:"name"`
-		Email string `json:"email"`
-		Role  string `json:"role"`
+		Name  string   `json:"name"`
+		Email string   `json:"email"`
+		Role  string   `json:"role"`
+		Roles []string `json:"roles"`
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
@@ -1253,6 +1301,11 @@ func (h *handlers) updatePerson(w http.ResponseWriter, r *http.Request, me db.Us
 	// quietly demoting an admin is not a safe default for an edit.
 	if body.Role != db.RoleAdmin && body.Role != db.RoleVolunteer {
 		h.problem(w, http.StatusBadRequest, "role must be volunteer or admin")
+		return
+	}
+	roles, problem := rolesOf(body.Role, body.Roles)
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
 		return
 	}
 	if name == "" {
@@ -1271,7 +1324,7 @@ func (h *handlers) updatePerson(w http.ResponseWriter, r *http.Request, me db.Us
 		if u.RemovedAt != nil {
 			return db.ErrNotFound
 		}
-		u.Name, u.Email, u.Role = name, email, body.Role
+		u.Name, u.Email, u.Role, u.Roles = name, email, body.Role, roles
 		return nil
 	})
 	switch {

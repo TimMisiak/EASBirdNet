@@ -83,6 +83,15 @@ every write.) So before rolling back over a SCHEMA.md change,
 decide whether losing that field on the documents that get touched is
 acceptable; usually it is, but it is a decision, not a no-op.
 
+**Volunteer roles.** An image from before roles reads only `users.role`,
+which still means what it did -- admin or not -- so admins stay admins and
+everyone else can upload and review, as every volunteer could then. What it
+loses is `roles` on any user it writes, and it writes one at every sign-in.
+Rolling forward again, each of those has no roles, and the server's start makes
+them a field volunteer (`db.BackfillRoles`): a reviewer or birding expert who
+signed in during the rollback has to be given that role again on the People
+tab.
+
 **Cards being deleted.** Since `deleting` (DELETE-CARDS.md), a coordinator's
 delete only marks a card, and the web app's deleter removes it a minute or
 more later. An image from before that doesn't know the status: a card

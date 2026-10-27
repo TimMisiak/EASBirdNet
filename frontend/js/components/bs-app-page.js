@@ -2,6 +2,7 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 import { tabs, typography } from "../shared-styles.js";
 import { onNavigate, path } from "../router.js";
 import * as session from "../session.js";
+import { ADMIN, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
 import * as flow from "../upload-flow.js";
 import "./bs-upload-steps.js";
 import "./bs-upload-details.js";
@@ -18,9 +19,11 @@ import "./bs-admin-upload-detail.js";
 
 /**
  * <bs-app-page> is where everyone signed in works: one row of tabs, which are
- * routes, for volunteers and coordinators alike. A coordinator gets three more
- * of them; nothing else about the page changes with the role, so there is one
- * shell to keep working rather than two that overlap.
+ * routes, for volunteers and coordinators alike. Each tab is for a role
+ * (roles.js) and shows only to someone who has it: Upload and My uploads to a
+ * field volunteer, Detections to a reviewer, and three more to a coordinator,
+ * who has them all. Nothing else about the page changes with the role, so
+ * there is one shell to keep working rather than one per role.
  *
  * Upload is the default, and holds the four steps of sending a card, from
  * /app/upload to /app/upload/done. My uploads, /app/uploads, is your own cards,
@@ -47,12 +50,12 @@ const STEPS = {
   [`${UPLOAD}/done`]: { step: 4, tag: "bs-upload-done" },
 };
 const TABS = [
-  { path: UPLOAD, label: "Upload", tag: "bs-upload-details" },
-  { path: "/app/uploads", label: "My uploads", tag: "bs-my-uploads" },
-  { path: DETECTIONS, label: "Detections", tag: "bs-detections" },
-  { path: "/admin/uploads", label: "All uploads", tag: "bs-admin-uploads", admin: true },
-  { path: "/admin/recorders", label: "Recorders", tag: "bs-admin-recorders", admin: true },
-  { path: "/admin/people", label: "People", tag: "bs-admin-people", admin: true },
+  { path: UPLOAD, label: "Upload", tag: "bs-upload-details", role: FIELD_VOLUNTEER },
+  { path: "/app/uploads", label: "My uploads", tag: "bs-my-uploads", role: FIELD_VOLUNTEER },
+  { path: DETECTIONS, label: "Detections", tag: "bs-detections", role: REVIEWER },
+  { path: "/admin/uploads", label: "All uploads", tag: "bs-admin-uploads", role: ADMIN },
+  { path: "/admin/recorders", label: "Recorders", tag: "bs-admin-recorders", role: ADMIN },
+  { path: "/admin/people", label: "People", tag: "bs-admin-people", role: ADMIN },
 ];
 
 class AppPage extends BaseElement {
@@ -64,7 +67,7 @@ class AppPage extends BaseElement {
     super.connectedCallback();
     this.#unsubscribe = [
       onNavigate(() => this.render()),
-      // A role arriving or changing adds or takes away the coordinator's tabs.
+      // A role arriving or changing adds or takes away its tabs.
       session.onChange(() => this.render()),
       // The Upload tab follows the card this browser tab is sending.
       flow.subscribe(() => this.$('[data-tab="upload"]')?.setAttribute("href", uploadStep())),
@@ -78,8 +81,8 @@ class AppPage extends BaseElement {
   render() {
     const here = path();
     const step = STEPS[here];
-    const shown = TABS.filter((t) => !t.admin || session.isAdmin());
-    const tab = step ? TABS[0] : (shown.find((t) => here === t.path || here.startsWith(`${t.path}/`)) ?? TABS[0]);
+    const shown = TABS.filter((t) => session.has(t.role));
+    const tab = step ? TABS[0] : (shown.find((t) => here === t.path || here.startsWith(`${t.path}/`)) ?? shown[0]);
     // <bs-app> has no route for a path that doesn't decode, so these can't throw.
     const [listed = "", listedDetection = ""] = here.startsWith(`${DETECTIONS}/`)
       ? here.slice(DETECTIONS.length + 1).split("/").map(decodeURIComponent)
@@ -105,6 +108,7 @@ class AppPage extends BaseElement {
           font-size: clamp(1.9rem, 1.3rem + 2vw, 2.375rem);
           color: var(--bs-heading);
         }
+        .none { max-width: 34rem; }
         /* The coordinator's tabs are the same strip, set a little apart. */
         .sep {
           flex: none;
@@ -120,19 +124,32 @@ class AppPage extends BaseElement {
         <p class="greeting">${greeting()}</p>
       </div>
 
-      <nav class="tabs" aria-label="Your sections">
-        ${shown
-          .map((t, i) => {
-            const upload = t.path === UPLOAD;
-            const sep = t.admin && !shown[i - 1]?.admin ? `<span class="sep" aria-hidden="true"></span>` : "";
-            return `${sep}<a class="tab" href="${upload ? uploadStep() : t.path}" ${upload ? 'data-tab="upload"' : ""}
-                       ${t === tab ? 'aria-current="page"' : ""}>${t.label}</a>`;
-          })
-          .join("")}
-      </nav>
+      ${
+        shown.length
+          ? `<nav class="tabs" aria-label="Your sections">
+               ${shown
+                 .map((t, i) => {
+                   const upload = t.path === UPLOAD;
+                   const sep = t.role === ADMIN && i > 0 && shown[i - 1].role !== ADMIN
+                     ? `<span class="sep" aria-hidden="true"></span>`
+                     : "";
+                   return `${sep}<a class="tab" href="${upload ? uploadStep() : t.path}" ${upload ? 'data-tab="upload"' : ""}
+                              ${t === tab ? 'aria-current="page"' : ""}>${t.label}</a>`;
+                 })
+                 .join("")}
+             </nav>`
+          : ""
+      }
 
       ${
-        step
+        !shown.length
+          ? // The roster refuses a volunteer with no role, but one can still
+            // arrive here: say why there is nothing, rather than a blank page.
+            `<h1>Nothing here for you yet</h1>
+             <p class="none">You're on the roster, but you haven't been given a role yet. Ask a
+             coordinator to make you a field volunteer, to upload cards, or a reviewer, to review
+             what was heard.</p>`
+          : step
           ? `<bs-upload-steps step="${step.step}"></bs-upload-steps><${step.tag}></${step.tag}>`
           : listed && listedDetection
             ? `<bs-detection-detail reference="${escapeHTML(listed)}" detection="${escapeHTML(listedDetection)}"

@@ -352,7 +352,7 @@ func (h *handlers) authCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.setSession(w, me)
-	h.log.Info("signed in", "provider", name, "email", me.Email, "role", me.Role)
+	h.log.Info("signed in", "provider", name, "email", me.Email, "role", me.Role, "roles", me.Roles)
 	// Where the app puts someone on arrival, as the sign-in page does. One set
 	// of tabs, whatever the role, so there is one landing for both -- unless
 	// they were sent to sign in from somewhere they mean to go back to.

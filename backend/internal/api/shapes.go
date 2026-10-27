@@ -26,12 +26,13 @@ type Station struct {
 // Person is someone on the volunteer roster. There is no password: the roster
 // is the allow-list, and sign-in is delegated to Google or Microsoft.
 type Person struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Provider string `json:"provider"`
-	Role     string `json:"role"`    // db.RoleVolunteer or db.RoleAdmin
-	AddedOn  string `json:"addedOn"` // YYYY-MM-DD
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Email    string   `json:"email"`
+	Provider string   `json:"provider"`
+	Role     string   `json:"role"`    // db.RoleVolunteer or db.RoleAdmin
+	Roles    []string `json:"roles"`   // of db.VolunteerRoles, in that order; never null
+	AddedOn  string   `json:"addedOn"` // YYYY-MM-DD
 }
 
 // Species is one confirmed-detection summary row on the public page. Only
@@ -266,9 +267,15 @@ func personOf(u db.User) Person {
 	if u.Identity != nil && u.Identity.Provider != "" {
 		provider = strings.ToUpper(u.Identity.Provider[:1]) + u.Identity.Provider[1:]
 	}
+	// A list, never null, so the frontend can ask it what it holds.
+	roles := u.Roles
+	if roles == nil {
+		roles = []string{}
+	}
 	return Person{
 		ID: u.ID, Name: u.Name, Email: u.Email,
-		Provider: provider, Role: u.Role, AddedOn: dateOf(u.CreatedAt),
+		Provider: provider, Role: u.Role, Roles: roles,
+		AddedOn: dateOf(u.CreatedAt),
 	}
 }
 

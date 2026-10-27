@@ -20,16 +20,19 @@ import (
 
 type person struct {
 	name, email, provider, role string
+	roles                       []string
 	addedDaysAgo                int
 }
 
+// One of each kind of volunteer, and one with several roles, so each tab's
+// guard can be tried by signing in as someone.
 var roster = []person{
-	{"Dana Coordinator", "dana@eastsideaudubon.org", "microsoft", db.RoleAdmin, 196},
-	{"Jane Volunteer", "jane@example.com", "google", db.RoleVolunteer, 153},
-	{"Tomas Reyes", "tomas.reyes@example.com", "google", db.RoleVolunteer, 153},
-	{"Priya Raman", "praman@example.org", "microsoft", db.RoleVolunteer, 107},
-	{"Ellen Park", "ellen.park@example.com", "google", db.RoleAdmin, 98},
-	{"Marcus Lee", "m.lee@example.com", "google", db.RoleVolunteer, 44},
+	{"Dana Coordinator", "dana@eastsideaudubon.org", "microsoft", db.RoleAdmin, nil, 196},
+	{"Jane Volunteer", "jane@example.com", "google", db.RoleVolunteer, []string{db.RoleFieldVolunteer}, 153},
+	{"Tomas Reyes", "tomas.reyes@example.com", "google", db.RoleVolunteer, []string{db.RoleFieldVolunteer, db.RoleReviewer}, 153},
+	{"Priya Raman", "praman@example.org", "microsoft", db.RoleVolunteer, []string{db.RoleBirdingExpert}, 107},
+	{"Ellen Park", "ellen.park@example.com", "google", db.RoleAdmin, []string{db.RoleFieldVolunteer}, 98},
+	{"Marcus Lee", "m.lee@example.com", "google", db.RoleVolunteer, []string{db.RoleReviewer}, 44},
 }
 
 type station struct {
@@ -82,7 +85,7 @@ func Seed(ctx context.Context, s db.Store, now time.Time) (bool, error) {
 	for _, p := range roster {
 		signedIn := at(min(p.addedDaysAgo, 3), 19)
 		if _, err := s.CreateUser(ctx, db.User{
-			Email: p.email, Name: p.name, Role: p.role,
+			Email: p.email, Name: p.name, Role: p.role, Roles: p.roles,
 			Identity:     &db.Identity{Provider: p.provider, Subject: "dev-" + strings.Split(p.email, "@")[0]},
 			LastSignInAt: &signedIn,
 			CreatedAt:    at(p.addedDaysAgo, 10),

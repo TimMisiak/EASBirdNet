@@ -39,3 +39,35 @@ func BootstrapAdmin(ctx context.Context, s Store, name, email string) (u User, c
 	}
 	return u, false, err
 }
+
+// BackfillRoles gives every volunteer from before volunteer roles the one role
+// that was all a volunteer could do then: upload cards. An admin is left as
+// they are, since being one is still everything, and so is anyone who already
+// holds a role. After the first start it reads the roster and writes nothing.
+//
+// A volunteer with no roles can't otherwise exist -- the roster routes refuse
+// one -- so this also mends a document an older image rewrote without its
+// roles after a rollback (ROLLBACK.md), at the cost of that person coming back
+// as a field volunteer whatever they were.
+func BackfillRoles(ctx context.Context, s Store) (updated []User, err error) {
+	users, err := s.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("db: reading the roster: %w", err)
+	}
+	for _, u := range users {
+		if u.Role == RoleAdmin || len(u.Roles) > 0 {
+			continue
+		}
+		done, err := s.UpdateUser(ctx, u.ID, func(u *User) error {
+			if u.Role != RoleAdmin && len(u.Roles) == 0 {
+				u.Roles = []string{RoleFieldVolunteer}
+			}
+			return nil
+		})
+		if err != nil {
+			return updated, fmt.Errorf("db: giving %s a role: %w", u.Email, err)
+		}
+		updated = append(updated, done)
+	}
+	return updated, nil
+}

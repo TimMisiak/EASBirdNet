@@ -685,13 +685,20 @@ func readAuth(cfg *config) error {
 }
 
 // prepareDatabase is everything the server writes on its own before it serves:
-// the bootstrap admin, recording times for cards registered before cards had
-// them, and in dev mode the placeholder program if the database is still
-// empty after that. Outside dev mode those first two are the only writes the
-// server ever makes unasked.
+// the bootstrap admin, a role for volunteers from before roles, recording
+// times for cards registered before cards had them, and in dev mode the
+// placeholder program if the database is still empty after that. Outside dev
+// mode those first three are the only writes the server ever makes unasked.
 func prepareDatabase(ctx context.Context, cfg config, store db.Store, log *slog.Logger) error {
 	if err := bootstrapRoster(ctx, cfg, store, log); err != nil {
 		return fmt.Errorf("bootstrapping the roster: %w", err)
+	}
+	updated, err := db.BackfillRoles(ctx, store)
+	if err != nil {
+		return fmt.Errorf("giving volunteers roles: %w", err)
+	}
+	for _, u := range updated {
+		log.Info("made a volunteer from before roles a field volunteer", "email", u.Email, "id", u.ID)
 	}
 	if err := backfillRecordingTimes(ctx, store, log); err != nil {
 		return fmt.Errorf("dating cards from their files: %w", err)
@@ -778,7 +785,7 @@ func bootstrapRoster(ctx context.Context, cfg config, store db.Store, log *slog.
 	case u.ID == "":
 		log.Warn("BIRDSENSE_BOOTSTRAP_ADMIN is not on the roster, and the roster is not empty, so it was not added", "email", email)
 	default:
-		log.Info("roster already bootstrapped", "email", u.Email, "role", u.Role)
+		log.Info("roster already bootstrapped", "email", u.Email, "role", u.Role, "roles", u.Roles)
 	}
 	return nil
 }

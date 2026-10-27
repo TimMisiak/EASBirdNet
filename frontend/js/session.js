@@ -2,6 +2,7 @@
 // admin screens all agree, and so a sign-out updates every one of them.
 
 import * as api from "./api.js";
+import * as roles from "./roles.js";
 
 let current = null;
 let loaded = false;
@@ -13,7 +14,9 @@ const listeners = new Set();
 /** The signed-in person, or null. Synchronous: call load() once at startup. */
 export const user = () => current;
 export const isSignedIn = () => current !== null;
-export const isAdmin = () => current?.role === "admin";
+export const isAdmin = () => roles.has(current, roles.ADMIN);
+/** Whether whoever is signed in may do what role allows (roles.js). */
+export const has = (role) => roles.has(current, role);
 /** True when the server runs in development mode (see BIRDSENSE_DB=local). */
 export const isDev = () => dev;
 /** The identity providers this server can sign people in with, e.g. ["microsoft"]. */

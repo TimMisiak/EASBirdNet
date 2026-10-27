@@ -1,6 +1,7 @@
 import { BaseElement } from "./base-element.js";
 import { navigate, onNavigate, path } from "../router.js";
 import * as session from "../session.js";
+import { ADMIN, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
 import "./bs-site-header.js";
 import "./bs-site-footer.js";
 import "./bs-app-header.js";
@@ -22,29 +23,39 @@ const ROUTES = [
   { path: "/", tag: "bs-home-page", chrome: "public", title: SITE },
   { path: "/signin", tag: "bs-signin-page", chrome: "bare", title: "Sign in" },
   // Where an LLM tool sends someone to let it read Birdsense as them (MCP).
+  // The server only lets a reviewer allow it, and the page says so.
   { path: "/connect", tag: "bs-connect-page", chrome: "bare", auth: true, title: "Connect an app" },
-  { path: "/app", redirect: "/app/upload" },
-  // Everyone signed in gets <bs-app-page> and its one row of tabs; a
-  // coordinator's three extra tabs keep the /admin/ paths the guard reads.
-  { path: "/app/upload", tag: "bs-app-page", chrome: "app", auth: true, title: "Upload a card" },
-  { path: "/app/upload/check", tag: "bs-app-page", chrome: "app", auth: true, title: "Check the card" },
-  { path: "/app/upload/progress", tag: "bs-app-page", chrome: "app", auth: true, title: "Uploading the card" },
-  { path: "/app/upload/done", tag: "bs-app-page", chrome: "app", auth: true, title: "Card uploaded" },
-  { path: "/app/uploads", tag: "bs-app-page", chrome: "app", auth: true, title: "My uploads" },
-  { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true, title: "Detections" },
+  { path: "/app", redirect: () => home() ?? "/app/upload" },
+  // Everyone signed in gets <bs-app-page> and its one row of tabs, each one
+  // behind the role it is for (roles.js); a coordinator's three extra tabs
+  // keep the /admin/ paths that say they are admin-only.
+  { path: "/app/upload", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Upload a card" },
+  { path: "/app/upload/check", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Check the card" },
+  { path: "/app/upload/progress", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Uploading the card" },
+  { path: "/app/upload/done", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Card uploaded" },
+  { path: "/app/uploads", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "My uploads" },
+  { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detections" },
   // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
-  { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, title: "Detection" },
+  { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detection" },
   { path: "/admin", redirect: "/admin/uploads" },
-  { path: "/admin/uploads", tag: "bs-app-page", chrome: "app", auth: true, admin: true, title: "All uploads" },
+  { path: "/admin/uploads", tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "All uploads" },
   // One card: /admin/uploads/OWL-20260914-SR03.
-  { path: "/admin/uploads/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, admin: true, title: "Card" },
-  { path: "/admin/recorders", tag: "bs-app-page", chrome: "app", auth: true, admin: true, title: "Recorders" },
-  { path: "/admin/people", tag: "bs-app-page", chrome: "app", auth: true, admin: true, title: "People" },
+  { path: "/admin/uploads/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "Card" },
+  { path: "/admin/recorders", tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "Recorders" },
+  { path: "/admin/people", tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "People" },
   // Detections is one tab for everyone now. A link a coordinator sent while it
   // was two lands on it, filters and all.
   { path: "/admin/detections", redirect: "/app/detections" },
   { path: "/admin/detections/", prefix: true, redirect: (here) => `/app/detections/${here.slice("/admin/detections/".length)}` },
 ];
+
+/**
+ * Where someone lands in the app, and where a route they can't use sends them:
+ * Upload for anyone who sends cards, Detections for a reviewer who doesn't.
+ * Null for someone with neither, whom <bs-app-page> tells to ask for a role.
+ */
+const home = () =>
+  session.has(FIELD_VOLUNTEER) ? "/app/upload" : session.has(REVIEWER) ? "/app/detections" : null;
 
 /**
  * The route for a path: an exact match, or a prefix route with something after
@@ -101,7 +112,12 @@ class BirdsenseApp extends BaseElement {
       if (session.wasEnded()) to.set("error", "session-ended");
       return navigate(`/signin?${to}`, { replace: true });
     }
-    if (route?.admin && !session.isAdmin()) return navigate("/app", { replace: true });
+    if (route?.role && !session.has(route.role)) {
+      // Off to their own first tab. Someone with none is left where they
+      // are, on a page that has nothing for them but the reason.
+      const to = home();
+      if (to && to !== here) return navigate(to, { replace: true });
+    }
 
     this.shadowRoot.innerHTML = `
       <style>

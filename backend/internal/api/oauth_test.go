@@ -476,6 +476,43 @@ func TestRefresh(t *testing.T) {
 	}
 }
 
+// TestAConnectionIsAReviewers: the MCP tools read every card's detections, so
+// connecting an app is a reviewer's to allow, and a connection ends when its
+// person stops being one, as it does when they leave the roster.
+func TestAConnectionIsAReviewers(t *testing.T) {
+	mux, store, clock := oauthServerFor(t)
+	c := registerTestClient(t, mux, authMethodNone)
+
+	// Marcus only sends cards: the consent page won't take his Allow.
+	verifier := oauth2.GenerateVerifier()
+	rec := do(t, mux, http.MethodGet, authorizeURL(c.ClientID, oauth2.S256ChallengeFromVerifier(verifier), nil), "", nil)
+	consent, _ := url.Parse(rec.Header().Get("Location"))
+	body, _ := json.Marshal(map[string]any{"request": consent.Query().Get("request"), "approve": true})
+	if rec := do(t, mux, http.MethodPost, oauthAuthorizePath, string(body), sessionAt("m.lee@example.com", *clock)); rec.Code != http.StatusForbidden {
+		t.Errorf("a field volunteer's Allow = %d, want 403", rec.Code)
+	}
+
+	code, verifier := connectAs(t, mux, *clock, c.ClientID, "jane@example.com")
+	_, live := exchange(t, mux, c.ClientID, code, verifier)
+	if rec := mcpCall(t, mux, live.AccessToken, "tools/list", ""); rec.Code != http.StatusOK {
+		t.Fatalf("a reviewer's access token = %d, want 200", rec.Code)
+	}
+	jane := userByEmail(t, store, "jane@example.com")
+	if _, err := store.UpdateUser(t.Context(), jane.ID, func(u *db.User) error {
+		u.Roles = []string{db.RoleFieldVolunteer}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := mcpCall(t, mux, live.AccessToken, "tools/list", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("an access token after its person stopped reviewing = %d, want 401", rec.Code)
+	}
+	rec = postForm(t, mux, oauthTokenPath, url.Values{"grant_type": {grantRefresh}, "refresh_token": {live.RefreshToken}, "client_id": {c.ClientID}})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("a refresh after its person stopped reviewing = %d, want 400", rec.Code)
+	}
+}
+
 // TestTokensAreNotCookies holds the point of deriving a key per purpose: an
 // access token can't be a session cookie, nor a cookie a token, though one
 // key is behind both.

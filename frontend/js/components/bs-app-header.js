@@ -1,6 +1,7 @@
 import { BaseElement, escapeHTML } from "./base-element.js";
 import { navigate } from "../router.js";
 import * as session from "../session.js";
+import { labels } from "../roles.js";
 import "./bs-brand-mark.js";
 
 /**
@@ -31,7 +32,8 @@ class AppHeader extends BaseElement {
 
   render() {
     const user = session.user();
-    const role = user?.role === "admin" ? "Admin" : "Volunteer";
+    // What they do, in words: "Admin", or "Field volunteer, Reviewer".
+    const role = session.isAdmin() ? "Admin" : labels(user).join(", ") || "Volunteer";
 
     this.shadowRoot.innerHTML = `
       <style>

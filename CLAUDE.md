@@ -54,6 +54,7 @@ stands -- is [ANALYSIS.md](ANALYSIS.md).
 │       ├── api.js          fetch wrapper for /api/v1
 │       ├── router.js       History router; in-app links, guards live in <bs-app>
 │       ├── session.js       Who is signed in, shared by every component
+│       ├── roles.js         Who may do what: the server's db.User.Has, for tabs and guards
 │       ├── shared-styles.js Constructable stylesheets for repeated primitives
 │       ├── format.js        Dates, sizes, counts, durations
 │       ├── upload-flow.js   The SD-card upload over tus, which spans four routes
@@ -220,10 +221,12 @@ there). It registers the `/dev/*` routes *and* `POST /session`, and
 everyone on the roster. A deployed server registers neither, so its only way in
 is a provider.
 
-A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads 404 for
-anyone else, and the `/admin/*` routes 403 for a volunteer.
-Detections are not a card's: anyone signed in hears and reviews every card's,
-under `/detections`. A card's counts are
+Every route but the session's and the public ones is for a role (*One set of
+tabs, each for a role*): `/uploads` and tus for a field volunteer,
+`/detections` for a reviewer, `/admin/*` for an admin, and anyone without it
+gets a 403. A card belongs to a volunteer: `/uploads/{ref}` and its tus uploads
+404 for anyone else. Detections are not a card's: every reviewer hears and
+reviews every card's, under `/detections`. A card's counts are
 the server's own count of the files it has received, never reported by the
 client: a file is counted (`countFile`) by the write that marks it received, so
 a retried chunk can't count twice, and the card is recounted from its files
@@ -400,9 +403,11 @@ registers with a secret gets a MAC of its id; a code is single-use by an
 in-memory list of the spent ones, which only has to outlast the code's minute
 (one replica); and tokens are signed values, each kind under its own key
 derived from `BIRDSENSE_SESSION_KEY` (`keyset.derive`), so no token passes for
-a cookie or for another kind of token. Every token use checks the roster, so
-removing someone ends their connections, and rotating the session key ends
-everyone's. A connection lasts 90 days from Allow, as a session does;
+a cookie or for another kind of token. The tools read every card's
+detections, so connecting is a reviewer's to allow, as `/detections` is, and
+every token use checks the roster for a reviewer (`mayReadDetections`): removing
+someone, or taking their reviewer role away, ends their connections, and
+rotating the session key ends everyone's. A connection lasts 90 days from Allow, as a session does;
 refreshing doesn't extend it. Redirect URIs must be https, or http on
 loopback (any port, RFC 8252); custom schemes aren't taken.
 Four read-only tools, sized for a week at a time:
@@ -618,18 +623,37 @@ wrong about the app, at the cost of needing Terraform credentials to deploy. So 
 images and update the app but not touch state; that is the point of
 `ignore_changes` on the image (DEPLOYMENT.md, *Deploying a new version*).
 
-**One set of tabs, and the admin ones are hidden.** A coordinator is a
-volunteer with three more tabs, not a second application:
-`<bs-app-page>` is the shell for everyone signed in, and its tab table marks
-three entries `admin`, which `session.isAdmin()` filters out. So a coordinator
-uploads a card, resumes their own, and reviews detections on the same screens a
-volunteer does, and a screen only has to be built and kept working once. The
-admin tabs keep their `/admin/` paths, because that is what the route guard
-reads and what makes an admin-only page obvious in a link. The shell's greeting
-is a salutation, not a heading: the one `<h1>` on every one of these routes is
-the page's own, so a reader moving by headings lands on what they came for.
-*Revisit when:* the roster grows a third role, or a coordinator's version of a
-shared screen has to differ by more than what it lists.
+**One set of tabs, each for a role.** Someone on the roster has an access
+level, `role` -- `admin` or `volunteer` -- and any number of volunteer
+`roles`: `field_volunteer` (Upload and My uploads), `reviewer` (Detections, and
+the Review tab to come) and `birding_expert` (a reviewer, with expert tools in
+that tab). An admin may do everything whatever their roles say, and keeps the
+roles for if they stop being one; a birding expert is a reviewer whether or not
+`reviewer` is also stored. `db.User.Has` is that whole rule, and `requireRole`
+asks it of every route; `js/roles.js` is the same rule in the browser, so a tab
+shows only to someone the API will answer. A volunteer must hold at least one
+role -- the roster routes refuse one with none -- because a volunteer with none
+could sign in to nothing. Admin is a level rather than a fourth role so that
+`role` still means what it did before roles, which is what lets an older image
+be rolled back onto (ROLLBACK.md).
+The roles aren't separate applications: `<bs-app-page>` is the shell for
+everyone signed in, and its tab table names the role each tab is for, so a
+coordinator uploads a card, resumes their own, and reviews detections on the
+same screens a volunteer does, and a screen only has to be built and kept
+working once. `<bs-app>`'s routes carry the same roles, and a route someone
+lacks sends them to their own first tab (Upload, or Detections for a reviewer
+who doesn't upload) -- `/app` too, which is where sign-in lands. The admin tabs
+keep their `/admin/` paths, because that makes an admin-only page obvious in a
+link. The shell's greeting is a salutation, not a heading: the one `<h1>` on
+every one of these routes is the page's own, so a reader moving by headings
+lands on what they came for.
+Gotcha: volunteers from before roles have only `role`, and the server gives
+each one `field_volunteer` at startup (`db.BackfillRoles`), which was all a
+volunteer could do then. It writes nothing once they have one.
+*Revisit when:* a role needs a permission another doesn't imply and isn't a
+tab (a per-card or per-recorder grant, say) -- then `Has` wants to become a
+list of permissions per role, not more special cases -- or a coordinator's
+version of a shared screen has to differ by more than what it lists.
 
 **Shared stylesheets live in a cascade layer.** `shared-styles.js` exports
 `CSSStyleSheet` objects for the primitives that appear on nearly every screen
@@ -1099,15 +1123,18 @@ minimum confidence and the days heard, and opens the same detection page, where 
 through the list as filtered and sorted rather than through the file. It
 opens on the past week, with those dates in its own date fields, and widening
 them past what one replica will read says so rather than failing.
-An LLM tool can connect over MCP as anyone on the roster (*LLM tools connect
+An LLM tool can connect over MCP as any reviewer (*LLM tools connect
 over MCP*) and read summaries and CSV exports of a span of time; it can't
 change anything. claude.ai's connector hasn't been tried against a deployment
 yet -- the flow is tested end to end with the MCP SDK's own client.
-Anyone signed in can review. Everyone works in the same shell
-(`<bs-app-page>`): Upload, the default, holding the card upload's four steps;
-My uploads, their own cards, where an unfinished one is resumed; and
-Detections. A coordinator gets three more tabs after those -- All uploads,
-Recorders and People. Nothing moves a card from `in_review`
+Field volunteers upload and reviewers review (*One set of tabs, each for a
+role*); the Review tab, and the birding expert's tools in it, aren't built
+yet, so for now a birding expert has exactly what a reviewer has. Everyone
+works in the same shell (`<bs-app-page>`), seeing the tabs their roles give
+them: Upload, holding the card upload's four steps; My uploads, their own
+cards, where an unfinished one is resumed; and Detections. A coordinator gets
+all of those and three more after them -- All uploads, Recorders and People,
+where they set everyone's roles. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

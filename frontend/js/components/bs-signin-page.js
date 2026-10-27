@@ -3,6 +3,7 @@ import { controls, forms, typography } from "../shared-styles.js";
 import { navigate, query } from "../router.js";
 import * as api from "../api.js";
 import * as session from "../session.js";
+import { labels } from "../roles.js";
 import "./bs-brand-mark.js";
 
 /**
@@ -139,7 +140,11 @@ class SignInPage extends BaseElement {
       return `
         <optgroup label="${label}">
           ${people
-            .map((p) => `<option value="${escapeHTML(p.email)}">${escapeHTML(p.name)}</option>`)
+            .map((p) => {
+              // Who does what, so each tab's guard can be tried by picking someone.
+              const what = p.role === "admin" ? "" : ` — ${labels(p).join(", ")}`;
+              return `<option value="${escapeHTML(p.email)}">${escapeHTML(p.name + what)}</option>`;
+            })
             .join("")}
         </optgroup>
       `;

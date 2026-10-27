@@ -956,18 +956,19 @@ func exportName(rng mcpRange) string {
 // read, so a week costs a page of memory rather than the week. The link is
 // the credential (it is signed, says who asked for what, and lapses after
 // exportLinkLife), because whatever fetches it -- code in a model's sandbox --
-// holds no token. It still answers only while its person is on the roster.
+// holds no token. It still answers only while its person is on the roster as
+// a reviewer.
 func (h *handlers) serveMCPExport(w http.ResponseWriter, r *http.Request) {
 	var link exportLink
 	if err := verifyJSON(h.oauth.exports, r.URL.Query().Get("token"), h.now(), &link); err != nil {
 		h.problem(w, http.StatusUnauthorized, "that export link is unknown or has expired; ask for a new one")
 		return
 	}
-	if _, ok, err := h.onRoster(r, link.Email); err != nil {
+	if ok, err := h.mayReadDetections(r, link.Email); err != nil {
 		h.fail(w, r, err)
 		return
 	} else if !ok {
-		h.problem(w, http.StatusUnauthorized, "that export link's owner is no longer on the roster")
+		h.problem(w, http.StatusUnauthorized, "that export link's owner is no longer on the roster as a reviewer")
 		return
 	}
 	ctx := r.Context()

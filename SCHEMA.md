@@ -73,7 +73,8 @@ DEPLOYMENT.md). Admins add everyone after that.
 | `id`           | string    | `usr_` + 16 random hex characters. |
 | `email`        | string    | Trimmed and lower-cased. Unique across users (checked by the app, not by a Cosmos unique key; see [Uniqueness](#uniqueness)). |
 | `name`         | string    | Display name. May be empty until the person signs in. |
-| `role`         | string    | `volunteer` or `admin`. |
+| `role`         | string    | The access level: `volunteer` or `admin`. An admin may do everything, whatever `roles` says. |
+| `roles?`       | string[]  | The volunteer roles held, each once, in this order: `field_volunteer` (uploads cards), `reviewer` (hears and reviews detections), `birding_expert` (a reviewer, with expert review tools). A volunteer holds at least one; an admin may hold none, and keeps any for if they stop being one. Absent on a volunteer from before roles until the server's next start gives them `field_volunteer` (`db.BackfillRoles`). |
 | `identity?`    | object    | `{provider, subject}`. Bound at first sign-in, so later sign-ins match on the provider's stable `sub` claim, not only the address. `provider` is `google` or `microsoft`. |
 | `lastSignInAt?`| instant   | |
 | `removedAt?`   | instant   | Set when taken off the roster. The document stays so uploads and reviews still resolve. |
@@ -86,6 +87,7 @@ DEPLOYMENT.md). Admins add everyone after that.
   "email": "jane@example.com",
   "name": "Jane Volunteer",
   "role": "volunteer",
+  "roles": ["field_volunteer", "reviewer"],
   "identity": { "provider": "google", "subject": "110248495921238986420" },
   "lastSignInAt": "2026-09-12T03:10:44Z",
   "createdAt": "2026-04-14T17:02:00Z",
@@ -579,6 +581,7 @@ public summary), following these rules:
 | `station.addedOn` (date) | `recorders.createdAt`, formatted as a date in America/Los_Angeles |
 | `person.addedOn` (date) | `users.createdAt`, same |
 | `person.provider` | `users.identity.provider`, title-cased; `—` before first sign-in |
+| `person.roles` | `users.roles`; `[]` when absent, never null |
 | `upload.reference` | `uploads.id`, built by `db.UploadID(pulledOn, recorderId)` |
 | `files[].bytes` (`POST /uploads`) | `audioFiles.sizeBytes`; `files[].path` is `path`, normalized by `db.CardPath` |
 | `upload.stationName` | `uploads.recorder.name` (the copy, not the live recorder) |
@@ -615,7 +618,8 @@ What the write routes do to documents:
 | `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
 | `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
-| `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name and role) instead of conflicting. |
+| `POST /admin/people`, `PUT /admin/people/{id}` | Take `role` and `roles`, and store `roles` each once in the order above. A role that isn't one of the three, or a volunteer with none, is a 400. |
+| `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name, role and roles) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
 | `POST /admin/stations` | A retired recorder's id (compared case-insensitively) reinstates it at the new name and position. An id outside the `recorders.id` rules is a 400; one that would share card references with a recorder already added is a 409. |
 | `POST /admin/stations`, `PUT /admin/stations/{id}` | `latitude` and `longitude` are each required: a missing one is a 400, never read as 0, so half a position can't put a recorder in the Gulf of Guinea and send that to BirdNET's geo filter. `0, 0` itself is refused as "not placed yet". A `PUT` takes the id from the path only. |
