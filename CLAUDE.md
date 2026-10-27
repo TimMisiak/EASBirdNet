@@ -11,7 +11,9 @@ What it stores is documented in [SCHEMA.md](SCHEMA.md); the Azure resources it
 runs on (and the source for Terraform) are in [DEPLOYMENT.md](DEPLOYMENT.md),
 and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 How analysis runs as a job -- the design, what was measured, and where it
-stands -- is [ANALYSIS.md](ANALYSIS.md).
+stands -- is [ANALYSIS.md](ANALYSIS.md). How detections are reviewed -- rules
+that accept the common birds, bouts, two listeners, the Review tab -- is
+[REVIEW.md](REVIEW.md), a design not yet built.
 
 ```
 /
