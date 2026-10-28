@@ -115,6 +115,8 @@ resource "azurerm_container_app_job" "analysis" {
     azurerm_role_assignment.app_acr_pull,
     azurerm_role_assignment.app_blob,
     azurerm_cosmosdb_sql_role_assignment.app,
+    # A worker opens the store, which checks every container exists.
+    azurerm_cosmosdb_sql_container.this,
   ]
 
   lifecycle {

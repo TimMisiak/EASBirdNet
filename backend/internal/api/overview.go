@@ -9,18 +9,21 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 )
 
 // overview reads what the public landing page shows: three program figures and
-// the species confirmed in the last `days` days. Nothing in it names a
-// volunteer or a card.
+// the species heard in the last `days` days, counting what the review rules
+// accepted and reviewers confirmed. Nothing in it names a volunteer or a card.
 //
-// Every count happens here in Go, not in a query: Cosmos can't aggregate across
-// partitions from the Go SDK (see SCHEMA.md). If this gets expensive as
-// detections pile up, it becomes a precomputed summary document.
+// It reads each card's summary (review.Build, review.Adjust) rather than the
+// detections, which grow by thousands a day per recorder: a year of them is
+// more than one read may hold (db.MaxDetectionScan). Counts are by Pacific
+// date, so the window is the last `days` dates, today's included. A card with
+// no summary yet has one built here, once.
 func overview(ctx context.Context, store db.Store, now time.Time, days int) (ProgramStats, []Species, error) {
-	yearStart := time.Date(now.In(pacific).Year(), time.January, 1, 0, 0, 0, 0, pacific)
-	windowStart := now.AddDate(0, 0, -days)
+	year := now.In(pacific).Format("2006-")
+	firstDate := now.In(pacific).AddDate(0, 0, 1-days).Format(time.DateOnly)
 
 	recorders, err := store.ListRecorders(ctx)
 	if err != nil {
@@ -30,42 +33,19 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 	if err != nil {
 		return ProgramStats{}, nil, err
 	}
-	// One query covers both the year's count and the window, which reaches back
-	// into last year early in January.
-	since := yearStart
-	if windowStart.Before(since) {
-		since = windowStart
-	}
-	// BirdNET's alone. Perch is a second opinion on the same audio, so a bird
-	// both heard and a reviewer confirmed twice would be counted twice.
-	confirmed, err := store.ListDetections(ctx, db.DetectionFilter{ReviewStatus: db.ReviewConfirmed, Since: since, Model: db.ModelBirdNET})
+	stored, err := store.ListCardSummaries(ctx)
 	if err != nil {
 		return ProgramStats{}, nil, err
+	}
+	summaries := make(map[string]db.CardSummary, len(stored))
+	for _, s := range stored {
+		summaries[s.ID] = s
 	}
 
 	var program ProgramStats
 	for _, r := range recorders {
 		if r.RetiredAt == nil {
 			program.Recorders++
-		}
-	}
-	// A card's recordings count for the year its first one started in, or
-	// that it was pulled in when no file name said.
-	stationName := map[string]string{}
-	// A card being deleted counts for nothing, nor does what was heard on it.
-	deleting := map[string]bool{}
-	for _, u := range uploads {
-		if u.Status == db.StatusDeleting {
-			deleting[u.ID] = true
-			continue
-		}
-		stationName[u.ID] = u.Recorder.Name
-		year := u.PulledOn
-		if u.FirstRecordingAt != nil {
-			year = u.FirstRecordingAt.In(pacific).Format(time.DateOnly)
-		}
-		if strings.HasPrefix(year, yearStart.Format("2006-")) {
-			program.Recordings += u.FileCount
 		}
 	}
 
@@ -75,36 +55,55 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 		stations map[string]int
 	}
 	bySpecies := map[string]*tally{}
-	for _, d := range confirmed {
-		if deleting[d.UploadID] {
+	for _, u := range uploads {
+		// A card being deleted counts for nothing, nor does what was heard on it.
+		if u.Status == db.StatusDeleting {
 			continue
 		}
-		if !d.DetectedAt.Before(yearStart) {
-			program.ConfirmedDetections++
+		// A card's recordings count for the year its first one started in, or
+		// that it was pulled in when no file name said.
+		started := u.PulledOn
+		if u.FirstRecordingAt != nil {
+			started = dateOf(*u.FirstRecordingAt)
 		}
-		if d.DetectedAt.Before(windowStart) {
-			continue
+		if strings.HasPrefix(started, year) {
+			program.Recordings += u.FileCount
 		}
-		scientific, common := d.Species()
-		t := bySpecies[scientific]
-		if t == nil {
-			t = &tally{
-				Species:  Species{ScientificName: scientific, CommonName: common},
-				days:     map[string]bool{},
-				stations: map[string]int{},
+
+		summary, ok := summaries[u.ID]
+		if !ok {
+			if summary, err = review.Build(ctx, store, u.ID); err != nil {
+				return ProgramStats{}, nil, err
 			}
-			bySpecies[scientific] = t
 		}
-		t.Detections++
-		t.days[dateOf(d.DetectedAt)] = true
 		// Where the card says it was recorded, not where the unit is now.
-		name := stationName[d.UploadID]
-		if name == "" {
-			name = d.RecorderID
-		}
-		t.stations[name]++
-		if d.DetectedAt.After(t.LastDetectedAt) {
-			t.LastDetectedAt = d.DetectedAt
+		station := cmp.Or(u.Recorder.Name, u.RecorderID)
+		for _, s := range summary.Species {
+			var t *tally
+			for date, n := range s.Days {
+				if strings.HasPrefix(date, year) {
+					program.ConfirmedDetections += n
+				}
+				if date < firstDate {
+					continue
+				}
+				if t == nil {
+					if t = bySpecies[s.ScientificName]; t == nil {
+						t = &tally{
+							Species:  Species{ScientificName: s.ScientificName, CommonName: s.CommonName},
+							days:     map[string]bool{},
+							stations: map[string]int{},
+						}
+						bySpecies[s.ScientificName] = t
+					}
+				}
+				t.Detections += n
+				t.days[date] = true
+				t.stations[station] += n
+			}
+			if t != nil && s.LastDetectedAt.After(t.LastDetectedAt) {
+				t.LastDetectedAt = s.LastDetectedAt
+			}
 		}
 	}
 
@@ -130,8 +129,8 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 // overviewCache is how often the landing page's scan actually runs.
 //
 // /public/overview needs no session, and answering it reads every recorder,
-// every card and every confirmed detection of the year -- the most expensive
-// read in the app, on the one replica that is also running BirdNET. So each
+// every card and every card's summary -- the most expensive read in the app,
+// and the one route anyone on the internet can ask for. So each
 // window's answer is held for the minute it is stamped with, and a flood of
 // anonymous requests costs one scan a minute per window size instead of one
 // each.

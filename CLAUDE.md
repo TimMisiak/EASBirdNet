@@ -13,7 +13,7 @@ and going back to an earlier image is [ROLLBACK.md](ROLLBACK.md).
 How analysis runs as a job -- the design, what was measured, and where it
 stands -- is [ANALYSIS.md](ANALYSIS.md). How detections are reviewed -- rules
 that accept the common birds, bouts, two listeners, the Review tab -- is
-[REVIEW.md](REVIEW.md), a design not yet built.
+[REVIEW.md](REVIEW.md), a design being built in milestones.
 
 ```
 /
@@ -34,6 +34,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
+│       ├── review/     What counts, and each card's summary of it (REVIEW.md)
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
@@ -291,24 +292,32 @@ The MCP tools (*LLM tools connect over MCP*) are the one reader with no
 ceiling, because they hold nothing: `Store.EachDetection` hands over a page
 at a time, and the summary keeps tallies, the export writes rows as they come.
 
-**The landing page is answered a minute at a time.** `GET /public/overview`
-needs no session, and answering it reads every recorder, every card and every
-confirmed detection of the year, aggregating in Go because Cosmos can't
-aggregate across partitions (SCHEMA.md). That is the most expensive read in the
-app, on the one replica that is also running BirdNET, on the one route anyone
-on the internet can ask for. So `overviewCache` holds each window's answer for
-the minute it is stamped with, and admits one scan at a time, so an anonymous
-flood costs one scan a minute per window size rather than one scan each; the
-response carries `Cache-Control: public` for what is left of that minute.
-Nothing about the answer changes -- `updatedAt` is already that minute, so a
-cached answer is the one a fresh scan would have given. The cost is that
-confirming a detection can take up to a minute to show on the landing page. It
-is in the process, not a cache service, because one replica is the whole
-deployment (DEPLOYMENT.md).
-*Revisit when:* the app runs more than one replica, or the scan is slow enough
-that a minute's worth of it still hurts. Then it is the same precomputed
-summary document the detections list would want, written when a review is
-confirmed.
+**The landing page reads summaries, a minute at a time.** `GET
+/public/overview` needs no session, and what it shows -- a year's count, and
+each species heard in the last week or month -- is every *counted* detection
+(`accepted` or `confirmed`, BirdNET's; REVIEW.md). A recorder
+yields ~2,300 detections a day, and a year of the ones that count is more than
+one read may hold (`db.MaxDetectionScan`), so the page reads a summary per
+card instead: `cardSummaries`, the card's counted detections by species and
+Pacific date (SCHEMA.md). `internal/review` keeps them: built whole from the
+card's detections the first time the page meets a card without one, and
+adjusted by every write that changes what counts -- a review, today. Counting
+by date makes the window the last `days` dates, not the last `days`×24 hours.
+Gotcha: a change landing while its card's summary is being built whole can be
+missed, since the build stores what it read; the next whole build fixes it,
+and REVIEW.md's preparation loop is what will rebuild them.
+On top of that, `overviewCache` holds each window's answer for the minute it
+is stamped with, and admits one scan at a time, so an anonymous flood costs
+one scan a minute per window size rather than one scan each; the response
+carries `Cache-Control: public` for what is left of that minute. Nothing about
+the answer changes -- `updatedAt` is already that minute, so a cached answer
+is the one a fresh scan would have given. The cost is that confirming a
+detection can take up to a minute to show on the landing page. It is in the
+process, not a cache service, because one replica is the whole deployment
+(DEPLOYMENT.md).
+*Revisit when:* the app runs more than one replica, or reading every card's
+summary is slow enough that a minute's worth of it still hurts -- then a
+summary per recorder-year, kept the same way.
 
 **Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
 has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
@@ -1136,7 +1145,11 @@ works in the same shell (`<bs-app-page>`), seeing the tabs their roles give
 them: Upload, holding the card upload's four steps; My uploads, their own
 cards, where an unfinished one is resumed; and Detections. A coordinator gets
 all of those and three more after them -- All uploads, Recorders and People,
-where they set everyone's roles. Nothing moves a card from `in_review`
+where they set everyone's roles. Reviewing is being rebuilt around review
+rules and bouts (REVIEW.md, which has where it stands): a detection can
+already be `accepted` and counts publicly if so, and the landing page reads
+card summaries, but nothing sets `accepted` yet, so every detection is still
+reviewed one at a time on its own page. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

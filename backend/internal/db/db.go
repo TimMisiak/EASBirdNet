@@ -60,8 +60,8 @@ type Store interface {
 	// CreateUpload requires an id. ErrConflict if it is taken.
 	CreateUpload(ctx context.Context, u Upload) (Upload, error)
 	UpdateUpload(ctx context.Context, id string, mutate func(*Upload) error) (Upload, error)
-	// DeleteUpload removes a card for good, with its audio files and
-	// detections. The card goes last, so a delete that fails part way leaves
+	// DeleteUpload removes a card for good, with its audio files, detections
+	// and summary. The card goes last, so a delete that fails part way leaves
 	// it listed to be deleted again. ErrNotFound if there is no such card;
 	// anything still stored under its id is removed all the same.
 	DeleteUpload(ctx context.Context, id string) error
@@ -89,6 +89,14 @@ type Store interface {
 	// detection with no id gets DetectionID from its file, start and species.
 	UpsertDetections(ctx context.Context, uploadID string, detections []Detection) error
 	UpdateDetection(ctx context.Context, uploadID, id string, mutate func(*Detection) error) (Detection, error)
+
+	// ListCardSummaries returns every card's summary there is, in no
+	// particular order. A card has none until one is built for it.
+	ListCardSummaries(ctx context.Context) ([]CardSummary, error)
+	// PutCardSummary writes a card's summary whole, creating or replacing it.
+	PutCardSummary(ctx context.Context, s CardSummary) error
+	// UpdateCardSummary changes a card's summary; ErrNotFound if it has none.
+	UpdateCardSummary(ctx context.Context, id string, mutate func(*CardSummary) error) (CardSummary, error)
 
 	// Ping says whether this backend is reachable from here. It answers the
 	// readiness probe, so it runs on a timer for as long as the server does:
@@ -159,7 +167,7 @@ type Config struct {
 	LocalPath string
 	// CosmosEndpoint is the account URI, e.g. https://acct.documents.azure.com:443/.
 	CosmosEndpoint string
-	// CosmosDatabase is the database holding the five containers.
+	// CosmosDatabase is the database holding the six containers.
 	CosmosDatabase string
 	// CosmosKey switches from Entra ID auth to an account key. It exists for
 	// the Cosmos DB emulator; production accounts disable key auth.
@@ -304,6 +312,17 @@ func prepareDetection(uploadID string, d *Detection, t time.Time) error {
 	return nil
 }
 
+func prepareCardSummary(c *CardSummary, t time.Time) error {
+	if c.ID == "" {
+		return errors.New("db: a card summary needs its card's id")
+	}
+	if c.Species == nil {
+		c.Species = []SpeciesTallies{}
+	}
+	stamp(&c.CreatedAt, &c.UpdatedAt, t)
+	return nil
+}
+
 func stamp(created, updated *time.Time, t time.Time) {
 	if created.IsZero() {
 		*created = t
@@ -333,4 +352,8 @@ func (f *AudioFile) keep(old AudioFile, t time.Time) {
 
 func (d *Detection) keep(old Detection, t time.Time) {
 	d.ID, d.UploadID, d.CreatedAt, d.UpdatedAt = old.ID, old.UploadID, old.CreatedAt, t
+}
+
+func (c *CardSummary) keep(old CardSummary, t time.Time) {
+	c.ID, c.CreatedAt, c.UpdatedAt = old.ID, old.CreatedAt, t
 }

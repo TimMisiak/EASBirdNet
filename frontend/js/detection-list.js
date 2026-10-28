@@ -37,6 +37,7 @@ export const DEFAULT_DAYS = 7;
 export const STATUSES = [
   { id: "", label: "All" },
   { id: "unreviewed", label: "Unreviewed" },
+  { id: "accepted", label: "Accepted" },
   { id: "confirmed", label: "Confirmed" },
   { id: "rejected", label: "Discarded" },
 ];

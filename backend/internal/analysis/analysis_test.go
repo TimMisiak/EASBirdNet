@@ -426,6 +426,64 @@ func TestConsecutiveWindowsAreOneDetection(t *testing.T) {
 	}
 }
 
+// A file analyzed again -- its worker died after storing what it heard, before
+// marking it analyzed -- stores the same detections again, whole. What a
+// reviewer said about one in between stays said.
+func TestAnalyzingAFileAgainKeepsItsReviews(t *testing.T) {
+	f := newFixture(t)
+	f.bird.answer = owls
+	f.card(db.StatusProcessing, owlFile)
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	owl := f.file(owlFile)
+	barred := db.DetectionID(owl.ID, 732_000, "Strix varia")
+	review := &db.Review{UserID: "usr_1", UserName: "Ellen Park", At: testNow, CorrectedScientificName: "Strix occidentalis", CorrectedCommonName: "Spotted Owl"}
+	if _, err := f.store.UpdateDetection(t.Context(), ref, barred, func(d *db.Detection) error {
+		d.ReviewStatus, d.Review = db.ReviewConfirmed, review
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back to where the worker that died left it.
+	if _, err := f.store.UpdateAudioFile(t.Context(), ref, owl.ID, func(a *db.AudioFile) error {
+		a.Status = db.AudioUploaded
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.UpdateUpload(t.Context(), ref, func(u *db.Upload) error {
+		u.Status = db.StatusProcessing
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.queue.drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.bird.calls); n != 2 {
+		t.Fatalf("BirdNET ran %d times, want twice over the one file", n)
+	}
+
+	dets, err := f.store.ListDetections(t.Context(), db.DetectionFilter{UploadID: ref, AudioFileID: owl.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range dets {
+		switch d.ID {
+		case barred:
+			if d.ReviewStatus != db.ReviewConfirmed || d.Review == nil || *d.Review != *review {
+				t.Errorf("the reviewed detection is %s, %+v; want it still confirmed as a Spotted Owl", d.ReviewStatus, d.Review)
+			}
+		default:
+			if d.ReviewStatus != db.ReviewUnreviewed || d.Review != nil {
+				t.Errorf("%s is %s, %+v; want it unreviewed, as found", d.CommonName, d.ReviewStatus, d.Review)
+			}
+		}
+	}
+}
+
 func TestClipSpan(t *testing.T) {
 	run := func(start, end, peak float64) heard {
 		return heard{Detection: birdnet.Detection{StartSec: start, EndSec: end}, PeakStartSec: peak, PeakEndSec: peak + 3}

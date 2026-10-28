@@ -195,7 +195,7 @@ class HomePage extends BaseElement {
             <div class="figures">
               ${figure(program.recorders, "recorders in the field")}
               ${figure(program.recordings, "recordings this year")}
-              ${figure(program.confirmedDetections, "confirmed owl detections")}
+              ${figure(program.confirmedDetections, "confirmed detections this year")}
             </div>
           </div>
           <p class="credit">

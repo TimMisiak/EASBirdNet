@@ -185,12 +185,6 @@ What is left is two decisions and one piece of work:
    precomputed summary document CLAUDE.md already names plus a query the
    database pages itself — not a higher ceiling.
 
-**Also watch:** `publicOverview` reads every *confirmed* detection of the year
-(`overview.go:39`) and is under the ceiling only because confirming is bounded
-by how fast people can review. A season of diligent reviewing walks the landing
-page into the same wall, and there it is a 500 on the one page the public sees.
-The precomputed summary in (3) is the same fix.
-
 **Rejected:** a per-file cap on clips, which this item used to propose. It
 bounds the worst case but discards real detections in exactly the files with
 the most birds in them, and does nothing for the document count or the list.

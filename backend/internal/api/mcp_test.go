@@ -217,6 +217,46 @@ func TestDetectionSummary(t *testing.T) {
 	}
 }
 
+// A detection the review rules accepted is counted as accepted, apart from
+// the unreviewed ones and the confirmed.
+func TestDetectionSummaryCountsAccepted(t *testing.T) {
+	h, _ := toolHandlers(t)
+	ctx := t.Context()
+	// The robin just before noon on the 20th, the one in the week.
+	week := db.DetectionFilter{
+		Since: time.Date(2026, time.September, 14, 19, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, time.September, 20, 19, 0, 0, 0, time.UTC),
+	}
+	var robin db.Detection
+	if err := h.store.EachDetection(ctx, week, func(d db.Detection) error {
+		if d.ScientificName == "Turdus migratorius" {
+			robin = d
+		}
+		return nil
+	}); err != nil || robin.ID == "" {
+		t.Fatalf("the seed has no robin (%v)", err)
+	}
+	if _, err := h.store.UpdateDetection(ctx, robin.UploadID, robin.ID, func(d *db.Detection) error {
+		d.ReviewStatus = db.ReviewAccepted
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := h.toolDetectionSummary(ctx, callAs("jane@example.com"), theWeek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (SummaryTotals{Detections: 6, Species: 4, Accepted: 1, Confirmed: 2, Unreviewed: 3, Rejected: 1}); out.Totals != want {
+		t.Errorf("totals = %+v, want %+v", out.Totals, want)
+	}
+	for _, s := range out.Species {
+		if s.ScientificName == "Turdus migratorius" && (s.Accepted != 1 || s.Unreviewed != 0) {
+			t.Errorf("robin = %d accepted, %d unreviewed; want 1 and 0", s.Accepted, s.Unreviewed)
+		}
+	}
+}
+
 func TestDetectionSummaryFilters(t *testing.T) {
 	h, _ := toolHandlers(t)
 	ctx := t.Context()
@@ -495,7 +535,7 @@ func TestFindDetections(t *testing.T) {
 		{"too many rows", findInput{Limit: maxFindRows + 1}, "from 1 to 500"},
 		{"an unknown sort", findInput{Sort: "species"}, "time or confidence"},
 		{"an unknown column", findInput{Columns: []string{"heardAt", "station"}}, "no column \"station\""},
-		{"an unknown review status", findInput{ReviewStatuses: []string{"maybe"}}, "unreviewed, confirmed or rejected"},
+		{"an unknown review status", findInput{ReviewStatuses: []string{"maybe"}}, "unreviewed, accepted, confirmed or rejected"},
 		{"an hour past 23", findInput{Hours: []int{24}}, "0 to 23"},
 		{"a bad range", findInput{mcpFilter: mcpFilter{Until: "2026-09-19"}}, "RFC 3339"},
 	} {

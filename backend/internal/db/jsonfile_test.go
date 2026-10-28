@@ -367,6 +367,9 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 		if err := s.UpsertDetections(ctx, id, []Detection{{AudioFileID: AudioFileID(id, "DATA/a.wav"), ScientificName: "Strix varia"}}); err != nil {
 			t.Fatal(err)
 		}
+		if err := s.PutCardSummary(ctx, CardSummary{ID: id}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	left := func(s Store, id string) int {
 		t.Helper()
@@ -378,7 +381,17 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(files) + len(found)
+		summaries, err := s.ListCardSummaries(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := len(files) + len(found)
+		for _, c := range summaries {
+			if c.ID == id {
+				n++
+			}
+		}
+		return n
 	}
 	stock(card.ID)
 	stock(other)
@@ -392,8 +405,8 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 	if n := left(s, card.ID); n != 0 {
 		t.Errorf("%d documents left under the deleted card", n)
 	}
-	if n := left(s, other); n != 2 {
-		t.Errorf("the other card has %d documents, want its 2", n)
+	if n := left(s, other); n != 3 {
+		t.Errorf("the other card has %d documents, want its 3", n)
 	}
 	if err := s.DeleteUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("delete again: err = %v, want ErrNotFound", err)
@@ -415,7 +428,7 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 	if _, err := reopened.GetUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("deleted card is back after reopening: err = %v", err)
 	}
-	if _, err := reopened.GetUpload(ctx, other); err != nil || left(reopened, other) != 2 {
+	if _, err := reopened.GetUpload(ctx, other); err != nil || left(reopened, other) != 3 {
 		t.Errorf("the other card after reopening: err = %v, %d documents", err, left(reopened, other))
 	}
 }

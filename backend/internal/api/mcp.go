@@ -74,7 +74,7 @@ Every time range is two RFC 3339 timestamps, since (inclusive) and until (exclus
 
 Cards are collected from the recorders every week or two, so recent times often have no data yet. detection_summary's coverage lists the cards with recordings in your range, when each card's first and last recordings started, and whether BirdNET has finished with it -- read it before drawing conclusions from low counts.
 
-Each detection has a review status: unreviewed (BirdNET's word alone), confirmed (a volunteer listened and agreed), or rejected (a volunteer listened and it wasn't that species). A reviewer's correction replaces BirdNET's species. Confidence is BirdNET's score, 0 to 1; low-confidence detections are often wrong.
+Each detection has a review status: unreviewed (BirdNET's word alone), accepted (a species common enough where it was heard that the program's review rules take BirdNET's word for it, unheard), confirmed (volunteers listened and agreed), or rejected (volunteers listened and it wasn't that species). Accepted and confirmed are what the program counts. A reviewer's correction replaces BirdNET's species. Confidence is BirdNET's score, 0 to 1; low-confidence detections are often wrong.
 
 Start with list_recorders, then detection_summary for the span you want. To look at individual detections -- one species, one recorder, certain hours -- use find_detections, which puts up to 500 rows in its answer: scope it with the filters detection_summary showed you need, so what matches fits. Use detections_export only when you need every row and can fetch a URL from code; if that fetch is refused, don't retry it -- tell the user what its answer says to change, and carry on with the other tools.`
 
@@ -346,6 +346,7 @@ type SummaryOut struct {
 type SummaryTotals struct {
 	Detections int `json:"detections"`
 	Species    int `json:"species"`
+	Accepted   int `json:"accepted"`
 	Confirmed  int `json:"confirmed"`
 	Unreviewed int `json:"unreviewed"`
 	Rejected   int `json:"rejected"`
@@ -388,6 +389,7 @@ type SpeciesSummary struct {
 	Days int `json:"days"`
 	// Recorders is its detections by recorder id.
 	Recorders      map[string]int `json:"recorders"`
+	Accepted       int            `json:"accepted"`
 	Confirmed      int            `json:"confirmed"`
 	Unreviewed     int            `json:"unreviewed"`
 	MaxConfidence  float64        `json:"maxConfidence"`
@@ -489,6 +491,8 @@ func (s *summary) add(d db.Detection) {
 	case db.ReviewRejected:
 		s.totals.Rejected++
 		return
+	case db.ReviewAccepted:
+		s.totals.Accepted++
 	case db.ReviewConfirmed:
 		s.totals.Confirmed++
 	default:
@@ -511,9 +515,12 @@ func (s *summary) add(d db.Detection) {
 	t.Detections++
 	t.days[date] = true
 	t.Recorders[d.RecorderID]++
-	if d.ReviewStatus == db.ReviewConfirmed {
+	switch d.ReviewStatus {
+	case db.ReviewAccepted:
+		t.Accepted++
+	case db.ReviewConfirmed:
 		t.Confirmed++
-	} else {
+	default:
 		t.Unreviewed++
 	}
 	t.confSum += d.Confidence
@@ -630,7 +637,7 @@ var findColumns = []string{"heardAt", "recorderId", "commonName", "confidence", 
 type findInput struct {
 	mcpFilter
 	Species        []string `json:"species,omitempty" jsonschema:"species to include, by common or scientific name (either matches, ignoring case), e.g. Barred Owl or Strix varia; after review, so a corrected detection is its corrected species. Omit for every species."`
-	ReviewStatuses []string `json:"reviewStatuses,omitempty" jsonschema:"review statuses to include: unreviewed, confirmed, rejected. Defaults to unreviewed and confirmed."`
+	ReviewStatuses []string `json:"reviewStatuses,omitempty" jsonschema:"review statuses to include: unreviewed, accepted, confirmed, rejected. Defaults to every status but rejected."`
 	Hours          []int    `json:"hours,omitempty" jsonschema:"hours of the day to include, 0 to 23 in timeZone; 0 is midnight to 1 a.m. E.g. [22,23,0,1,2,3,4] for 10 p.m. to 5 a.m. Omit for every hour."`
 	Sort           string   `json:"sort,omitempty" jsonschema:"which rows come first, and so which are returned when more match than limit: time (the earliest first, the default) or confidence (the most confident first)."`
 	Columns        []string `json:"columns,omitempty" jsonschema:"the columns to return, in this order. Defaults to heardAt, recorderId, commonName, confidence, reviewStatus. Others: id, card, recorderName, startSec, endSec, scientificName, birdnetScientificName, birdnetCommonName, url (the detection's page, where a person can hear it)."`
@@ -666,11 +673,11 @@ func (in findInput) resolve(now time.Time, recorders []db.Recorder) (findQuery, 
 	}
 	q.statuses = in.ReviewStatuses
 	if len(q.statuses) == 0 {
-		q.statuses = []string{db.ReviewUnreviewed, db.ReviewConfirmed}
+		q.statuses = []string{db.ReviewUnreviewed, db.ReviewAccepted, db.ReviewConfirmed}
 	}
 	for _, s := range q.statuses {
-		if s != db.ReviewUnreviewed && s != db.ReviewConfirmed && s != db.ReviewRejected {
-			return findQuery{}, errMCP{fmt.Sprintf("there is no review status %q; use unreviewed, confirmed or rejected", s)}
+		if !slices.Contains(db.ReviewStatuses, s) {
+			return findQuery{}, errMCP{fmt.Sprintf("there is no review status %q; use unreviewed, accepted, confirmed or rejected", s)}
 		}
 	}
 	for _, hour := range in.Hours {

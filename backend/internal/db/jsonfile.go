@@ -33,6 +33,9 @@ type fileData struct {
 	Uploads    map[string]Upload    `json:"uploads"`
 	AudioFiles map[string]AudioFile `json:"audioFiles"`
 	Detections map[string]Detection `json:"detections"`
+	// CardSummaries is absent from a file written before them, which fill
+	// makes good: a card with no summary has one built when it is read.
+	CardSummaries map[string]CardSummary `json:"cardSummaries"`
 }
 
 const fileVersion = 1
@@ -85,6 +88,9 @@ func (d *fileData) fill() {
 	}
 	if d.Detections == nil {
 		d.Detections = map[string]Detection{}
+	}
+	if d.CardSummaries == nil {
+		d.CardSummaries = map[string]CardSummary{}
 	}
 }
 
@@ -252,12 +258,17 @@ func (s *jsonFile) DeleteUpload(_ context.Context, id string) error {
 	upload, had := s.data.Uploads[id]
 	files := take(s.data.AudioFiles, func(f AudioFile) bool { return f.UploadID == id })
 	detections := take(s.data.Detections, func(d Detection) bool { return d.UploadID == id })
+	summary, hadSummary := s.data.CardSummaries[id]
+	delete(s.data.CardSummaries, id)
 	delete(s.data.Uploads, id)
-	if had || len(files) > 0 || len(detections) > 0 {
+	if had || len(files) > 0 || len(detections) > 0 || hadSummary {
 		// One write for the lot, so the file never holds half a card.
 		if err := s.save(); err != nil {
 			maps.Copy(s.data.AudioFiles, files)
 			maps.Copy(s.data.Detections, detections)
+			if hadSummary {
+				s.data.CardSummaries[id] = summary
+			}
 			if had {
 				s.data.Uploads[id] = upload
 			}
@@ -403,6 +414,42 @@ func (s *jsonFile) UpdateDetection(_ context.Context, uploadID, id string, mutat
 			return err
 		}
 		d.keep(old, now())
+		return nil
+	})
+}
+
+// --- card summaries ---
+
+func (s *jsonFile) ListCardSummaries(_ context.Context) ([]CardSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CardSummary, 0, len(s.data.CardSummaries))
+	for _, c := range s.data.CardSummaries {
+		out = append(out, clone(c))
+	}
+	return out, nil
+}
+
+func (s *jsonFile) PutCardSummary(_ context.Context, c CardSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.data.CardSummaries[c.ID]; ok {
+		c.CreatedAt = old.CreatedAt
+	}
+	if err := prepareCardSummary(&c, now()); err != nil {
+		return err
+	}
+	return put(s, s.data.CardSummaries, c.ID, clone(c))
+}
+
+func (s *jsonFile) UpdateCardSummary(_ context.Context, id string, mutate func(*CardSummary) error) (CardSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return update(s, s.data.CardSummaries, id, func(c *CardSummary, old CardSummary) error {
+		if err := mutate(c); err != nil {
+			return err
+		}
+		c.keep(old, now())
 		return nil
 	})
 }

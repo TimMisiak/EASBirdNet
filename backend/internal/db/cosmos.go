@@ -20,14 +20,15 @@ import (
 
 // The local backend and its tests define the behaviour this one has to match.
 
-// Containers and their partition keys. DEPLOYMENT.md lists the same five; the
+// Containers and their partition keys. DEPLOYMENT.md lists the same six; the
 // app never creates them (its data-plane role can't, and Terraform owns them).
 const (
-	containerUsers      = "users"      // partition key /id
-	containerRecorders  = "recorders"  // partition key /id
-	containerUploads    = "uploads"    // partition key /id
-	containerAudioFiles = "audioFiles" // partition key /uploadId
-	containerDetections = "detections" // partition key /uploadId
+	containerUsers      = "users"         // partition key /id
+	containerRecorders  = "recorders"     // partition key /id
+	containerUploads    = "uploads"       // partition key /id
+	containerAudioFiles = "audioFiles"    // partition key /uploadId
+	containerDetections = "detections"    // partition key /uploadId
+	containerSummaries  = "cardSummaries" // partition key /id
 )
 
 const (
@@ -48,7 +49,7 @@ const (
 )
 
 type cosmosStore struct {
-	users, recorders, uploads, audioFiles, detections *azcosmos.ContainerClient
+	users, recorders, uploads, audioFiles, detections, summaries *azcosmos.ContainerClient
 }
 
 var _ Store = (*cosmosStore)(nil)
@@ -94,6 +95,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 		containerUploads:    &s.uploads,
 		containerAudioFiles: &s.audioFiles,
 		containerDetections: &s.detections,
+		containerSummaries:  &s.summaries,
 	} {
 		c, err := client.NewContainer(cfg.CosmosDatabase, name)
 		if err != nil {
@@ -109,7 +111,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 
 // Ping reads one container's metadata, which is the cheapest call that still
 // proves this replica holds a token and can reach the account. OpenCosmos
-// makes the same call against all five at startup.
+// makes the same call against all six at startup.
 func (s *cosmosStore) Ping(ctx context.Context) error {
 	if _, err := s.uploads.Read(ctx, nil); err != nil {
 		return fmt.Errorf("db: cosmos: %w", err)
@@ -260,6 +262,11 @@ func (s *cosmosStore) DeleteUpload(ctx context.Context, id string) error {
 	}
 	for _, c := range []*azcosmos.ContainerClient{s.audioFiles, s.detections} {
 		if err := deletePartition(ctx, c, id); err != nil {
+			return err
+		}
+	}
+	if _, err := s.summaries.DeleteItem(ctx, azcosmos.NewPartitionKeyString(id), id, nil); err != nil {
+		if err = cosmosErr(err); !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	}
@@ -415,6 +422,37 @@ func (s *cosmosStore) UpdateDetection(ctx context.Context, uploadID, id string, 
 			return err
 		}
 		d.keep(old, now())
+		return nil
+	})
+}
+
+// --- card summaries ---
+
+func (s *cosmosStore) ListCardSummaries(ctx context.Context) ([]CardSummary, error) {
+	return queryDocs[CardSummary](ctx, s.summaries, "", "SELECT * FROM c")
+}
+
+func (s *cosmosStore) PutCardSummary(ctx context.Context, c CardSummary) error {
+	// Keep when it was first built, as the local backend does.
+	old, err := readDoc[CardSummary](ctx, s.summaries, c.ID, c.ID)
+	switch {
+	case err == nil:
+		c.CreatedAt = old.CreatedAt
+	case !errors.Is(err, ErrNotFound):
+		return err
+	}
+	if err := prepareCardSummary(&c, now()); err != nil {
+		return err
+	}
+	return upsertAll(ctx, s.summaries, c.ID, []CardSummary{c})
+}
+
+func (s *cosmosStore) UpdateCardSummary(ctx context.Context, id string, mutate func(*CardSummary) error) (CardSummary, error) {
+	return updateDoc(ctx, s.summaries, id, id, func(c *CardSummary, old CardSummary) error {
+		if err := mutate(c); err != nil {
+			return err
+		}
+		c.keep(old, now())
 		return nil
 	})
 }

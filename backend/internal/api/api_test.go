@@ -406,6 +406,52 @@ func TestPublicOverview(t *testing.T) {
 	}
 }
 
+// The landing page reads each card's summary, not its detections, so a review
+// has to reach the summary the page has already built.
+func TestTheLandingPageFollowsAReview(t *testing.T) {
+	mux, store := newTestMux(t)
+	ctx := t.Context()
+	before, species, err := overview(ctx, store, testNow, 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(species []Species, scientific string) int {
+		for _, s := range species {
+			if s.ScientificName == scientific {
+				return s.Detections
+			}
+		}
+		return 0
+	}
+	yearStart := time.Date(testNow.Year(), time.January, 1, 0, 0, 0, 0, pacific)
+	waiting, err := store.ListDetections(ctx, db.DetectionFilter{Since: yearStart, ReviewStatus: db.ReviewUnreviewed, Model: db.ModelBirdNET})
+	if err != nil || len(waiting) == 0 {
+		t.Fatalf("the seed has no unreviewed detection this year to confirm (%v)", err)
+	}
+	d := waiting[0]
+	path := "/api/v1/detections/" + d.UploadID + "/" + d.ID + "/review"
+	admin := signedIn(t, mux, db.RoleAdmin)
+
+	for _, step := range []struct {
+		status string
+		more   int
+	}{{db.ReviewConfirmed, 1}, {db.ReviewRejected, 0}, {db.ReviewConfirmed, 1}, {db.ReviewUnreviewed, 0}} {
+		if rec := do(t, mux, http.MethodPut, path, `{"status":"`+step.status+`"}`, admin); rec.Code != http.StatusOK {
+			t.Fatalf("PUT review %s = %d (%s)", step.status, rec.Code, rec.Body)
+		}
+		program, after, err := overview(ctx, store, testNow, 365)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if program.ConfirmedDetections != before.ConfirmedDetections+step.more ||
+			count(after, d.ScientificName) != count(species, d.ScientificName)+step.more {
+			t.Errorf("after %s: %d counted, %d of %s; want %d and %d", step.status,
+				program.ConfirmedDetections, count(after, d.ScientificName), d.CommonName,
+				before.ConfirmedDetections+step.more, count(species, d.ScientificName)+step.more)
+		}
+	}
+}
+
 // countingStore counts how many times the public overview scans the database.
 // ListRecorders is the first read overview makes and nothing else calls it.
 type countingStore struct {

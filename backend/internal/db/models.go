@@ -323,12 +323,20 @@ type AudioFile struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// Review statuses. Only confirmed detections are ever shown publicly.
+// Review statuses. Accepted and confirmed detections are the ones counted
+// publicly (Counted); unreviewed is BirdNET's word alone.
 const (
 	ReviewUnreviewed = "unreviewed"
-	ReviewConfirmed  = "confirmed"
-	ReviewRejected   = "rejected"
+	// ReviewAccepted is a detection the review rules accepted without anyone
+	// listening: a species common enough where it was heard that BirdNET's
+	// word is taken for it (REVIEW.md).
+	ReviewAccepted  = "accepted"
+	ReviewConfirmed = "confirmed"
+	ReviewRejected  = "rejected"
 )
+
+// ReviewStatuses is every review status, in the order lists offer them.
+var ReviewStatuses = []string{ReviewUnreviewed, ReviewAccepted, ReviewConfirmed, ReviewRejected}
 
 // The models a detection can come from (Detection.Model).
 const (
@@ -395,6 +403,13 @@ func (d Detection) ModelOf() string {
 	return d.Model
 }
 
+// Counted says whether a detection counts on the public page and in the card
+// summaries: BirdNET's, and accepted or confirmed. Perch's never count, since
+// a bird both models heard would count twice.
+func (d Detection) Counted() bool {
+	return d.ModelOf() == ModelBirdNET && (d.ReviewStatus == ReviewAccepted || d.ReviewStatus == ReviewConfirmed)
+}
+
 // Species is the species a detection counts as: the reviewer's correction when
 // there is one, otherwise what BirdNET said.
 func (d Detection) Species() (scientificName, commonName string) {
@@ -402,6 +417,33 @@ func (d Detection) Species() (scientificName, commonName string) {
 		return d.Review.CorrectedScientificName, d.Review.CorrectedCommonName
 	}
 	return d.ScientificName, d.CommonName
+}
+
+// CardSummary is a card's counted detections (Detection.Counted), tallied by
+// species and by the Pacific date they were heard on. It is what the public
+// landing page reads instead of the detections themselves, which grow by
+// thousands a day (internal/review keeps it). Its id is the card's.
+type CardSummary struct {
+	ID string `json:"id"`
+	// Detections is how many of the card's detections count.
+	Detections int              `json:"detections"`
+	Species    []SpeciesTallies `json:"species"`
+	// BuiltAt is when it was last written whole from the card's detections.
+	// Between those, each change to a detection's status adjusts it.
+	BuiltAt   time.Time `json:"builtAt"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// SpeciesTallies is one species' counted detections on a card.
+type SpeciesTallies struct {
+	ScientificName string `json:"scientificName"`
+	CommonName     string `json:"commonName"`
+	// Days is the count on each Pacific date (YYYY-MM-DD) it was heard on.
+	Days map[string]int `json:"days"`
+	// LastDetectedAt is the latest of them. Taking a detection away doesn't
+	// move it back; the next whole build does.
+	LastDetectedAt time.Time `json:"lastDetectedAt"`
 }
 
 // --- ids ---

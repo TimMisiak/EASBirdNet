@@ -24,6 +24,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -1151,7 +1152,10 @@ func (h *handlers) reviewDetection(w http.ResponseWriter, r *http.Request, me db
 		return
 	}
 	at := h.stamp()
-	d, err := h.store.UpdateDetection(r.Context(), r.PathValue("reference"), r.PathValue("id"), func(d *db.Detection) error {
+	ref := r.PathValue("reference")
+	var before db.Detection
+	d, err := h.store.UpdateDetection(r.Context(), ref, r.PathValue("id"), func(d *db.Detection) error {
+		before = *d
 		d.ReviewStatus, d.Review = body.Status, nil
 		if body.Status != db.ReviewUnreviewed {
 			d.Review = &db.Review{UserID: me.ID, UserName: me.Name, At: at}
@@ -1164,6 +1168,11 @@ func (h *handlers) reviewDetection(w http.ResponseWriter, r *http.Request, me db
 	case err != nil:
 		h.fail(w, r, err)
 	default:
+		// The verdict is stored either way; a summary that missed it is put
+		// right the next time it is built whole.
+		if err := review.Adjust(r.Context(), h.store, ref, []db.Detection{before}, []db.Detection{d}); err != nil {
+			h.log.Warn("couldn't count a review in its card's summary", "card", ref, "detection", d.ID, "err", err)
+		}
 		h.json(w, http.StatusOK, map[string]any{"detection": detectionOf(d)})
 	}
 }

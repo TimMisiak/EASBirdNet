@@ -487,6 +487,7 @@ class DetectionDetail extends BaseElement {
     const article = /^[aeiou]/i.test(d.commonName) ? "an" : "a";
     const verdict = {
       unreviewed: `Listen to the clip. Is this ${article} ${escapeHTML(d.commonName)}?`,
+      accepted: `Accepted by the review rules, unheard: this species is common enough here that BirdNET's word is taken for it. Is this ${article} ${escapeHTML(d.commonName)}?`,
       confirmed: `Confirmed${by}`,
       rejected: `Discarded${by}`,
     }[d.reviewStatus];
@@ -502,17 +503,17 @@ class DetectionDetail extends BaseElement {
         <button class="btn btn--quiet btn--danger btn--small" data-action="review" data-status="rejected"
                 aria-pressed="${d.reviewStatus === "rejected"}" ${busy}>${label("rejected", "Discard", "Discarding…")}</button>
         ${
-          d.reviewStatus !== "unreviewed"
+          d.review
             ? `<button class="btn btn--quiet btn--small" data-action="review" data-status="unreviewed" ${busy}>${label("unreviewed", "Undo", "Undoing…")}</button>`
             : ""
         }
       </div>
       ${this.#saveError ? `<p class="error" role="alert">Couldn't save that: ${escapeHTML(this.#saveError)}</p>` : ""}
-      ${d.reviewStatus !== "unreviewed" && next ? `<a class="next" href="${escapeHTML(next)}">Next detection →</a>` : ""}
+      ${d.review && next ? `<a class="next" href="${escapeHTML(next)}">Next detection →</a>` : ""}
       <p class="note">${
         d.model === "perch"
           ? "Perch's detections are a second opinion: the public page counts BirdNET's, so confirming this one doesn't put it there. Discarded ones are kept, to measure Perch against."
-          : "Only confirmed detections appear on the public page. Discarded ones are kept, to measure BirdNET against."
+          : "The public page counts confirmed detections and the ones the review rules accept. Discarded ones are kept, to measure BirdNET against."
       }</p>
     `;
   }

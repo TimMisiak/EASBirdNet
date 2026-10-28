@@ -138,6 +138,7 @@ export const isUnfinished = (upload) =>
 
 const REVIEWS = {
   unreviewed: { kind: "neutral", label: "Unreviewed" },
+  accepted: { kind: "progress", label: "Accepted" },
   confirmed: { kind: "done", label: "Confirmed" },
   rejected: { kind: "attention", label: "Discarded" },
 };

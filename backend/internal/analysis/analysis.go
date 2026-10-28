@@ -1049,12 +1049,37 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 		detections[i].Clip = &db.Clip{BlobName: name, StartSec: c.StartSec, EndSec: c.EndSec}
 	}
 	if len(detections) > 0 {
+		stored, err := q.store.ListDetections(ctx, db.DetectionFilter{UploadID: card.ID, AudioFileID: f.ID, Model: s.model})
+		if err != nil {
+			return result{}, fmt.Errorf("reading the detections already stored: %w", err)
+		}
+		keepVerdicts(detections, stored)
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {
 			return result{}, fmt.Errorf("storing the detections: %w", err)
 		}
 	}
 	res.detections = len(detections)
 	return res, nil
+}
+
+// keepVerdicts carries what people have said about a detection over to the
+// same detection found again. A file is analyzed a second time when its worker
+// died after storing its detections but before marking it analyzed, and the
+// card's detections are reviewable meanwhile; storing writes whole documents,
+// so without this every review given in between would go back to unreviewed.
+// A detection a person has settled is the one with a Review.
+func keepVerdicts(found, stored []db.Detection) {
+	settled := map[string]db.Detection{}
+	for _, d := range stored {
+		if d.Review != nil {
+			settled[d.ID] = d
+		}
+	}
+	for i := range found {
+		if old, ok := settled[found[i].ID]; ok {
+			found[i].ReviewStatus, found[i].Review = old.ReviewStatus, old.Review
+		}
+	}
 }
 
 // waited is how long a file has been waiting for a step: since it landed, for

@@ -20,6 +20,7 @@ One database, `birdsense`, with one container per entity:
 | `uploads`    | one SD card's trip into storage         | `/id`         | the card reference, `OWL-YYYYMMDD-SRnn` |
 | `audioFiles` | one recording from a card               | `/uploadId`   | `af_` + hash of upload id and path     |
 | `detections` | one species heard in one recording      | `/uploadId`   | `det_` + hash of file, start, species  |
+| `cardSummaries` | what counts on one card, by species and date | `/id` | the card reference                  |
 
 ```mermaid
 erDiagram
@@ -28,11 +29,12 @@ erDiagram
     UPLOAD ||--o{ AUDIO_FILE : contains
     AUDIO_FILE ||--o{ DETECTION : "heard in"
     USER ||--o{ DETECTION : reviews
+    UPLOAD ||--o| CARD_SUMMARY : "counted in"
 ```
 
 Audio files and detections are partitioned by upload. Their volume grows with
 every card, and the questions asked of them ("what's on this card", "what needs
-review on this card") are per card. The other three containers are small, so
+review on this card") are per card. The other four containers are small, so
 partitioning them by `id` keeps point reads cheap and costs nothing.
 
 ## Conventions
@@ -344,8 +346,8 @@ overwrites rather than duplicates.
 | `commonName`     | string  | e.g. `Barred Owl`. Perch has none of its own, so its detections carry BirdNET's name for the species, or the scientific name for one BirdNET doesn't know. |
 | `confidence`     | number  | 0–1, the highest of the run's windows. BirdNET's is a sigmoid per species; Perch's is a softmax over the window's classes, so the two aren't on the same footing. |
 | `clip?`          | object  | The stretch of the recording stored for review; see below. Absent on detections stored before clips were cut. |
-| `reviewStatus`   | string  | `unreviewed`, `confirmed` or `rejected`. Top-level so it can be filtered on. |
-| `review?`        | object  | The review; see below. Absent while unreviewed. |
+| `reviewStatus`   | string  | `unreviewed` (BirdNET's word alone), `accepted` (the review rules took BirdNET's word for it, unheard; REVIEW.md), `confirmed` or `rejected`. Top-level so it can be filtered on. |
+| `review?`        | object  | The review a person gave; see below. Absent while unreviewed, and on an accepted detection nobody has listened to. |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
 
@@ -373,10 +375,17 @@ one -- see CLAUDE.md, *Clips are FLAC*:
 | `endSec`   | number | The detection's end plus 1 s, clamped to the file. A run too long for a 30 s clip gets the 30 s centred on its most confident window instead. |
 
 The **species a detection counts as** is the correction if there is one,
-otherwise BirdNET's label (`Detection.Species()`). **Only `confirmed`
-detections are ever shown publicly**, and only BirdNET's: a bird both models
-heard and a reviewer confirmed twice would otherwise count twice. Rejected detections are kept, because
-they are what a threshold or model change gets measured against.
+otherwise BirdNET's label (`Detection.Species()`). **Only `accepted` and
+`confirmed` detections count publicly** (`Detection.Counted()`), and only
+BirdNET's: a bird both models heard and a reviewer confirmed twice would
+otherwise count twice. Rejected detections are kept, because they are what a
+threshold or model change gets measured against.
+
+Analyzing a file again stores its detections whole, so the analysis queue
+reads the file's stored detections first and carries `reviewStatus` and
+`review` over to any that has a `review`: what a person said survives a
+worker that died after storing the file's detections and before marking it
+analyzed.
 
 ```json
 {
@@ -395,6 +404,57 @@ they are what a threshold or model change gets measured against.
   "review": { "userId": "usr_8d02e6f1a4c97b35", "userName": "Ellen Park", "at": "2026-09-14T02:05:31Z" },
   "createdAt": "2026-09-13T09:41:17Z",
   "updatedAt": "2026-09-14T02:05:31Z"
+}
+```
+
+## `cardSummaries`
+
+One per card: its counted detections (`Detection.Counted()`), tallied by the
+species they count as and the Pacific date they were heard on. It is what the
+public landing page reads instead of the detections, which grow by thousands
+a day per recorder (*Queries*). `internal/review` keeps it:
+
+- **Built whole** (`review.Build`) from the card's `accepted` and `confirmed`
+  BirdNET detections -- by the landing page, the first time it meets a card
+  without one.
+- **Adjusted** (`review.Adjust`) by every write that changes whether a
+  detection counts or what as: a review, today. A card with no summary is
+  left without one, since the build that will make it reads that write too.
+- Deleted with the card.
+
+A change landing while its card's summary is being built whole can be missed,
+because the build replaces what is stored with what it read; the next whole
+build puts that right.
+
+| Field        | Type    | Notes |
+|--------------|---------|-------|
+| `id`         | string  | The card reference, `uploads.id`. **Partition key.** |
+| `detections` | integer | How many of the card's detections count. |
+| `species`    | array   | Sorted by scientific name; see below. |
+| `builtAt`    | instant | When it was last built whole. |
+| `createdAt`  | instant | |
+| `updatedAt`  | instant | |
+
+**`species[]`**, one per species with a counted detection:
+
+| Field            | Type    | Notes |
+|------------------|---------|-------|
+| `scientificName` | string  | The species the detections count as. |
+| `commonName`     | string  | |
+| `days`           | object  | Pacific date (`YYYY-MM-DD`) → how many counted detections were heard on it. A date that comes to none is dropped, and so is a species with no dates. |
+| `lastDetectedAt` | instant | The latest of them. An adjustment that takes one away leaves it; the next whole build moves it back. |
+
+```json
+{
+  "id": "OWL-20260907-SR02",
+  "detections": 3,
+  "species": [
+    { "scientificName": "Strix varia", "commonName": "Barred Owl",
+      "days": { "2026-08-24": 1, "2026-08-25": 2 }, "lastDetectedAt": "2026-08-25T11:12:12Z" }
+  ],
+  "builtAt": "2026-09-14T02:06:00Z",
+  "createdAt": "2026-09-14T02:06:00Z",
+  "updatedAt": "2026-09-14T02:06:00Z"
 }
 ```
 
@@ -428,10 +488,11 @@ Every read the API needs, and what it costs in Cosmos:
 | One detection (its page, its clip, a review) | `GetDetection` | `detections` | point read |
 | Review queue for a card | `ListDetections{UploadID, ReviewStatus}` | `detections` | single partition |
 | What was heard in one file (a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
-| Public species summary | `ListDetections{ReviewStatus: confirmed, Since, Model: birdnet}` | `detections` | cross-partition |
+| Public species summary | `ListCardSummaries`, beside `ListUploads` | `cardSummaries` | cross-partition: one small document per card, not its detections |
+| Building a card's summary | `EachDetection{UploadID, Model: birdnet, ReviewStatus}`, once for `accepted` and once for `confirmed` | `detections` | single partition |
 | One card's detections (Detections tab, `?card=`, linked from the card's page) | `ListDetections{UploadID, Model, Since?, ...}` | `detections` | single partition: the card bounds it, so no default window; still sorted and paged in Go, under `db.MaxDetectionScan` |
 | Every detection (Detections tab) | `ListDetections{Since, Model, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
-| Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `uploads` | single partition: a query for the ids, then a delete per document |
+| Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `cardSummaries`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
 the Cosmos gateway can serve them. So cross-partition queries are limited to
@@ -440,9 +501,8 @@ the Cosmos gateway can serve them. So cross-partition queries are limited to
 counting and grouping happen in Go (`internal/db/db.go`), which also keeps the
 two backends' answers identical. `Model: birdnet` is
 `(NOT IS_DEFINED(c.model) OR c.model = @model)`, because detections stored
-before Perch carry no model. If the public summary gets expensive as
-detections grow, replace it with a precomputed summary document, not a
-cleverer query.
+before Perch carry no model. The public summary is the precomputed summary
+document this calls for: `cardSummaries`, not a cleverer query.
 
 ### Uniqueness
 
@@ -593,10 +653,10 @@ public summary), following these rules:
 | `upload.audioDeletedAt`, `files[].audioDeletedAt` | the stored fields of the same name |
 | `upload.audioExpiresAt` | computed, not stored: `uploads.receivedAt` + the server's retention window. Left out once the audio has gone, while the card is still being analyzed, or when retention is off |
 | volunteer's own cards | filter on `uploads.userId`, not on name |
-| `species[]` on the public overview | `detections` where `reviewStatus = confirmed` and `detectedAt` in the window, grouped in Go by `Species()`; `days` = distinct Pacific dates of `detectedAt`; `stations` = distinct `uploads.recorder.name` of their cards, most detections first |
+| `species[]` on the public overview | The `cardSummaries` of the cards not being deleted, building any card's that is missing: each species' counts on the window's dates -- the last `days` Pacific dates, today's included -- summed across cards; `days` = how many of those dates it has; `stations` = distinct `uploads.recorder.name` of those cards, most detections first; `lastDetectedAt` = the latest of theirs |
 | `program.recorders` | recorders with no `retiredAt` |
 | `program.recordings` | sum of `fileCount` over the uploads (not being deleted) whose `firstRecordingAt` -- or `pulledOn`, without one -- falls in this calendar year (Pacific) |
-| `program.confirmedDetections` | `detections` where `reviewStatus = confirmed`, heard this calendar year (Pacific). BirdNET's alone, like `species[]` |
+| `program.confirmedDetections` | The same summaries' counts on this calendar year's dates (Pacific): BirdNET's `accepted` and `confirmed` detections, like `species[]` |
 
 What the write routes do to documents:
 
@@ -610,13 +670,13 @@ What the write routes do to documents:
 | `POST /tus/` | Creates a tus upload for one file. Refused unless the card is the caller's (or they are an admin) and still transferring, and the file is on its list, at that size, and not already `uploaded`. A WAV may instead be sent as FLAC, with metadata `encoding: flac` and `samples`, the samples per channel the WAV holds (its `data` chunk over its block size): its length is then the FLAC's, which has to be at least a FLAC header and at most what a FLAC of the listed length could be (`maxFLACBytes`), and `samples` no more than the listed length. Any other `encoding`, or `flac` for anything but a `.wav`, is a 400. The server names the upload `{uploadId}/{random}` and replaces its metadata. Writes no document. |
 | `PATCH /tus/{id}`, last byte | For a file sent as FLAC, first reads its STREAMINFO, and refuses it -- a 400 `ERR_FILE_FLAC`, with the upload's bytes deleted and the file left `pending` -- unless it holds exactly `samples` samples: not a FLAC, a total of 0 (a header never patched once the encode ended, which libsndfile reads as endless), or any other total (an encode cut short). Then sets the audio file's `status` to `uploaded` with `uploadedAt`, `blobName`, `encoding` and `storedBytes`, then adds it to `filesUploaded` and `bytesUploaded` -- only the write that changes the file's status counts it. When that brings `filesUploaded` to `fileCount`, recounts both from the card's audio files, and when none is still `pending`, sets `processing` and `receivedAt`, and wakes the analysis queue. |
 | `GET /admin/uploads/{ref}` | Answers the card and its audio files, leaving out files that are no longer on its list, and `queue`. |
-| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status`, `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`, `model=birdnet\|perch`) as `{detections, total, species, window?}`. One model's detections at a time: BirdNET's unless `model=perch`, since the two models heard the same audio and a list of both would show most birds twice. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), and `stationName` (a `GetUpload` of each card on the page, `recorder.name`). `species[]` counts every match in the window before the species filter. |
+| `GET /detections` | Answers a page of every card's detections (`?since=&until=` RFC 3339, `status` (`unreviewed`, `accepted`, `confirmed` or `rejected`), `minConfidence` 0–1, `species`, `sort=heard\|species\|confidence`, `order`, `limit` ≤ 500, `offset`, `model=birdnet\|perch`) as `{detections, total, species, window?}`. One model's detections at a time: BirdNET's unless `model=perch`, since the two models heard the same audio and a list of both would show most birds twice. **A request with no `since` is answered for the 30 days before `until`, or before now**, and `window` (`{since, days}`) says so; a request that names its own dates carries no `window`. The date, review and confidence filters go into the query; the species filter, sort and page are applied in Go. Species here are BirdNET's `scientificName`/`commonName`, not a review's correction. Each row adds `reference` (`uploadId`), and `stationName` (a `GetUpload` of each card on the page, `recorder.name`). `species[]` counts every match in the window before the species filter. |
 | `GET /detections/export` | Answers every detection `GET /detections`' parameters match, in its order, as a file to save (`Content-Disposition: attachment`): one object, `{exportedAt, model, since, until?, status?, minConfidence?, species?, sort, order, window?, total, detections}`, each row as the list's. `limit` and `offset` don't apply. Bounded by the same window and `MaxDetectionScan`, with the same 400. |
 | `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's -- BirdNET's, or Perch's with `model=perch` -- in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
 | `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/flac`, or `audio/wav` for a clip cut before FLAC -- the stored name decides, not a constant. Answers range requests. 404 for a detection with no clip. |
-| `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. |
-| `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections` and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
+| `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed`. Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed`. Then adjusts the card's summary by the change, if the card has one. |
+| `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections`, its summary and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |
 | `POST /admin/people`, `PUT /admin/people/{id}` | Take `role` and `roles`, and store `roles` each once in the order above. A role that isn't one of the three, or a volunteer with none, is a 400. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name, role and roles) instead of conflicting. |
@@ -660,9 +720,13 @@ by id:
   "recorders":  { "SW-02": { "...": "..." } },
   "uploads":    { "OWL-20260907-SR02": { "...": "..." } },
   "audioFiles": { "af_5b1e...": { "...": "..." } },
-  "detections": { "det_9c41...": { "...": "..." } }
+  "detections": { "det_9c41...": { "...": "..." } },
+  "cardSummaries": { "OWL-20260907-SR02": { "...": "..." } }
 }
 ```
+
+A file written before `cardSummaries` loads without them, and each card's is
+built the first time the landing page reads it.
 
 The file is read once at startup, held in memory and rewritten in full,
 atomically, after every change. It's fine to hand-edit it while the server

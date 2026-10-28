@@ -100,6 +100,16 @@ nothing sweeps it. That older image's own delete removes a card in any
 status, so delete such a card again. Anything the deleter had already
 removed stays removed.
 
+**Card summaries and accepted detections.** Since the landing page reads
+`cardSummaries` (REVIEW.md, M0), an image from before them reads a year of
+detections instead, as it used to, and counts only `confirmed` ones. The
+`cardSummaries` container stays and nothing reads it, and the summaries go
+stale: a review given during the rollback isn't in them. Rolling forward
+again, delete the summaries of the cards reviewed meanwhile -- or all of
+them -- and the landing page builds them again. An `accepted` detection, once
+something writes one, shows in that older image as the raw word in a grey chip
+and doesn't count; its filters don't offer it.
+
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).
 No image can bring them back.

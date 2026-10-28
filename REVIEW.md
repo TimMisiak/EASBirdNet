@@ -4,8 +4,9 @@ How detections get from BirdNET to a verdict: a table of review rules routes
 each detection when it is stored, so the common birds are accepted without
 anyone listening; what is left is grouped into *bouts*; and reviewers hear
 bouts, not detections, two to agree, in a Review tab built for speed.
-Disagreements go to a birding expert. Not built yet: **Milestones** is the
-order, and the **Status** table at the end is where to resume. Where this and
+Disagreements go to a birding expert. Being built in milestones: M0 is
+built; **Milestones** is the order, and the **Status** table at the end is
+where to resume. Where this and
 the code disagree, the code is what runs -- fix whichever is wrong.
 
 ## Problem
@@ -299,16 +300,26 @@ BirdNET's -- tallied per Pacific date and species. That is everything the
 overview shows: per species its count, days and stations, and the year's
 total. A summary is a few hundred rows, and the overview reads one per card.
 
-- The preparation loop writes it whole from the card's detections.
-- A bout resolving adjusts it by what changed (detections moving into or out
-  of a counted status), with replace-if-unchanged; the next preparation pass
-  rewrites it whole, so a missed adjustment doesn't last.
+- It is built whole (`review.Build`) from the card's detections: by the
+  landing page the first time it meets a card without one (M0), and by every
+  preparation pass (M1).
+- Every write that changes what counts adjusts it (`review.Adjust`) by the
+  difference, with replace-if-unchanged: a review on a detection's page (M0),
+  the worker storing `accepted` detections (M1), a bout resolving (M3). A
+  card with no summary is left without one, since the build that makes it
+  reads the write too. An adjustment can be lost to a build running at the
+  same moment; the next build puts it right.
 - A card being deleted has its summary deleted with it, and the overview
   skips `deleting` cards as it does now.
 
-The figure on the landing page says "confirmed owl detections" and counts
-every species's confirmed detections; with accepted ones it is mostly not
-owls. Its wording changes with this.
+Counting by date makes the landing page's window the last `days` Pacific
+dates, today's included, rather than the last `days` × 24 hours.
+
+The figure on the landing page said "confirmed owl detections" and counted
+every species's confirmed detections; it says "confirmed detections this
+year" now, and once accepted ones count (M1) it and the sentence above it
+("trained volunteers confirm what the model heard before it appears here")
+have to stop saying everything was heard.
 
 The MCP tools stream (`EachDetection`), so they need no summary: their
 totals gain `accepted`, `find_detections` takes it as a status, and the
@@ -415,28 +426,34 @@ is cut while the original is certainly there.
 An older image doesn't know `accepted`, `route`, bouts or the summaries. It
 shows `accepted` as a raw neutral chip, counts only `confirmed` on the
 landing page, and leaves the new containers alone; bouts stay where they
-are until the newer image is back. ROLLBACK.md says so once M0 ships.
+are until the newer image is back. ROLLBACK.md says what that leaves stale.
 
 ## Milestones
 
 Each one ships on its own.
 
 **M0 — Groundwork.**
-- `UpsertDetections`' callers keep what people have said (*Why it stays
-  correct*), tested on both backends.
-- `accepted` everywhere detections are read: the Detections tab's status
-  filter and chip, the MCP tools and their instructions.
-- `cardSummaries`, written from a card's counted detections; the landing
-  page reads them instead of a year of detections, and its wording follows.
-  (A one-off pass writes them for cards analyzed before; until M1 that is a
-  count of `confirmed` alone.)
-- `settings`, `bouts` and `cardSummaries` containers in `infra/` and
-  DEPLOYMENT.md; SCHEMA.md and ROLLBACK.md.
+- The worker keeps what people have said when it stores a file's detections
+  again (`keepVerdicts`, *Why it stays correct*).
+- `accepted` everywhere detections are read: the list's status filter, the
+  chip and the detection page, the MCP tools and their instructions.
+- `internal/review` with `Build` and `Adjust`; the `cardSummaries` container;
+  the landing page reads summaries, building a card's the first time it meets
+  one without, and a review adjusts its card's. Until M1 a summary counts
+  `confirmed` alone, since nothing writes `accepted`.
+- Each container comes with the milestone that first uses it, because the
+  app refuses to start without every container it knows: `settings` with M1,
+  `bouts` with M2.
 
 **M1 — Rules and routing.** Common birds count publicly; nothing is reviewed
 differently yet.
 - `internal/review`: the rules, `Route`.
-- The worker routes, stores `route` and `accepted`, and cuts context clips.
+- The worker routes, stores `route` and `accepted`, adjusts the card's
+  summary by the `accepted` ones (`review.Adjust`), and cuts context clips.
+- `PUT .../review` with `unreviewed` (the detection page's Undo) puts a
+  detection back to what its route says -- `accepted` for an accepted one --
+  rather than to `unreviewed`.
+- The landing page's wording stops saying every counted detection was heard.
 - The preparation loop, routing only, which also routes the cards analyzed
   before.
 - `GET`/`PUT /review/rules` and the Review rules page, with the program's
@@ -469,7 +486,7 @@ the column, M3 the data); months per species; eBird import.
 | Step | State |
 |---|---|
 | This design | Written |
-| M0: re-runs keep reviews; `accepted` read everywhere; card summaries and the landing page; containers, SCHEMA.md, DEPLOYMENT.md, ROLLBACK.md | Not started |
+| M0: re-runs keep reviews; `accepted` read everywhere; card summaries and the landing page; the `cardSummaries` container; SCHEMA.md, DEPLOYMENT.md, ROLLBACK.md, CLAUDE.md | Built, not deployed |
 | M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Not started |
 | M2: bouts and spot-checks; the card's review counts; the gap measured | Not started |
 | M3: the review API | Not started |

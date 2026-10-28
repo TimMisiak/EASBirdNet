@@ -283,7 +283,7 @@ func (h *handlers) exportDetections(w http.ResponseWriter, r *http.Request, _ db
 // wrong with them. Every one is optional:
 //
 //	since, until   RFC 3339 instants; heard at or after since, and before until
-//	status         unreviewed, confirmed or rejected
+//	status         unreviewed, accepted, confirmed or rejected
 //	minConfidence  0 to 1
 //	species        a scientific name
 //	card           a card's reference: only what was heard on it
@@ -320,11 +320,10 @@ func parseDetectionQuery(r *http.Request, now time.Time) (detectionQuery, string
 			*t.dst = at
 		}
 	}
-	switch status := v.Get("status"); status {
-	case "", db.ReviewUnreviewed, db.ReviewConfirmed, db.ReviewRejected:
+	if status := v.Get("status"); status == "" || slices.Contains(db.ReviewStatuses, status) {
 		q.filter.ReviewStatus = status
-	default:
-		return q, "status must be unreviewed, confirmed or rejected"
+	} else {
+		return q, "status must be unreviewed, accepted, confirmed or rejected"
 	}
 	if s := v.Get("minConfidence"); s != "" {
 		c, err := strconv.ParseFloat(s, 64)
