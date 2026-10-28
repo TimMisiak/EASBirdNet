@@ -169,6 +169,27 @@ export const saveReviewRules = (rules) => request("PUT", "/review/rules", rules)
 /** What BirdNET heard in the last `days` days, species by species, in confidence bands: {since, until, species}. */
 export const fetchSpeciesHeard = (days) => get(`/review/species${days ? `?days=${days}` : ""}`);
 
+// Reviewing bouts (REVIEW.md): a bout is one species heard on one card, and
+// a verdict on its best clips stands for every detection in it.
+
+/** {cards}: every card with bouts, newest first, each with how many are settled and disputed. */
+export const fetchReviewCards = () => get("/review/cards");
+/**
+ * {card, bouts, left}: a card's bouts in the order heard, and how many wait
+ * for you. A bout's other verdicts are left out until you give yours.
+ */
+export const fetchBouts = (reference) => get(`/review/cards/${encodeURIComponent(reference)}/bouts`);
+/** {bout, detections}: one bout, and its detections in the order heard. */
+export const fetchBout = (reference, id) =>
+  get(`/review/cards/${encodeURIComponent(reference)}/bouts/${encodeURIComponent(id)}`);
+/**
+ * Give your verdict on a bout, or change it: {verdict: "confirm" | "reject" |
+ * "unsure"}, and scientificName and commonName to confirm another species.
+ * Answers {bout}, with everyone's verdicts. A 409 means it settled meanwhile.
+ */
+export const giveVerdict = (reference, id, body) =>
+  request("PUT", `/review/cards/${encodeURIComponent(reference)}/bouts/${encodeURIComponent(id)}/verdict`, body);
+
 // Connecting an LLM tool over MCP: the consent page's two calls. signed is
 // the authorization request the server signed into the page's URL.
 

@@ -12,6 +12,8 @@ import "./bs-upload-done.js";
 import "./bs-my-uploads.js";
 import "./bs-detections.js";
 import "./bs-detection-detail.js";
+import "./bs-review.js";
+import "./bs-review-card.js";
 import "./bs-review-rules.js";
 import "./bs-admin-people.js";
 import "./bs-admin-recorders.js";
@@ -22,13 +24,14 @@ import "./bs-admin-upload-detail.js";
  * <bs-app-page> is where everyone signed in works: one row of tabs, which are
  * routes, for volunteers and coordinators alike. Each tab is for a role
  * (roles.js) and shows only to someone who has it: Upload and My uploads to a
- * field volunteer, Detections to a reviewer, Review rules to a birding expert,
+ * field volunteer, Review and Detections to a reviewer, Review rules to a birding expert,
  * and three more to a coordinator, who has them all. Nothing else about the page changes with the role, so
  * there is one shell to keep working rather than one per role.
  *
  * Upload is the default, and holds the four steps of sending a card, from
  * /app/upload to /app/upload/done. My uploads, /app/uploads, is your own cards,
- * where an unfinished one is picked back up. Detections, /app/detections, is
+ * where an unfinished one is picked back up. Review, /app/review, is the cards
+ * with bouts to hear, and one card's review is /app/review/{ref}. Detections, /app/detections, is
  * every card's, and a detection opened from it is /app/detections/{ref}/{id},
  * keeping that list's filters in its query string.
  *
@@ -42,6 +45,7 @@ import "./bs-admin-upload-detail.js";
  * they came for rather than on "Good morning.".
  */
 const UPLOAD = "/app/upload";
+const REVIEW = "/app/review";
 const DETECTIONS = "/app/detections";
 const CARD_PREFIX = "/admin/uploads/";
 const STEPS = {
@@ -53,6 +57,7 @@ const STEPS = {
 const TABS = [
   { path: UPLOAD, label: "Upload", tag: "bs-upload-details", role: FIELD_VOLUNTEER },
   { path: "/app/uploads", label: "My uploads", tag: "bs-my-uploads", role: FIELD_VOLUNTEER },
+  { path: REVIEW, label: "Review", tag: "bs-review", role: REVIEWER },
   { path: DETECTIONS, label: "Detections", tag: "bs-detections", role: REVIEWER },
   { path: "/app/review-rules", label: "Review rules", tag: "bs-review-rules", role: BIRDING_EXPERT },
   { path: "/admin/uploads", label: "All uploads", tag: "bs-admin-uploads", role: ADMIN },
@@ -89,6 +94,7 @@ class AppPage extends BaseElement {
     const [listed = "", listedDetection = ""] = here.startsWith(`${DETECTIONS}/`)
       ? here.slice(DETECTIONS.length + 1).split("/").map(decodeURIComponent)
       : [];
+    const reviewing = here.startsWith(`${REVIEW}/`) ? decodeURIComponent(here.slice(REVIEW.length + 1)) : "";
     const [card = "", section = "", detection = ""] = here.startsWith(CARD_PREFIX)
       ? here.slice(CARD_PREFIX.length).split("/").map(decodeURIComponent)
       : [];
@@ -153,6 +159,8 @@ class AppPage extends BaseElement {
              what was heard.</p>`
           : step
           ? `<bs-upload-steps step="${step.step}"></bs-upload-steps><${step.tag}></${step.tag}>`
+          : reviewing
+            ? `<bs-review-card reference="${escapeHTML(reviewing)}"></bs-review-card>`
           : listed && listedDetection
             ? `<bs-detection-detail reference="${escapeHTML(listed)}" detection="${escapeHTML(listedDetection)}"
                                     list="${escapeHTML(`${DETECTIONS}${location.search}`)}"></bs-detection-detail>`

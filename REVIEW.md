@@ -4,7 +4,7 @@ How detections get from BirdNET to a verdict: a table of review rules routes
 each detection when it is stored, so the common birds are accepted without
 anyone listening; what is left is grouped into *bouts*; and reviewers hear
 bouts, not detections, two to agree, in a Review tab built for speed.
-Disagreements go to a birding expert. Being built in milestones: M0 to M3
+Disagreements go to a birding expert. Being built in milestones: M0 to M4
 are built; **Milestones** is the order, and the **Status** table at the end is
 where to resume. Where this and
 the code disagree, the code is what runs -- fix whichever is wrong.
@@ -393,10 +393,15 @@ comes, or, failing even that, answers an error the client retries.
   then spot-checks in a group of their own (this replaces the design's
   "Exclude expected birds" switch: what was accepted is only ever in the
   queue as spot-checks). The bout's best clip on `<bs-spectrogram>`, its
-  other detections a click away; ± 10 s context and 0.5× speed
-  (`playbackRate`); Confirm, Reject and Unsure, and "another species" on
-  Confirm; Save & next. After a verdict, the other listeners' verdicts.
-  Keys: C, R, U, space, ← →.
+  other two best a button away and the rest of its detections in a list;
+  Play plays the detection's own span, with the rest of the clip dimmed,
+  and ± 10 s context plays the whole clip (off where the clip was cut
+  without it); half speed (`playbackRate`). Confirm, Reject and Unsure, and
+  "another species" on Confirm -- picked from the rules' species and the
+  card's, or written as "Common name (Scientific name)". A verdict saves at
+  once, rather than on a Save & next: the other listeners' verdicts then
+  show, and Next (or Enter) goes on to the next bout waiting for the
+  reviewer. Keys: C, R, U, space, ← →, Enter.
 - **Disagreements** (`/app/disagreements`), for a birding expert: disputed
   bouts, everyone's verdicts, and the final say.
 - **Review rules** (`/app/review-rules`), for an admin or birding expert:
@@ -546,6 +551,10 @@ summary, blind verdicts, adding confirmed species to the rules.
 **M4 — The Review tab.** The card picker and a card's review: queue, player
 with context and slow speed, verdicts, keys, Save & next, other listeners'
 verdicts, progress.
+- `<bs-review>`, `<bs-review-card>` and `js/review-queue.js` (the queue's
+  order, stepping and species, tested with `node --test`);
+  `<bs-spectrogram>` gains a focus span and a playback rate.
+- A reviewer who doesn't upload lands on Review rather than Detections.
 
 **M5 — Disagreements and overrides.** The Disagreements page and the expert's
 final say; a detection's page links to its bout, and its Confirm and Discard
@@ -564,5 +573,5 @@ the column, M3 the data); months per species; eBird import.
 | M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Built, not deployed. The first table ships as the page's suggested one; saving it, on the page, is what turns routing on |
 | M2: bouts and spot-checks; the card's review counts; the `bouts` container; the gap measured | Built, not deployed. Measured: the gap barely matters (*Measure before tuning*), so it stays at 15 minutes |
 | M3: the review API | Built, not deployed. Tried on the dev card through the API: blind verdicts, a correction to another species, a rejected spot-check, a dispute, a row added to the rules, and preparing again under it changing nothing. `disagreements` and `resolution` are M5's |
-| M4: the Review tab | Not started |
+| M4: the Review tab | Built, not deployed. Tried in a browser on the dev card (with test clips cut from the Osprey recording): two reviewers settling a bout blind, the expert's view, keys, context and half speed, another species, a phone's width |
 | M5: disagreements and overrides | Not started |

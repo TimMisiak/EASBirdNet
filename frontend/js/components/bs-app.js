@@ -34,6 +34,9 @@ const ROUTES = [
   { path: "/app/upload/progress", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Uploading the card" },
   { path: "/app/upload/done", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "Card uploaded" },
   { path: "/app/uploads", tag: "bs-app-page", chrome: "app", auth: true, role: FIELD_VOLUNTEER, title: "My uploads" },
+  { path: "/app/review", tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Review" },
+  // One card's review: /app/review/OWL-20261016-SR01?bout=bout_….
+  { path: "/app/review/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Review a card" },
   { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detections" },
   // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
   { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detection" },
@@ -52,11 +55,11 @@ const ROUTES = [
 
 /**
  * Where someone lands in the app, and where a route they can't use sends them:
- * Upload for anyone who sends cards, Detections for a reviewer who doesn't.
+ * Upload for anyone who sends cards, Review for a reviewer who doesn't.
  * Null for someone with neither, whom <bs-app-page> tells to ask for a role.
  */
 const home = () =>
-  session.has(FIELD_VOLUNTEER) ? "/app/upload" : session.has(REVIEWER) ? "/app/detections" : null;
+  session.has(FIELD_VOLUNTEER) ? "/app/upload" : session.has(REVIEWER) ? "/app/review" : null;
 
 /**
  * The route for a path: an exact match, or a prefix route with something after

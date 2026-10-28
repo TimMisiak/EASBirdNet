@@ -11,6 +11,13 @@ import { escapeHTML } from "./base-element.js";
  * Attribute: clip-start, the seconds into the recording where the clip begins,
  * for the time axis.
  *
+ * Attributes focus-start and focus-end, seconds into the recording, are the
+ * part of the clip that matters -- the detection, in a clip cut with context
+ * either side. Play then plays just that, from its start, and the rest of the
+ * plot is dimmed; with the context attribute as well, Play plays the whole
+ * clip, from wherever the playhead is. Attribute rate is the playback speed
+ * (0.5 for half), kept from clip to clip.
+ *
  * The plot is the transport: it is a slider, so the playhead moves by click or
  * by key (arrows a second, Page a five, Home and End the ends). It swallows the
  * arrows it uses, because the page around it binds the same two to stepping
@@ -34,7 +41,7 @@ const MAX_COLUMNS = 2400;
 const SPECIES_COLOURS = 6;
 
 class Spectrogram extends HTMLElement {
-  static observedAttributes = ["src", "clip-start"];
+  static observedAttributes = ["src", "clip-start", "focus-start", "focus-end", "context", "rate"];
 
   #audio;
   #button;
@@ -43,6 +50,7 @@ class Spectrogram extends HTMLElement {
   #stage;
   #canvas;
   #playhead;
+  #dims;
   #bands;
   #legend;
   #marks = [];
@@ -98,6 +106,15 @@ class Spectrogram extends HTMLElement {
         /* The ring is on the stage itself, which has no padding to lose it in. */
         .stage:focus-visible { outline-offset: -2px; }
         canvas { display: block; width: 100%; height: 100%; }
+        /* Outside the focus, when there is one: what plays only for context. */
+        .dim {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          background: var(--bs-surface);
+          opacity: 0.6;
+          pointer-events: none;
+        }
         .playhead {
           position: absolute;
           top: 0;
@@ -152,6 +169,7 @@ class Spectrogram extends HTMLElement {
           <div class="stage" tabindex="0" role="slider" aria-label="Playback position"
                aria-describedby="picture" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
             <canvas id="picture" role="img"></canvas>
+            <div class="dim" hidden></div><div class="dim" hidden></div>
             <div class="playhead" hidden></div>
           </div>
           <div class="bands" aria-hidden="true"></div>
@@ -170,6 +188,7 @@ class Spectrogram extends HTMLElement {
     this.#stage = $(".stage");
     this.#canvas = $("canvas");
     this.#playhead = $(".playhead");
+    this.#dims = [...this.shadowRoot.querySelectorAll(".dim")];
     this.#bands = $(".bands");
     this.#legend = $(".legend");
     this.#ticks = $(".ticks");
@@ -250,9 +269,32 @@ class Spectrogram extends HTMLElement {
   }
 
   attributeChangedCallback(name) {
+    if (name === "rate") this.#rate();
     if (!this.isConnected) return;
     if (name === "src") this.#load();
     else this.#layout();
+  }
+
+  /** The playback speed from the rate attribute. A new source resets it to the default, so both are set. */
+  #rate() {
+    const rate = Number(this.getAttribute("rate")) || 1;
+    this.#audio.defaultPlaybackRate = rate;
+    this.#audio.playbackRate = rate;
+  }
+
+  /**
+   * What Play plays, in seconds into the clip: {from, to} of the focus, or
+   * null to play the whole clip -- with no focus, with context asked for, or
+   * before the clip has loaded.
+   */
+  #focus() {
+    if (!this.#duration || this.hasAttribute("context")) return null;
+    const start = this.getAttribute("focus-start");
+    const end = this.getAttribute("focus-end");
+    if (start === null || end === null) return null;
+    const from = Math.max(0, Number(start) - this.#clipStart);
+    const to = Math.min(this.#duration, Number(end) - this.#clipStart);
+    return to > from ? { from, to } : null;
   }
 
   get marks() {
@@ -267,8 +309,13 @@ class Spectrogram extends HTMLElement {
   /** Plays the clip, or pauses it if it is playing. Does nothing until the clip has loaded. */
   toggle() {
     if (this.#button.disabled) return;
-    if (this.#audio.paused) this.#audio.play().catch((error) => this.#say(`Couldn't play the clip: ${error.message}`));
-    else this.#audio.pause();
+    if (!this.#audio.paused) return this.#audio.pause();
+    // Within the focus, Play goes from where the playhead is; anywhere else,
+    // from the focus's start.
+    const focus = this.#focus();
+    const now = this.#audio.currentTime;
+    if (focus && (now < focus.from - 0.05 || now >= focus.to - 0.05)) this.#audio.currentTime = focus.from;
+    this.#audio.play().catch((error) => this.#say(`Couldn't play the clip: ${error.message}`));
   }
 
   get #clipStart() {
@@ -305,6 +352,7 @@ class Spectrogram extends HTMLElement {
       URL.revokeObjectURL(this.#url);
       this.#url = URL.createObjectURL(new Blob([bytes], { type }));
       this.#audio.src = this.#url;
+      this.#rate();
       this.#button.disabled = false;
 
       // Decode at the clip's own rate, so a 24 kHz recording isn't stretched
@@ -356,7 +404,15 @@ class Spectrogram extends HTMLElement {
     if (!length) {
       this.#ticks.innerHTML = this.#bands.innerHTML = "";
       this.#playhead.hidden = this.#legend.hidden = true;
+      for (const dim of this.#dims) dim.hidden = true;
       return;
+    }
+    const focus = this.#focus();
+    const [before, after] = this.#dims;
+    before.hidden = after.hidden = !focus;
+    if (focus) {
+      before.style.cssText = `left: 0; width: ${(focus.from / length) * 100}%`;
+      after.style.cssText = `left: ${(focus.to / length) * 100}%; right: 0`;
     }
     const every = [1, 2, 5, 10, 15, 30].find((s) => length / s <= 8) ?? 60;
     const ticks = [];
@@ -402,6 +458,12 @@ class Spectrogram extends HTMLElement {
   /** Moves the playhead and the clock to where the audio is, every frame while it plays. */
   #tick = () => {
     cancelAnimationFrame(this.#frame);
+    // Playing the focus alone stops at its end.
+    const focus = this.#focus();
+    if (focus && !this.#audio.paused && this.#audio.currentTime >= focus.to) {
+      this.#audio.pause();
+      this.#audio.currentTime = focus.to;
+    }
     const now = this.#audio.currentTime || 0;
     if (this.#duration) this.#playhead.style.left = `${Math.min(100, (now / this.#duration) * 100)}%`;
     this.#time.textContent = this.#duration

@@ -70,6 +70,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── flac-worker.js   A classic worker: libflac.js encodes one WAV, and checks a tab's first
 │       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
+│       ├── review-queue.js  A card's bouts as the Review tab works through them
 │       ├── card-scan.js     Reads a card folder into a day-by-day manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
@@ -335,6 +336,7 @@ summary per recorder-year, kept the same way.
 
 **Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
 has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
+`/app/review`, and a card's review, `/app/review/{reference}?bout={id}`;
 `/app/detections`), a birding expert's `/app/review-rules`, the three a
 coordinator has as well (`/admin/uploads`,
 `/admin/recorders`, `/admin/people`), a card (`/admin/uploads/{reference}`) and
@@ -651,9 +653,10 @@ images and update the app but not touch state; that is the point of
 
 **One set of tabs, each for a role.** Someone on the roster has an access
 level, `role` -- `admin` or `volunteer` -- and any number of volunteer
-`roles`: `field_volunteer` (Upload and My uploads), `reviewer` (Detections, and
-the Review tab to come) and `birding_expert` (a reviewer, who also sets the
-review rules, with expert tools in the Review tab to come). An admin may do everything whatever their roles say, and keeps the
+`roles`: `field_volunteer` (Upload and My uploads), `reviewer` (Review and
+Detections) and `birding_expert` (a reviewer, who also sets the review rules,
+sees every bout's verdicts before giving their own, and gets the expert's
+tools to come). An admin may do everything whatever their roles say, and keeps the
 roles for if they stop being one; a birding expert is a reviewer whether or not
 `reviewer` is also stored. `db.User.Has` is that whole rule, and `requireRole`
 asks it of every route; `js/roles.js` is the same rule in the browser, so a tab
@@ -667,7 +670,7 @@ everyone signed in, and its tab table names the role each tab is for, so a
 coordinator uploads a card, resumes their own, and reviews detections on the
 same screens a volunteer does, and a screen only has to be built and kept
 working once. `<bs-app>`'s routes carry the same roles, and a route someone
-lacks sends them to their own first tab (Upload, or Detections for a reviewer
+lacks sends them to their own first tab (Upload, or Review for a reviewer
 who doesn't upload) -- `/app` too, which is where sign-in lands. The admin tabs
 keep their `/admin/` paths, because that makes an admin-only page obvious in a
 link. The shell's greeting is a salutation, not a heading: the one `<h1>` on
@@ -1206,23 +1209,22 @@ over MCP*) and read summaries and CSV exports of a span of time; it can't
 change anything. claude.ai's connector hasn't been tried against a deployment
 yet -- the flow is tested end to end with the MCP SDK's own client.
 Field volunteers upload and reviewers review (*One set of tabs, each for a
-role*); the Review tab, and the birding expert's tools in it, aren't built
-yet, so for now a birding expert has what a reviewer has, and the Review
-rules tab. Everyone
-works in the same shell (`<bs-app-page>`), seeing the tabs their roles give
-them: Upload, holding the card upload's four steps; My uploads, their own
-cards, where an unfinished one is resumed; Detections; and Review rules, for a
-birding expert. A coordinator gets
+role*); the birding expert's own tools -- the disagreements, and the final
+say on them -- aren't built yet, so for now a birding expert has what a
+reviewer has, sees verdicts before giving one, and has the Review rules tab.
+Everyone works in the same shell (`<bs-app-page>`), seeing the tabs their
+roles give them: Upload, holding the card upload's four steps; My uploads,
+their own cards, where an unfinished one is resumed; Review, the cards with
+bouts to hear; Detections; and Review rules, for a birding expert. A coordinator gets
 all of those and three more after them -- All uploads, Recorders and People,
 where they set everyone's roles. Reviewing is being rebuilt around review
 rules and bouts (REVIEW.md, which has where it stands): once a birding expert
 saves the rules, common birds are `accepted` and count publicly, and the
 rest are routed to review or left below their floors (*Review rules route
 detections*), and each card's review is grouped into bouts with spot-checks
-beside them, which the API takes verdicts on and settles; but there is no
-Review tab yet to give them from, nor a way for a birding expert to settle a
-disputed bout, so in the app what is routed to review is still reviewed one
-detection at a time on its own page. Nothing moves a card from `in_review`
+beside them, which reviewers hear in the Review tab, two to agree; but
+nothing yet lets a birding expert settle a disputed bout, and a detection's
+own page still has Confirm and Discard for anyone who reviews. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

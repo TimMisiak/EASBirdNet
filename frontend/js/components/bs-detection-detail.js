@@ -484,11 +484,13 @@ class DetectionDetail extends BaseElement {
     const d = this.#state.detection;
     // dateAtTime ends in "a.m." or "p.m.", which is already the full stop.
     const by = d.review ? ` by ${escapeHTML(d.review.by)}, ${escapeHTML(dateAtTime(d.review.at))}` : ".";
+    // A bout's listeners may have confirmed another species than BirdNET's.
+    const as = d.review?.correctedCommonName ? ` as ${escapeHTML(d.review.correctedCommonName)}` : "";
     const article = /^[aeiou]/i.test(d.commonName) ? "an" : "a";
     const verdict = {
       unreviewed: `Listen to the clip. Is this ${article} ${escapeHTML(d.commonName)}?`,
       accepted: `Accepted by the review rules, unheard: this species is common enough here that BirdNET's word is taken for it. Is this ${article} ${escapeHTML(d.commonName)}?`,
-      confirmed: `Confirmed${by}`,
+      confirmed: `Confirmed${as}${by}`,
       rejected: `Discarded${by}`,
     }[d.reviewStatus];
     const busy = this.#saving ? "disabled" : "";
