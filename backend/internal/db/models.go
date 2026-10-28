@@ -433,6 +433,12 @@ type Review struct {
 	CorrectedScientificName string    `json:"correctedScientificName,omitempty"`
 	CorrectedCommonName     string    `json:"correctedCommonName,omitempty"`
 	Note                    string    `json:"note,omitempty"`
+	// BoutID is the bout whose verdict this is, when people settled the
+	// bout rather than this detection on its own (REVIEW.md); UserID and
+	// UserName are then whoever settled it, and AgreedBy everyone whose
+	// verdict did.
+	BoutID   string   `json:"boutId,omitempty"`
+	AgreedBy []string `json:"agreedBy,omitempty"`
 }
 
 // ModelOf is which model heard a detection, ModelBirdNET for one stored
@@ -481,10 +487,24 @@ type ReviewRules struct {
 	// card are heard anyway.
 	SpotChecksPerSpecies int           `json:"spotChecksPerSpecies"`
 	Species              []SpeciesRule `json:"species"`
-	UpdatedBy            string        `json:"updatedBy,omitempty"` // → users.id
-	UpdatedByName        string        `json:"updatedByName,omitempty"`
-	CreatedAt            time.Time     `json:"createdAt"`
-	UpdatedAt            time.Time     `json:"updatedAt"`
+	// SavedVersion is the version a person last saved, when rows reviewers
+	// confirmed a species for (SpeciesRule.Source) have been added since,
+	// each as a version of its own; absent, it is Version. A save from the
+	// page made at SavedVersion or later keeps those rows rather than
+	// being refused (Saved).
+	SavedVersion  int       `json:"savedVersion,omitempty"`
+	UpdatedBy     string    `json:"updatedBy,omitempty"` // → users.id
+	UpdatedByName string    `json:"updatedByName,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+// Saved is the version a person last saved (SavedVersion).
+func (r ReviewRules) Saved() int {
+	if r.SavedVersion == 0 {
+		return r.Version
+	}
+	return r.SavedVersion
 }
 
 // RuleAction is what a rule does: RouteAccept or RouteReview, at or above
@@ -501,10 +521,18 @@ type SpeciesRule struct {
 	CommonName     string `json:"commonName"`
 	RuleAction
 	Note string `json:"note,omitempty"`
-	// Source is "review" for a row added because reviewers confirmed a
-	// species the rules didn't have; empty for one a person added.
+	// Source is RuleSourceReview for a row added because reviewers
+	// confirmed a species the rules didn't have; empty for one a person
+	// added.
 	Source string `json:"source,omitempty"`
+	// AddedIn is the version a verdict added the row in, until a person
+	// next saves the rules (ReviewRules.SavedVersion).
+	AddedIn int `json:"addedIn,omitempty"`
 }
+
+// RuleSourceReview is a species rule reviewers' verdicts added
+// (SpeciesRule.Source).
+const RuleSourceReview = "review"
 
 // CardSummary is a card's counted detections (Detection.Counted), tallied by
 // species and by the Pacific date they were heard on. It is what the public
@@ -541,6 +569,13 @@ const (
 	// BoutSpotCheck is a sample of what the rules accepted, heard to check
 	// the rule.
 	BoutSpotCheck = "spotcheck"
+)
+
+// Verdicts on a bout (BoutVerdict.Verdict).
+const (
+	VerdictConfirm = "confirm"
+	VerdictReject  = "reject"
+	VerdictUnsure  = "unsure"
 )
 
 // Bout statuses (Bout.Status).
@@ -589,10 +624,10 @@ type Bout struct {
 type BoutVerdict struct {
 	UserID   string `json:"userId"`
 	UserName string `json:"userName"`
-	// Verdict is confirm, reject or unsure.
+	// Verdict is VerdictConfirm, VerdictReject or VerdictUnsure.
 	Verdict string `json:"verdict"`
 	// ScientificName and CommonName are the species confirmed, when it isn't
-	// the bout's own.
+	// the bout's own; absent for its own.
 	ScientificName string    `json:"scientificName,omitempty"`
 	CommonName     string    `json:"commonName,omitempty"`
 	At             time.Time `json:"at"`

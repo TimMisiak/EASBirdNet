@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -492,7 +493,7 @@ func TestAnalyzingAFileAgainKeepsItsReviews(t *testing.T) {
 	for _, d := range dets {
 		switch d.ID {
 		case barred:
-			if d.ReviewStatus != db.ReviewConfirmed || d.Review == nil || *d.Review != *review {
+			if d.ReviewStatus != db.ReviewConfirmed || d.Review == nil || !reflect.DeepEqual(*d.Review, *review) {
 				t.Errorf("the reviewed detection is %s, %+v; want it still confirmed as a Spotted Owl", d.ReviewStatus, d.Review)
 			}
 		case inBout:

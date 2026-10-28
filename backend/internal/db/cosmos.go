@@ -380,6 +380,9 @@ func detectionQuery(f DetectionFilter) (string, []azcosmos.QueryParameter) {
 	if f.AudioFileID != "" {
 		w.add("c.audioFileId = @audioFileId", "@audioFileId", f.AudioFileID)
 	}
+	if f.BoutID != "" {
+		w.add("c.boutId = @boutId", "@boutId", f.BoutID)
+	}
 	if f.ReviewStatus != "" {
 		w.add("c.reviewStatus = @reviewStatus", "@reviewStatus", f.ReviewStatus)
 	}
@@ -430,13 +433,21 @@ func (s *cosmosStore) UpdateDetection(ctx context.Context, uploadID, id string, 
 	})
 }
 
+// UpdateDetections updates a few at a time, as a batch is upserted: a bout's
+// verdict reaches every detection in it while the reviewer waits. A card's
+// first preparation writes most of its detections, enough to be throttled,
+// so each update waits out a 429 (whileThrottled) rather than failing.
 func (s *cosmosStore) UpdateDetections(ctx context.Context, uploadID string, ids []string, mutate func(*Detection) error) error {
-	for _, id := range ids {
-		if _, err := s.UpdateDetection(ctx, uploadID, id, mutate); err != nil && !errors.Is(err, ErrNotFound) {
+	return inParallel(ctx, ids, func(ctx context.Context, id string) error {
+		err := whileThrottled(ctx, func() error {
+			_, err := s.UpdateDetection(ctx, uploadID, id, mutate)
 			return err
+		})
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnchanged) {
+			return nil
 		}
-	}
-	return nil
+		return err
+	})
 }
 
 // --- review rules ---
@@ -501,6 +512,10 @@ func (s *cosmosStore) UpdateCardSummary(ctx context.Context, id string, mutate f
 }
 
 // --- bouts ---
+
+func (s *cosmosStore) GetBout(ctx context.Context, uploadID, id string) (Bout, error) {
+	return readDoc[Bout](ctx, s.bouts, uploadID, id)
+}
 
 func (s *cosmosStore) ListBouts(ctx context.Context, uploadID string) ([]Bout, error) {
 	bouts, err := queryDocs[Bout](ctx, s.bouts, uploadID, "SELECT * FROM c")

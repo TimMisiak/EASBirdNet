@@ -229,10 +229,15 @@ type Clip struct {
 	EndSec   float64 `json:"endSec"`
 }
 
-// Review is who gave a detection its review status, and when.
+// Review is who gave a detection its review status, and when: for a bout's
+// verdict, everyone who agreed on it, the bout, and the species they
+// confirmed when it wasn't BirdNET's.
 type Review struct {
-	By string    `json:"by"`
-	At time.Time `json:"at"`
+	By                      string    `json:"by"`
+	At                      time.Time `json:"at"`
+	BoutID                  string    `json:"boutId,omitempty"`
+	CorrectedScientificName string    `json:"correctedScientificName,omitempty"`
+	CorrectedCommonName     string    `json:"correctedCommonName,omitempty"`
 }
 
 // CardFile is one audio file on a card, as the browser gets it back after
@@ -334,7 +339,14 @@ func detectionOf(d db.Detection) Detection {
 		out.Clip = &Clip{StartSec: d.Clip.StartSec, EndSec: d.Clip.EndSec}
 	}
 	if d.Review != nil {
-		out.Review = &Review{By: d.Review.UserName, At: d.Review.At}
+		r := d.Review
+		out.Review = &Review{
+			By: r.UserName, At: r.At, BoutID: r.BoutID,
+			CorrectedScientificName: r.CorrectedScientificName, CorrectedCommonName: r.CorrectedCommonName,
+		}
+		if len(r.AgreedBy) > 0 {
+			out.Review.By = strings.Join(r.AgreedBy, ", ")
+		}
 	}
 	return out
 }

@@ -124,8 +124,19 @@ reads them: the `bouts` container stays as it was, and a detection that
 image writes (a review) loses its `boutId`. Rolling forward again, a card it
 analyzed has no `review.preparation`, so the preparer bouts it; a card whose
 detections lost `boutId` gets it back only when it is next prepared --
-the next time the rules are saved. Until verdicts are given on bouts (M3)
-nothing depends on either.
+the next time the rules are saved. Until then a bout's page lists only the
+detections that kept it, though its verdict, when it settles, still reaches
+every one (it goes by the bout's own list).
+
+**Verdicts on bouts.** An image from before verdicts (REVIEW.md, M3)
+serves no review API, so nothing gives one; the verdicts already given stay
+in `bouts`, and their detections keep the `confirmed` or `rejected` they
+were given -- though a detection that image writes (a review) loses its
+`review.boutId` and `agreedBy`, and the rules lose `savedVersion` and each
+row's `addedIn` the next time they are saved, which only makes a save from
+the page read before a verdict-added row a conflict again. Rolling forward
+again needs nothing: a resolved bout's detections that lost `boutId` from
+their review keep the review they have.
 
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).

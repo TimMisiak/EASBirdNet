@@ -438,7 +438,9 @@ func (s *jsonFile) UpdateDetections(_ context.Context, uploadID string, ids []st
 			continue
 		}
 		d := clone(old)
-		if err := mutate(&d); err != nil {
+		if err := mutate(&d); errors.Is(err, ErrUnchanged) {
+			continue
+		} else if err != nil {
 			return err
 		}
 		d.keep(old, t)
@@ -514,6 +516,16 @@ func (s *jsonFile) UpdateCardSummary(_ context.Context, id string, mutate func(*
 }
 
 // --- bouts ---
+
+func (s *jsonFile) GetBout(_ context.Context, uploadID, id string) (Bout, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.data.Bouts[id]
+	if !ok || b.UploadID != uploadID {
+		return Bout{}, ErrNotFound
+	}
+	return clone(b), nil
+}
 
 func (s *jsonFile) ListBouts(_ context.Context, uploadID string) ([]Bout, error) {
 	s.mu.Lock()

@@ -27,6 +27,9 @@ var (
 	// into memory at once. The caller's answer is a narrower filter, not a
 	// retry. See MaxDetectionScan.
 	ErrTooMany = errors.New("db: too many documents for one read")
+	// ErrUnchanged, from UpdateDetections' mutate, leaves that detection as
+	// it is, unwritten, and goes on to the next.
+	ErrUnchanged = errors.New("db: unchanged")
 )
 
 // Store is everything the API can ask of the database.
@@ -92,7 +95,8 @@ type Store interface {
 	// UpdateDetections applies mutate to each of a card's detections named,
 	// as UpdateDetection does to one, in one call: each is its own
 	// replace-if-unchanged, so a change made to one meanwhile is mutated
-	// rather than overwritten. A detection that has gone is skipped.
+	// rather than overwritten. A detection that has gone is skipped, as is
+	// one mutate answers ErrUnchanged for.
 	UpdateDetections(ctx context.Context, uploadID string, ids []string, mutate func(*Detection) error) error
 
 	// GetReviewRules returns the review rules; ErrNotFound until they are
@@ -111,6 +115,7 @@ type Store interface {
 	// UpdateCardSummary changes a card's summary; ErrNotFound if it has none.
 	UpdateCardSummary(ctx context.Context, id string, mutate func(*CardSummary) error) (CardSummary, error)
 
+	GetBout(ctx context.Context, uploadID, id string) (Bout, error)
 	// ListBouts returns a card's bouts in the order they were heard.
 	ListBouts(ctx context.Context, uploadID string) ([]Bout, error)
 	// CreateBout requires an id and a card. ErrConflict if the id is taken.
@@ -159,9 +164,10 @@ const MaxDetectionScan = 250_000
 // UploadID empty searches every card.
 type DetectionFilter struct {
 	UploadID string
-	// AudioFileID keeps one file's detections. Set UploadID with it, so the
-	// query stays in the card's partition.
+	// AudioFileID keeps one file's detections, and BoutID one bout's. Set
+	// UploadID with either, so the query stays in the card's partition.
 	AudioFileID  string
+	BoutID       string
 	ReviewStatus string
 	// Since keeps detections heard at or after this instant, and Until those
 	// heard before it.
@@ -232,6 +238,7 @@ func (f UploadFilter) match(u Upload) bool {
 func (f DetectionFilter) match(d Detection) bool {
 	return (f.UploadID == "" || d.UploadID == f.UploadID) &&
 		(f.AudioFileID == "" || d.AudioFileID == f.AudioFileID) &&
+		(f.BoutID == "" || d.BoutID == f.BoutID) &&
 		(f.ReviewStatus == "" || d.ReviewStatus == f.ReviewStatus) &&
 		(f.Since.IsZero() || !d.DetectedAt.Before(f.Since)) &&
 		(f.Until.IsZero() || d.DetectedAt.Before(f.Until)) &&

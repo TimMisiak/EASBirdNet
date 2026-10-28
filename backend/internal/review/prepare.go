@@ -145,7 +145,9 @@ var errHeardMeanwhile = errors.New("a bout was reviewed while its card was being
 //
 //  1. It routes the card's BirdNET detections, except those in a bout someone
 //     has heard. A detection a person has reviewed keeps their verdict and
-//     only has its route brought up to date.
+//     only has its route brought up to date. One in a settled bout that
+//     doesn't carry the bout's verdict is given it (Carry), finishing a
+//     verdict whose copying was cut short.
 //  2. It bouts what is routed review, and picks spot-checks from bouts of
 //     what was accepted; writes the bouts that are new or changed, deletes
 //     those no longer made, and sets boutId on the detections whose bout
@@ -167,8 +169,10 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 	if err != nil {
 		return err
 	}
-	// heardIn is each detection in a bout someone has heard, and its bout.
+	// heardIn is each detection in a bout someone has heard, and its bout;
+	// settled, the bouts among them that are settled, and what settled them.
 	heardIn := map[string]string{}
+	settled := map[string]boutSettled{}
 	keptChecks := map[string]int{}
 	for _, b := range stored {
 		if !b.Heard() {
@@ -177,19 +181,28 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 		for _, id := range b.DetectionIDs {
 			heardIn[id] = b.ID
 		}
+		if s, ok := Settled(b); ok {
+			settled[b.ID] = boutSettled{b, s}
+		}
 		if b.Kind == db.BoutSpotCheck {
 			keptChecks[b.ScientificName]++
 		}
 	}
 
 	// boutOf is the bout each detection is in now; rerouted, those whose
-	// route or status the rules change.
+	// route or status the rules change; uncarried, those in a settled bout
+	// that don't carry its verdict yet, because copying it to them was cut
+	// short.
 	boutOf := map[string]string{}
 	rerouted := map[string]bool{}
+	uncarried := map[string]bool{}
 	var toReview, accepted []Member
 	err = p.store.EachDetection(ctx, db.DetectionFilter{UploadID: ref, Model: db.ModelBirdNET}, func(d db.Detection) error {
 		boutOf[d.ID] = d.BoutID
-		if _, heard := heardIn[d.ID]; heard {
+		if in, heard := heardIn[d.ID]; heard {
+			if b, ok := settled[in]; ok && Carry(&d, b.Bout, b.Settlement) {
+				uncarried[d.ID] = true
+			}
 			return nil
 		}
 		if table.Apply(&d) {
@@ -227,7 +240,7 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 	}
 	var changed []string
 	for id, in := range boutOf {
-		if rerouted[id] || in != want[id] {
+		if rerouted[id] || uncarried[id] || in != want[id] {
 			changed = append(changed, id)
 		}
 	}
@@ -235,13 +248,29 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 	// above keeps its verdict.
 	if len(changed) > 0 {
 		if err := p.store.UpdateDetections(ctx, ref, changed, func(d *db.Detection) error {
-			if _, heard := heardIn[d.ID]; !heard {
+			if in, heard := heardIn[d.ID]; !heard {
 				table.Apply(d)
+			} else if b, ok := settled[in]; ok {
+				Carry(d, b.Bout, b.Settlement)
 			}
 			d.BoutID = want[d.ID]
 			return nil
 		}); err != nil {
 			return err
+		}
+	}
+
+	// A species a settled bout confirmed that the rules have no row for:
+	// the verdict that settled it couldn't add one.
+	for _, b := range settled {
+		if b.BoutStatus() != db.BoutConfirmed {
+			continue
+		}
+		scientific, common := b.confirmed()
+		if !table.Has(scientific) {
+			if _, err := AddConfirmed(ctx, p.store, scientific, common); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -257,18 +286,15 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 	if err != nil {
 		return err
 	}
-	counts := db.UploadReview{RulesVersion: table.Version(), Preparation: Preparation, PreparedAt: p.now(), Bouts: len(made)}
-	for _, b := range stored {
-		if !b.Heard() {
-			continue
-		}
-		counts.Bouts++
-		switch b.Status {
-		case db.BoutConfirmed, db.BoutRejected:
-			counts.Resolved++
-		case db.BoutDisputed:
-			counts.Disputed++
-		}
+	// Counted from the bouts as they are now, not as they were read, so a
+	// verdict given meanwhile is in the counts.
+	current, err := p.store.ListBouts(ctx, ref)
+	if err != nil {
+		return err
+	}
+	counts := db.UploadReview{RulesVersion: table.Version(), Preparation: Preparation, PreparedAt: p.now(), Bouts: len(current)}
+	for _, b := range current {
+		count(&counts, b.Status, 1)
 	}
 	_, err = p.store.UpdateUpload(ctx, ref, func(u *db.Upload) error {
 		u.Review = &counts
@@ -281,10 +307,16 @@ func (p *Preparer) Prepare(ctx context.Context, table *Table, ref string) error 
 		return err
 	}
 	p.log.Info("prepared a card for review", "upload", ref, "rules", table.Version(),
-		"rerouted", len(rerouted), "bouts", counts.Bouts, "boutsWritten", written, "boutsDeleted", deleted,
+		"rerouted", len(rerouted), "carried", len(uncarried), "bouts", counts.Bouts, "boutsWritten", written, "boutsDeleted", deleted,
 		"detectionsWritten", len(changed), "counted", summary.Detections,
 		"took", counts.PreparedAt.Sub(started).Round(time.Millisecond))
 	return nil
+}
+
+// boutSettled is a settled bout, and what settled it.
+type boutSettled struct {
+	db.Bout
+	Settlement
 }
 
 // writeBouts stores what preparing made of a card's bouts over what was

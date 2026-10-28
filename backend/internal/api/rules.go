@@ -111,6 +111,10 @@ func (h *handlers) saveReviewRules(w http.ResponseWriter, r *http.Request, me db
 	slices.SortFunc(rules.Species, func(a, b db.SpeciesRule) int {
 		return cmp.Compare(a.ScientificName, b.ScientificName)
 	})
+	if err := h.keepAddedRows(r, &rules); err != nil {
+		h.fail(w, r, err)
+		return
+	}
 	saved, err := h.store.SaveReviewRules(r.Context(), rules)
 	switch {
 	case errors.Is(err, db.ErrConflict):
@@ -125,6 +129,33 @@ func (h *handlers) saveReviewRules(w http.ResponseWriter, r *http.Request, me db
 		h.preparer.Wake()
 	}
 	h.json(w, http.StatusOK, map[string]any{"rules": rulesOf(saved)})
+}
+
+// keepAddedRows lets a save from the page go over versions that only
+// reviewers' verdicts made since it was read (review.AddConfirmed), keeping
+// the rows they added; a version a person saved since is still a conflict.
+func (h *handlers) keepAddedRows(r *http.Request, rules *db.ReviewRules) error {
+	stored, err := h.store.GetReviewRules(r.Context())
+	if errors.Is(err, db.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if rules.Version == stored.Version || rules.Version == 0 || rules.Version < stored.Saved() {
+		return nil
+	}
+	for _, s := range stored.Species {
+		if s.AddedIn > rules.Version && !slices.ContainsFunc(rules.Species, func(t db.SpeciesRule) bool { return t.ScientificName == s.ScientificName }) {
+			s.AddedIn = 0
+			rules.Species = append(rules.Species, s)
+		}
+	}
+	slices.SortFunc(rules.Species, func(a, b db.SpeciesRule) int {
+		return cmp.Compare(a.ScientificName, b.ScientificName)
+	})
+	rules.Version = stored.Version
+	return nil
 }
 
 // SpeciesHeard is one species BirdNET labelled detections with lately, as the

@@ -63,6 +63,12 @@ func (t *Table) Rule(scientificName string) db.RuleAction {
 	return t.Rules.Defaults
 }
 
+// Has says whether the rules have a row of their own for a species.
+func (t *Table) Has(scientificName string) bool {
+	_, ok := t.species[scientificName]
+	return ok
+}
+
 // Route is where the rules send a detection: RouteIgnore below its species'
 // floor, otherwise its species' action. It goes by the species BirdNET
 // labelled it with, not a reviewer's correction: routing is about how far

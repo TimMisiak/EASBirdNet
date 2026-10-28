@@ -31,6 +31,7 @@ erDiagram
     UPLOAD ||--o{ AUDIO_FILE : contains
     AUDIO_FILE ||--o{ DETECTION : "heard in"
     USER ||--o{ DETECTION : reviews
+    USER ||--o{ BOUT : "gives verdicts on"
     UPLOAD ||--o| CARD_SUMMARY : "counted in"
     UPLOAD ||--o{ BOUT : "heard in"
     BOUT ||--|{ DETECTION : groups
@@ -354,7 +355,7 @@ overwrites rather than duplicates.
 | `route?`         | string  | Where the [review rules](#settings) sent it: `accept` (counted on BirdNET's word), `review` (a reviewer hears it) or `ignore` (below its species' confidence floor: kept, neither counted nor heard). Set by the analysis queue as it stores a file's detections, and again by the preparer when the rules change. Absent on Perch's, which aren't routed, and on any stored before there were rules. |
 | `boutId?`        | string  | → `bouts.id`: the [bout](#bouts) it is heard in, routed `review` or picked as a spot-check. Set by the preparer; absent on a detection in no bout. Kept, with `route` and `reviewStatus`, when its file is analyzed again. |
 | `reviewStatus`   | string  | `unreviewed` (BirdNET's word alone), `accepted` (the review rules took BirdNET's word for it, unheard; REVIEW.md), `confirmed` or `rejected`. Top-level so it can be filtered on. |
-| `review?`        | object  | The review a person gave; see below. Absent while unreviewed, and on an accepted detection nobody has listened to. |
+| `review?`        | object  | The review people gave -- a person on this detection's own page, or its bout's listeners; see below. Absent while unreviewed, and on an accepted detection nobody has listened to. |
 | `createdAt`      | instant | |
 | `updatedAt`      | instant | |
 
@@ -362,12 +363,14 @@ overwrites rather than duplicates.
 
 | Field                      | Type    | Notes |
 |----------------------------|---------|-------|
-| `userId`                   | string  | → `users.id` |
+| `userId`                   | string  | → `users.id`: the reviewer, or for a bout's verdict whoever settled it. |
 | `userName`                 | string  | Copy at review time. |
 | `at`                       | instant | |
-| `correctedScientificName?` | string  | Set on a confirmed detection whose species BirdNET got wrong. |
+| `correctedScientificName?` | string  | Set on a confirmed detection whose species BirdNET got wrong: its bout's listeners confirmed another. It is the species the detection counts as. |
 | `correctedCommonName?`     | string  | |
 | `note?`                    | string  | |
+| `boutId?`                  | string  | → `bouts.id`, when this is the verdict of the detection's [bout](#bouts), copied to it when the bout settled. Absent on a review given on the detection's own page, which its bout's verdict never replaces. |
+| `agreedBy?`                | string[] | With `boutId`: the names of everyone whose verdict settled the bout, in the order given. |
 
 **`clip`**, a few seconds of the recording stored as its own FLAC (mono,
 16-bit, at the recording's sample rate, ~170 KB for a 3 s detection), so a
@@ -482,8 +485,9 @@ an admin or birding expert, whole, over the version it was read at.
 | `defaults`              | object  | `{action, minConfidence}`: the rule for a species with no row. `action` is `accept` or `review`. |
 | `boutGapMinutes`        | integer | 1–240. How long one species may go unheard on a card -- from the end of one detection to the start of the next -- and still be one [bout](#bouts). |
 | `spotChecksPerSpecies`  | integer | 0–20. How many bouts of each accepted species on a card are heard anyway, as spot-checks. |
-| `species`               | array   | One row per species, sorted by scientific name: `{scientificName, commonName, action, minConfidence, note?, source?}`. Matched by the scientific name BirdNET labelled a detection with, not a reviewer's correction. `source` is `review` for a row added because reviewers confirmed a species the rules didn't have (M3). |
-| `updatedBy`, `updatedByName` | string | Who saved this version. |
+| `species`               | array   | One row per species, sorted by scientific name: `{scientificName, commonName, action, minConfidence, note?, source?, addedIn?}`. Matched by the scientific name BirdNET labelled a detection with, not a reviewer's correction. `source` is `review` for a row added because reviewers confirmed a species the rules didn't have: `action: review` at the default floor, as a version of its own, which `addedIn` names until a person next saves. |
+| `savedVersion?`         | integer | The version a person last saved, when rows have been added by reviewers since; absent, it is `version`. A save from the page read at `savedVersion` or later is not a conflict: it goes over the added versions, keeping the rows added after the version it was read at. |
+| `updatedBy`, `updatedByName` | string | Who last saved the rules on the page: a row a verdict adds leaves them as they were. |
 | `createdAt`, `updatedAt` | instant | When the first version was saved, and this one. |
 
 ```json
@@ -524,11 +528,17 @@ preparer's (a card prepared before bouts):
    heard between the read and the write stops the pass for the card, which
    is prepared again next time.
 3. The detections whose route or bout changed are written back, each read
-   again as it is written so a review given meanwhile stands; the card's
-   summary is built whole, and `review` is set.
+   again as it is written so a review given meanwhile stands -- with any
+   detection in a settled bout that doesn't carry the bout's verdict, which
+   is given it: a verdict's copy cut short is finished here. A species a
+   settled bout confirmed that the rules have no row for is added to them.
+   The card's summary is built whole, and `review` is set, its counts read
+   from the bouts as they are by then.
 
 It runs at startup, when the rules are saved, after a failure's delay, and
-every five minutes. A card being deleted is left alone.
+every five minutes. A card being deleted is left alone. A verdict that
+couldn't finish what it owes (*How a bout settles*) sets the card's
+`review.preparation` to 0, so the next pass prepares it again.
 
 ## `bouts`
 
@@ -536,8 +546,8 @@ One species heard on one card in detections no more than the rules'
 `boutGapMinutes` apart: what a reviewer hears, so a verdict on its best clips
 stands for every detection in it (REVIEW.md). Made by the preparer (above),
 of two kinds: `review`, every detection routed `review`; and `spotcheck`, a
-few bouts of each species the rules accepted, picked by id. Verdicts are
-given on them from M3; until then every bout is `open`.
+few bouts of each species the rules accepted, picked by id. Reviewers give
+verdicts on them (`PUT /review/cards/{ref}/bouts/{id}/verdict`).
 
 | Field            | Type     | Notes |
 |------------------|----------|-------|
@@ -552,8 +562,8 @@ given on them from M3; until then every bout is `open`.
 | `detectionIds`   | string[] | → `detections.id`, in the order heard. At most 2,000; a species heard longer without a gap carries on in a second bout. |
 | `best`           | string[] | Its three most confident detections, most confident first: the clips a reviewer is played. |
 | `maxConfidence`  | number   | The highest of its detections'. |
-| `status`         | string   | `open`, `confirmed`, `rejected` or `disputed`. |
-| `reviews`        | array    | One verdict per listener: `{userId, userName, verdict, scientificName?, commonName?, at}`, `verdict` being `confirm` (of another species, when `scientificName` says so), `reject` or `unsure`. Empty until M3. |
+| `status`         | string   | `open`, `confirmed`, `rejected` or `disputed`: see *How a bout settles*. |
+| `reviews`        | array    | One verdict per listener, in the order first given: `{userId, userName, verdict, scientificName?, commonName?, at}`, `verdict` being `confirm` (of another species when `scientificName` says so; absent for the bout's own), `reject` or `unsure`. A listener's second verdict replaces their first. |
 | `resolution?`    | object   | A birding expert's final say, in the same shape (M5). |
 | `createdAt`      | instant  | |
 | `updatedAt`      | instant  | |
@@ -561,6 +571,27 @@ given on them from M3; until then every bout is `open`.
 A bout with a verdict -- anything in `reviews`, a `resolution`, or a status
 other than `open` -- is *heard*, and is kept as it is from then on: its
 detections aren't routed or bouted again, whatever the rules say later.
+
+**How a bout settles** (`internal/review`'s `Give` and `Settled`). Two
+verdicts *match* when both are `reject`, or both `confirm` the same species;
+`unsure` matches nothing. A `review` bout is settled by two that match; a
+`spotcheck` by one `confirm` of its own species while it has no other
+verdict, and otherwise by two that match. Settled, its `status` is
+`confirmed` (whichever species they confirmed) or `rejected`; three verdicts
+that settle nothing make it `disputed`, for a birding expert's `resolution`
+(M5), which settles it whatever the listeners said. A settled or disputed
+bout takes no new verdict, and no change to one; giving the same verdict
+again is harmless. When a verdict settles a bout:
+1. Its verdict is copied to every detection in it, except one reviewed on
+   its own page: `reviewStatus` `confirmed` or `rejected`, and `review`
+   with `boutId`, `agreedBy`, whoever settled it and any corrected
+   species. A rejected spot-check so turns its `accepted` detections
+   `rejected`. The card's summary is adjusted by the difference.
+2. The card's `review.resolved` or `review.disputed` moves with its status.
+3. A species it confirmed that the rules have no row for is added to them.
+
+Each step can be done again, so a verdict given twice finishes what the
+first didn't; one that fails leaves the card for the preparer, above.
 
 ```json
 {
@@ -593,6 +624,7 @@ can render without extra reads, and so the copy stays true to its moment:
 | `uploads.userName`     | `users.name`  | card registered       | List rendering; the name at the time is fine. |
 | `*.recorderId` on child docs | `uploads.recorderId` | file/detection written | Filtering without joining; never changes. |
 | `review.userName`      | `users.name`  | review saved          | Same as `userName`. |
+| `review.agreedBy`, `bouts.reviews[].userName` | `users.name` | verdict given | Same as `userName`. |
 
 ## Queries
 
@@ -614,6 +646,9 @@ Every read the API needs, and what it costs in Cosmos:
 | What was heard in one file (a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
 | Public species summary | `ListCardSummaries`, beside `ListUploads` | `cardSummaries` | cross-partition: one small document per card, not its detections |
 | The review rules (the worker, once per file; the preparer; the rules page) | `GetReviewRules` | `settings` | point read |
+| The cards with bouts (Review tab) | `ListUploads{}`, kept in Go to those whose `review.bouts` is above 0 | `uploads` | cross-partition, small |
+| A card's bouts; one bout and its detections | `ListBouts`; `GetBout`, `ListDetections{UploadID, BoutID}` | `bouts`, `detections` | single partition |
+| A verdict on a bout | `UpdateBout`; when it settles, `UpdateDetections` over its detections, `UpdateCardSummary`, `UpdateUpload`, and `GetReviewRules`/`SaveReviewRules` for a species the rules lack | `bouts`, `detections`, `cardSummaries`, `uploads`, `settings` | a read and a replace per document; the detections a few at a time |
 | Preparing a card: its bouts, its BirdNET detections, then the bouts and detections that changed | `ListBouts`, `EachDetection{UploadID, Model: birdnet}`; `CreateBout`, `UpdateBout`, `DeleteBout`; `UpdateDetections` | `bouts`, `detections` | single partition: a page at a time, then a read and a replace (or delete) per changed document |
 | What was heard lately, for the rules page | `EachDetection{Since, Until, Model: birdnet}` | `detections` | cross-partition, a page at a time (no `MaxDetectionScan`); at most 31 days, two at once with the MCP tools |
 | Building a card's summary | `EachDetection{UploadID, Model: birdnet, ReviewStatus}`, once for `accepted` and once for `confirmed` | `detections` | single partition |
@@ -773,7 +808,7 @@ public summary), following these rules:
 | `files[].bytes` (`POST /uploads`) | `audioFiles.sizeBytes`; `files[].path` is `path`, normalized by `db.CardPath` |
 | `upload.stationName` | `uploads.recorder.name` (the copy, not the live recorder) |
 | `upload.volunteerName` | `uploads.userName` |
-| `detection.review` | `{by, at}`: `review.userName` and `review.at`; absent while unreviewed |
+| `detection.review` | `{by, at, boutId?, correctedScientificName?, correctedCommonName?}`: `review.userName` -- or `review.agreedBy` joined with commas, for a bout's verdict -- `review.at`, and the stored fields of the same names; absent while unreviewed |
 | `detection.clip` | `{startSec, endSec}` of `clip`; the blob name isn't sent |
 | `detection.model` | `detections.model`, `birdnet` when absent |
 | `upload.perchDetectionCount`, `upload.analysis.perchModel`, `files[].perch` | the stored fields of the same names (`perch` without its internals) |
@@ -802,9 +837,13 @@ What the write routes do to documents:
 | `GET /detections/{ref}?file={id}` | Answers a page of the card's detections, or with `file` that file's -- BirdNET's, or Perch's with `model=perch` -- in the order heard, as `{detections, total}`: `limit` (50 by default, ≤ 500) and `offset` read as on `GET /detections`, and `total` is how many there are in all. 404 for a card, or a file on it, that isn't there. |
 | `GET /detections/{ref}/{id}` | Answers the detection, its card and its audio file. |
 | `GET /detections/{ref}/{id}/clip` | Serves `clip.blobName` from file storage as `audio/flac`, or `audio/wav` for a clip cut before FLAC -- the stored name decides, not a constant. Answers range requests. 404 for a detection with no clip. |
-| `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed` (Undo). Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed` -- which leaves the detection where its `route` puts it, `accepted` for one routed `accept`. Then adjusts the card's summary by the change, if the card has one. |
+| `PUT /detections/{ref}/{id}/review` | Takes `{"status"}`: `confirmed`, `rejected` (the page's Discard) or `unreviewed` (Undo). Sets `reviewStatus`, and replaces `review` with the reviewer and the time, or removes it for `unreviewed` -- which leaves the detection where its settled bout's verdict puts it, or else its `route`: `accepted` for one routed `accept`. Then adjusts the card's summary by the change, if the card has one. |
 | `GET /review/rules` | A reviewer's. Answers `{rules, suggested}`: `rules` the stored document as `{version, defaults, boutGapMinutes, spotChecksPerSpecies, species, updatedBy (the name), updatedAt}`, or `null` before the first save; `suggested` the defaults a first table starts from. |
-| `PUT /review/rules` | An admin's or birding expert's. Takes the same shape, with the `version` it was read at (0 for the first save); trims names, gives a row with no common name its scientific one, refuses an action other than `accept`/`review`, a floor outside 0–1, a gap or spot-check count out of range, or a species listed twice (400), and a stale `version` (409). Stores it sorted by scientific name as the next version, with who saved it, wakes the preparer, and answers `{rules}`. |
+| `PUT /review/rules` | An admin's or birding expert's. Takes the same shape, with the `version` it was read at (0 for the first save); trims names, gives a row with no common name its scientific one, refuses an action other than `accept`/`review`, a floor outside 0–1, a gap or spot-check count out of range, or a species listed twice (400), and a stale `version` (409) -- unless only reviewers' verdicts have added versions since it was read (`savedVersion`), when it goes over them and keeps the rows they added after it. Stores it sorted by scientific name as the next version, with who saved it, wakes the preparer, and answers `{rules}`. |
+| `GET /review/cards` | A reviewer's. `{cards}`: every card with bouts that isn't being deleted, newest first, each `{reference, stationId, stationName, firstRecordingAt?, lastRecordingAt?, bouts, resolved, disputed, preparedAt}` from the upload and its `review`. |
+| `GET /review/cards/{ref}/bouts` | A reviewer's. `{card, bouts, left}`: the card as above, its bouts in the order heard, and how many wait for the caller. A bout is `{id, kind, scientificName, commonName, firstHeardAt, lastHeardAt, detections (how many), best, maxConfidence, status, listeners (how many verdicts), mine?, verdicts?, resolution?, forMe}`, a verdict `{by, verdict, scientificName?, commonName?, at}`. `verdicts` is everyone's, and is left out until the caller has given their own -- unless they are a birding expert or admin; `forMe` is an `open` bout they haven't given one on. 404 for a card being deleted. |
+| `GET /review/cards/{ref}/bouts/{id}` | A reviewer's. `{bout, detections}`: the bout as above, and its detections in the order heard (`ListDetections` narrowed to `boutId`, in the card's partition). |
+| `PUT /review/cards/{ref}/bouts/{id}/verdict` | A reviewer's. Takes `{verdict, scientificName?, commonName?}`, a species only on a `confirm` (400 otherwise, or for a common name without a scientific one). Replaces the caller's verdict in `reviews` -- an `UpdateBout`, so verdicts given at once are each kept -- and settles the bout (*How a bout settles*); a settled or disputed bout is a 409, unless the verdict is the one the caller already gave. Answers `{bout}`, with every verdict. |
 | `GET /review/species` | A reviewer's. What BirdNET heard in the last `days` days (28 by default, 1–31): `{since, until, species}`, each `{scientificName, commonName, detections, days (Pacific dates), confirmed, rejected, byConfidence}`, `byConfidence` being its detections in twenty bands of 0.05. BirdNET's alone, by its own labels; most heard first. |
 | `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections`, its summary and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
 | `DELETE /admin/people/{id}` | Sets `removedAt`. |

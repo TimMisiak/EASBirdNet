@@ -36,7 +36,8 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
 │       ├── review/     The review rules: routing detections, preparing cards and
-│       │               their bouts, and each card's summary of what counts (REVIEW.md)
+│       │               their bouts, verdicts on bouts, and each card's summary
+│       │               of what counts (REVIEW.md)
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
@@ -205,6 +206,10 @@ GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
 PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo (back to what the rules say)
 GET    PUT /api/v1/review/rules           the review rules; save them over the version read (admin or birding expert)
 GET    /api/v1/review/species?days=       what was heard lately, species by species, for the rules page
+GET    /api/v1/review/cards               the cards with bouts, and how far each one's review has got
+GET    /api/v1/review/cards/{reference}/bouts       a card's bouts: what waits for you, verdicts blind until you give yours
+GET    /api/v1/review/cards/{reference}/bouts/{id}  one bout, with its detections
+PUT    /api/v1/review/cards/{reference}/bouts/{id}/verdict  confirm (or another species), reject or unsure: yours, until it settles
 GET    /api/v1/admin/uploads              every card, admin only
 GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it (202: it goes in the background)
 GET    POST /api/v1/admin/people          the roster
@@ -308,7 +313,8 @@ card instead: `cardSummaries`, the card's counted detections by species and
 Pacific date (SCHEMA.md). `internal/review` keeps them: built whole from the
 card's detections the first time the page meets a card without one and each
 time the card is prepared for review, and adjusted by every write that
-changes what counts -- a review, and the worker storing a file's detections.
+changes what counts -- a review, a bout's verdict reaching its detections,
+and the worker storing a file's detections.
 Counting by date makes the window the last `days` dates, not the last
 `days`×24 hours. Gotcha: a change landing while its card's summary is being
 built whole can be missed, since the build stores what it read; the next
@@ -871,8 +877,17 @@ picks a few bouts of each accepted species as spot-checks, and rebuilds the
 card's summary, which is what puts right an adjustment a build missed. A
 detection a person has reviewed keeps their verdict through all of it, and
 a bout anyone has given a verdict on is never rebuilt or deleted, nor its
-detections routed again; Undo puts a detection back where its route says.
-Four gotchas:
+detections routed again; Undo puts a detection back where its bout's
+verdict, or else its route, says. Reviewers give verdicts on bouts
+(`review.Give`): two that match settle a bout -- one confirm, a spot-check
+-- and three that don't make it disputed, for a birding expert. The API
+shows a bout's other verdicts only to someone who has given theirs, or to a
+birding expert. A settled bout's verdict is copied to its detections
+(`review.Resolve`: their status, the card's summary and counts, and a row in
+the rules for a species confirmed that they lack); a copy cut short sets the
+card's `review.preparation` to 0, and the preparer, which gives any
+detection in a settled bout that bout's verdict, finishes it.
+Five gotchas:
 - Routing goes by BirdNET's label, not a correction, and matches the
   scientific name exactly as BirdNET spells it (`Corthylio calendula`, not
   `Regulus calendula`): a rule for a name BirdNET doesn't use routes nothing,
@@ -884,6 +899,10 @@ Four gotchas:
   for it (`upload.review.preparation` below `review.Preparation`), so a
   change to what preparing does bumps that constant, or cards prepared
   under today's rules never get it.
+- A row a verdict adds is a version of the rules no person saved
+  (`savedVersion`), so a save from the rules page read before it isn't a
+  conflict: it goes over it and keeps the row. Every card is still prepared
+  again under it, reading each card whole -- cheap while cards are few.
 - No rules document means no routing at all, not "review everything": every
   detection stays `unreviewed` as before rules existed, so turning this on is
   saving a first table, and a store that lost the document routes nothing
@@ -1200,9 +1219,10 @@ rules and bouts (REVIEW.md, which has where it stands): once a birding expert
 saves the rules, common birds are `accepted` and count publicly, and the
 rest are routed to review or left below their floors (*Review rules route
 detections*), and each card's review is grouped into bouts with spot-checks
-beside them; but nothing gives a verdict on a bout and there is no Review
-tab yet, so what is routed to review is still reviewed one detection at a
-time on its own page. Nothing moves a card from `in_review`
+beside them, which the API takes verdicts on and settles; but there is no
+Review tab yet to give them from, nor a way for a birding expert to settle a
+disputed bout, so in the app what is routed to review is still reviewed one
+detection at a time on its own page. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

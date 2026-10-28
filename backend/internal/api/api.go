@@ -158,6 +158,10 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/review/rules", review(h.getReviewRules))
 	mux.HandleFunc("GET /api/v1/review/species", review(h.speciesHeard))
 	mux.HandleFunc("PUT /api/v1/review/rules", h.requireRole(db.RoleBirdingExpert, h.saveReviewRules))
+	mux.HandleFunc("GET /api/v1/review/cards", review(h.listReviewCards))
+	mux.HandleFunc("GET /api/v1/review/cards/{reference}/bouts", review(h.listBouts))
+	mux.HandleFunc("GET /api/v1/review/cards/{reference}/bouts/{id}", review(h.getBout))
+	mux.HandleFunc("PUT /api/v1/review/cards/{reference}/bouts/{id}/verdict", review(h.giveVerdict))
 
 	// Admin.
 	admin := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
@@ -1170,17 +1174,38 @@ func (h *handlers) reviewDetection(w http.ResponseWriter, r *http.Request, me db
 		return
 	}
 	at := h.stamp()
-	ref := r.PathValue("reference")
+	ref, id := r.PathValue("reference"), r.PathValue("id")
+	// Undoing a verdict leaves the detection where its bout's verdict, or
+	// else the review rules, put it: accepted, for a species they accept.
+	var bout *db.Bout
+	if body.Status == db.ReviewUnreviewed {
+		d, err := h.store.GetDetection(r.Context(), ref, id)
+		if err == nil && d.BoutID != "" {
+			var b db.Bout
+			if b, err = h.store.GetBout(r.Context(), ref, d.BoutID); err == nil {
+				bout = &b
+			} else if errors.Is(err, db.ErrNotFound) {
+				err = nil
+			}
+		}
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			h.fail(w, r, err)
+			return
+		}
+	}
 	var before db.Detection
-	d, err := h.store.UpdateDetection(r.Context(), ref, r.PathValue("id"), func(d *db.Detection) error {
+	d, err := h.store.UpdateDetection(r.Context(), ref, id, func(d *db.Detection) error {
 		before = *d
 		d.ReviewStatus, d.Review = body.Status, nil
-		// Undoing a verdict leaves the detection where the review rules
-		// put it: accepted, for a species they accept.
-		if body.Status == db.ReviewUnreviewed {
-			d.ReviewStatus = review.StatusOf(d.Route)
-		} else {
+		if body.Status != db.ReviewUnreviewed {
 			d.Review = &db.Review{UserID: me.ID, UserName: me.Name, At: at}
+			return nil
+		}
+		d.ReviewStatus = review.StatusOf(d.Route)
+		if bout != nil && bout.ID == d.BoutID {
+			if s, ok := review.Settled(*bout); ok {
+				review.Carry(d, *bout, s)
+			}
 		}
 		return nil
 	})

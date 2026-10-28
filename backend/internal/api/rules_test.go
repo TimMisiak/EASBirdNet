@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 )
 
 type countingPreparer struct{ wakes atomic.Int64 }
@@ -86,6 +87,27 @@ func TestReviewRules(t *testing.T) {
 	rec = do(t, mux, http.MethodGet, "/api/v1/review/rules", "", jane)
 	if got := decodeInto[rulesBody](t, rec); got.Rules == nil || got.Rules.Version != 2 || got.Rules.UpdatedBy != "Dana Coordinator" {
 		t.Errorf("GET rules after two saves = %s", rec.Body)
+	}
+
+	// Reviewers confirm an owl the rules have no row for, which adds one
+	// as version 3. Eve, saving what she read at version 2, keeps it.
+	if added, err := review.AddConfirmed(t.Context(), store, "Bubo virginianus", "Great Horned Owl"); err != nil || !added {
+		t.Fatalf("adding a confirmed species: %v, %v", added, err)
+	}
+	rec = do(t, mux, http.MethodPut, "/api/v1/review/rules", body(2), eve)
+	saved = decodeInto[rulesBody](t, rec).Rules
+	if rec.Code != http.StatusOK || saved == nil || saved.Version != 4 || len(saved.Species) != 3 || saved.Species[0].Source != db.RuleSourceReview {
+		t.Fatalf("a save over a row a verdict added = %d %s; want version 4, keeping the owl", rec.Code, rec.Body)
+	}
+	if stored, _ := store.GetReviewRules(t.Context()); stored.SavedVersion != 0 || stored.Species[0].AddedIn != 0 {
+		t.Errorf("stored = %+v; want the owl Eve's own row now", stored)
+	}
+	// One a person saved since is still a conflict, rows added or not.
+	if _, err := review.AddConfirmed(t.Context(), store, "Strix occidentalis", "Spotted Owl"); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, mux, http.MethodPut, "/api/v1/review/rules", body(3), admin); rec.Code != http.StatusConflict {
+		t.Errorf("a save over a person's later version = %d, want 409", rec.Code)
 	}
 }
 

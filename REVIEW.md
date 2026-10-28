@@ -4,7 +4,7 @@ How detections get from BirdNET to a verdict: a table of review rules routes
 each detection when it is stored, so the common birds are accepted without
 anyone listening; what is left is grouped into *bouts*; and reviewers hear
 bouts, not detections, two to agree, in a Review tab built for speed.
-Disagreements go to a birding expert. Being built in milestones: M0 to M2
+Disagreements go to a birding expert. Being built in milestones: M0 to M3
 are built; **Milestones** is the order, and the **Status** table at the end is
 where to resume. Where this and
 the code disagree, the code is what runs -- fix whichever is wrong.
@@ -155,15 +155,19 @@ Routing happens in two places, with the same function:
 | `rejected` | People rejected its bout, or its spot-check | No |
 
 `route` says why an `unreviewed` one is: waiting for review, or below the
-floor. A spot-check that is rejected turns `accepted` detections `rejected`,
-so a rule that is wrong for a card stops counting there at once.
+floor. A spot-check that is rejected turns its `accepted` detections
+`rejected`, so what a wrong rule accepted in that bout stops counting at
+once; the rest of the species on the card is left as the rule has it, and
+the rejection shows on the rules page (*Gaps accepted*).
 
 The existing `review` object stays, and keeps meaning *how this detection
 was settled by people*: for a bout's verdict it holds the bout's id, the
 names of who agreed, when, and any corrected species
 (`correctedScientificName`, which becomes reachable at last). Detections
 reviewed one at a time before this keep the `review` they have, and are left
-out of bouts.
+out of bouts. A detection in a bout that someone reviews on its own page
+keeps that review when its bout settles; undoing it puts the detection back
+to its bout's verdict, or with none to what its route says.
 
 ## Bouts
 
@@ -221,12 +225,25 @@ one of its listeners.
   Anything else on it turns it into a two-to-match bout.
 - **Three** verdicts without a resolution make it `disputed`, as does three
   `unsure`. It then waits for a birding expert, whose verdict is final.
+- A resolved or disputed bout takes no new verdict and no change to one --
+  on a disputed one, the listeners have each seen the others' verdicts, so
+  a change then would be a vote, not a hearing. Giving the verdict one
+  already gave is harmless, which is what lets a client retry.
 
 On resolution the bout's verdict is copied to its detections:
 `reviewStatus`, and `review` with the bout's id, who agreed, and any
 corrected species. A bout of 38 detections is 38 writes, once. A confirmed
-species that has no row in the rules is added, `action: review`,
-`source: review`, so the table lists it from then on.
+species that has no row in the rules is added, `action: review` at the
+default floor, `source: review`, so the table lists it from then on.
+
+Adding a row is a new version of the rules, written by no person. Two
+things follow. A Review rules page open at the version before would have
+its save refused, losing its edits, so the rules carry `savedVersion`, the
+version a person last saved: a save read at that version or later goes
+over the added versions and keeps their rows. And every card is prepared
+again under the new version, as for any save; with the defaults at
+`review`, the new row routes exactly as they did, so that pass writes
+nothing but reads every card (*Gaps accepted*).
 
 **The verdicts are blind.** The Review tab's API doesn't show a bout's other
 verdicts to someone until they have given their own (an expert or admin sees
@@ -259,14 +276,18 @@ Preparing a card, all of it in the card's own partition:
 
 1. Read its detections a page at a time (`EachDetection`), routing again
    any that no person has settled and that aren't in a bout with a verdict;
-   write those whose route changed.
+   write those whose route changed, and give any detection in a resolved
+   bout that doesn't carry its verdict that verdict (a resolution cut
+   short).
 2. Bout the detections routed `review` that aren't in a bout with a verdict;
    pick the spot-check bouts. Write the bouts; delete stored bouts that have
    no verdict and are no longer produced; set `boutId` on detections whose
    bout changed.
-3. Write the card's summary (*What the landing page reads*) and its review
+3. Add to the rules any species a resolved bout confirmed that they lack.
+   Write the card's summary (*What the landing page reads*) and its review
    counts on the upload, `review: {rulesVersion, preparation, preparedAt,
-   bouts, resolved, disputed}`, which the card picker shows.
+   bouts, resolved, disputed}`, which the card picker shows -- counted from
+   the bouts as they are by then, so a verdict given during the pass counts.
 
 A bout given a verdict between step 2's read and its write is left as it
 is, and the pass stops for that card without recording it as prepared, so
@@ -356,9 +377,12 @@ at once, a fourth verdict, or a second from one person are settled by
 replace-if-unchanged; resolving copies the verdict to the detections after
 the bout is written, and a failure part way is finished by the next
 preparation pass, which copies a resolved bout's verdict to any detection
-that doesn't carry it yet.
+that doesn't carry it yet and adds any confirmed species the rules lack --
+the verdict sets the card's `review.preparation` to 0 so that the pass
+comes, or, failing even that, answers an error the client retries.
 
-`disagreements` is cross-partition, and small: only disputed bouts.
+`disagreements` is cross-partition, and small: only disputed bouts. It and
+`resolution` come with M5; until then a disputed bout waits.
 
 ## Screens
 
@@ -424,6 +448,12 @@ is cut while the original is certainly there.
 - **An accepted species is checked a few bouts per card**, not in
   proportion to how much of it there is. A bad rule shows in its spot-check
   rejection rate, on the rules page, not in a count.
+- **A confirmed species the rules lack prepares every card again.** The row
+  it adds is a new version of the rules, and the preparer reads every card
+  under it, though a row matching the defaults changes no route. That is a
+  few hundred thousand reads of a season's cards per new species, which
+  come early and then rarely. *Revisit when* the cards outgrow it: then the
+  preparer should compare what routes, not the version.
 
 ## Measure before tuning
 
@@ -506,6 +536,12 @@ differently yet.
 
 **M3 — The review API.** Verdicts, resolution, copying to detections and the
 summary, blind verdicts, adding confirmed species to the rules.
+- `GET /review/cards`, a card's bouts, one bout with its detections, and
+  `PUT .../verdict` (*API*); `internal/review`'s `Give`, `Settled`, `Carry`
+  and `Resolve`.
+- The preparer finishes a resolution cut short; a page save goes over rows
+  verdicts added (`savedVersion`).
+- Undo on a detection's page goes back to its bout's verdict.
 
 **M4 — The Review tab.** The card picker and a card's review: queue, player
 with context and slow speed, verdicts, keys, Save & next, other listeners'
@@ -527,6 +563,6 @@ the column, M3 the data); months per species; eBird import.
 | M0: re-runs keep reviews; `accepted` read everywhere; card summaries and the landing page; the `cardSummaries` container; SCHEMA.md, DEPLOYMENT.md, ROLLBACK.md, CLAUDE.md | Built, not deployed |
 | M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Built, not deployed. The first table ships as the page's suggested one; saving it, on the page, is what turns routing on |
 | M2: bouts and spot-checks; the card's review counts; the `bouts` container; the gap measured | Built, not deployed. Measured: the gap barely matters (*Measure before tuning*), so it stays at 15 minutes |
-| M3: the review API | Not started |
+| M3: the review API | Built, not deployed. Tried on the dev card through the API: blind verdicts, a correction to another species, a rejected spot-check, a dispute, a row added to the rules, and preparing again under it changing nothing. `disagreements` and `resolution` are M5's |
 | M4: the Review tab | Not started |
 | M5: disagreements and overrides | Not started |

@@ -667,6 +667,12 @@ func TestJSONFileBouts(t *testing.T) {
 	if _, err := s.UpdateBout(ctx, "OWL-20260914-SR03", owl, func(*Bout) error { return nil }); !errors.Is(err, ErrNotFound) {
 		t.Errorf("update under another card: %v, want ErrNotFound", err)
 	}
+	if got, err := s.GetBout(ctx, card, owl); err != nil || got.UploadID != card || len(got.Reviews) != 1 {
+		t.Errorf("get = %+v, %v; want the owl bout, heard, still on its card", got, err)
+	}
+	if _, err := s.GetBout(ctx, "OWL-20260914-SR03", owl); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get under another card: %v, want ErrNotFound", err)
+	}
 
 	heard := errors.New("heard")
 	keepHeard := func(b Bout) error {
@@ -692,5 +698,42 @@ func TestJSONFileBouts(t *testing.T) {
 	bouts, err = reopened.ListBouts(ctx, card)
 	if err != nil || len(bouts) != 1 || bouts[0].ID != owl || bouts[0].UploadID != card || len(bouts[0].Reviews) != 1 {
 		t.Errorf("after reopening: %+v, %v; want the heard bout, on its card", bouts, err)
+	}
+}
+
+// A bout's detections are a filter of the card's, and an update of several
+// leaves alone those mutate says are unchanged.
+func TestJSONFileDetectionsInABout(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	const card = "OWL-20260914-SR02"
+	at := time.Date(2026, time.September, 13, 6, 0, 0, 0, time.UTC)
+	if err := s.UpsertDetections(ctx, card, []Detection{
+		{ID: "det_1", AudioFileID: "af_1", DetectedAt: at, ScientificName: "Strix varia", BoutID: "bout_1"},
+		{ID: "det_2", AudioFileID: "af_1", DetectedAt: at.Add(-time.Minute), ScientificName: "Strix varia", BoutID: "bout_1"},
+		{ID: "det_3", AudioFileID: "af_1", DetectedAt: at, ScientificName: "Strix varia"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListDetections(ctx, DetectionFilter{UploadID: card, BoutID: "bout_1"})
+	if err != nil || len(got) != 2 || got[0].ID != "det_2" {
+		t.Fatalf("bout_1's = %+v, %v; want its two, in the order heard", got, err)
+	}
+	before, _ := s.GetDetection(ctx, card, "det_1")
+	err = s.UpdateDetections(ctx, card, []string{"det_1", "det_2"}, func(d *Detection) error {
+		if d.ID == "det_1" {
+			return ErrUnchanged
+		}
+		d.ReviewStatus = ReviewConfirmed
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := s.GetDetection(ctx, card, "det_1"); d.ReviewStatus != ReviewUnreviewed || !d.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("det_1 = %+v; want it unwritten", d)
+	}
+	if d, _ := s.GetDetection(ctx, card, "det_2"); d.ReviewStatus != ReviewConfirmed {
+		t.Errorf("det_2 = %s, want confirmed", d.ReviewStatus)
 	}
 }
