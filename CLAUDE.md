@@ -901,7 +901,7 @@ Five gotchas:
   scientific name exactly as BirdNET spells it (`Corthylio calendula`, not
   `Regulus calendula`): a rule for a name BirdNET doesn't use routes nothing,
   which the rules page shows as a rule with nothing heard beside it. Its
-  "Add a species" looks either name up in BirdNET's list
+  "Add or change a rule" panel looks either name up in BirdNET's list
   (`data/birdnet-species.json`) and warns of a name that isn't in it; the
   list is the v2.4 model's, so a new model means running
   `analyzer/species.py` again.
