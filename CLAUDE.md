@@ -42,7 +42,8 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
 │                       (requirements-perch.txt adds TensorFlow, for Perch), which the
-│                       Dockerfile's `birdnet` stage installs: the runtime `analyzer` builds on
+│                       Dockerfile's `birdnet` stage installs: the runtime `analyzer` builds on;
+│                       species.py writes BirdNET's species list for the frontend
 ├── test/               Audio fixtures (a known Osprey clip); frontend/: the
 │                       frontend's tests, plain `node --test` with no packages
 ├── frontend/           Shipped as-is; no build step, no bundler
@@ -54,7 +55,9 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │   │                   barred-owl.jpg: the home and sign-in banner, CC BY
 │   │                   4.0 -- its credit on both pages must stay with it
 │   ├── data/           suggested-review-rules.json: the first table the Review
-│   │                   rules page offers, drafted from two weeks at Marymoor
+│   │                   rules page offers, drafted from two weeks at Marymoor;
+│   │                   birdnet-species.json: every species BirdNET v2.4 reports,
+│   │                   both names, from analyzer/species.py (CC BY-NC-SA, as the model)
 │   ├── vendor/          Third-party files served as they were published, with their
 │   │                    hashes in THIRD_PARTY_NOTICES.md: libflac.js (FLAC encoder)
 │   └── js/
@@ -71,6 +74,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── wav.js           Reads a WAV's header: can FLAC hold it, and where are the samples
 │       ├── detection-list.js The detections list: its view, and the pages held
 │       ├── review-queue.js  A card's bouts as the Review tab works through them
+│       ├── species-lookup.js BirdNET's species list, looked up by either name
 │       ├── card-scan.js     Reads a card folder into a day-by-day manifest
 │       ├── upload-status.js Card status -> chip colour and wording
 │       └── components/      One custom element per file, plus base-element.js
@@ -896,7 +900,11 @@ Five gotchas:
 - Routing goes by BirdNET's label, not a correction, and matches the
   scientific name exactly as BirdNET spells it (`Corthylio calendula`, not
   `Regulus calendula`): a rule for a name BirdNET doesn't use routes nothing,
-  which the rules page shows as a rule with nothing heard beside it.
+  which the rules page shows as a rule with nothing heard beside it. Its
+  "Add a species" looks either name up in BirdNET's list
+  (`data/birdnet-species.json`) and warns of a name that isn't in it; the
+  list is the v2.4 model's, so a new model means running
+  `analyzer/species.py` again.
 - Context is cut now or never: a detection routed `review` gets a clip with
   10 s either side (`contextPadSec`), because the original is gone a month
   on. A species moved to `review` later keeps the short clips it had.

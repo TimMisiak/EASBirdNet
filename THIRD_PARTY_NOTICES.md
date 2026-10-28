@@ -16,6 +16,9 @@ at the Cornell Lab of Ornithology and
   [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/).
   The full licence text is in [LICENSES/CC-BY-NC-SA-4.0.txt](LICENSES/CC-BY-NC-SA-4.0.txt).
   The models are used as published, without modification.
+  The species list the Review rules page looks names up in,
+  `frontend/data/birdnet-species.json`, is the v2.4 acoustic model's labels,
+  written out by `analyzer/species.py`, under the same licence.
 - **The `birdnet` Python package** (`analyzer/requirements.txt`) is licensed
   under the [MIT License](https://github.com/birdnet-team/birdnet/blob/main/LICENSE.md).
 

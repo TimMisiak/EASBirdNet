@@ -2,6 +2,7 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 import { controls, forms, panels, tables, typography } from "../shared-styles.js";
 import { count, dateAtTime } from "../format.js";
 import * as api from "../api.js";
+import { SPECIES_LIST, fold, speciesIndex } from "../species-lookup.js";
 
 /**
  * <bs-review-rules> -- the review rules (REVIEW.md): which species are
@@ -20,6 +21,10 @@ import * as api from "../api.js";
  * A table can be exported as JSON and imported again, and with no rules yet
  * the page offers the suggested one (/data/suggested-review-rules.json),
  * drafted from two weeks at Marymoor.
+ *
+ * "Add a species" looks either name up in BirdNET's species list as it is
+ * typed, and fills in the other: a rule has to name a species as BirdNET
+ * spells it to route anything. A name the list doesn't have is added as typed.
  */
 
 /** How far back the counts beside the rules look. */
@@ -49,6 +54,10 @@ class ReviewRules extends BaseElement {
   #search = "";
   #saving = false;
   #message = null; // {kind: "error" | "done", text}
+  /** BirdNET's species list, fetched the first time a name is typed: a promise of its index, or of null. */
+  #names = null;
+  /** That index once it has loaded, for the moment a species is added. */
+  #index = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -134,16 +143,15 @@ class ReviewRules extends BaseElement {
         if (rule) rule.minConfidence = clampFloor(Number(el.value));
         this.#changed();
       },
+      lookup: (el) => this.#lookUp(el),
       add: (el, event) => {
         event.preventDefault();
-        const form = new FormData(el);
-        const scientificName = String(form.get("scientificName") ?? "").trim();
-        const commonName = String(form.get("commonName") ?? "").trim();
+        const { scientificName, commonName } = this.#named(new FormData(el));
         if (!scientificName) return;
         if (!this.#draft.species.has(scientificName)) {
           this.#draft.species.set(scientificName, {
             scientificName,
-            commonName: commonName || scientificName,
+            commonName,
             action: "review",
             minConfidence: this.#draft.defaults.minConfidence,
           });
@@ -151,6 +159,72 @@ class ReviewRules extends BaseElement {
         this.#search = scientificName;
         this.#changed();
       },
+    };
+  }
+
+  /** BirdNET's species list as an index, or null if it doesn't load; then the form works as typed. */
+  #namesOf() {
+    this.#names ??= fetch(SPECIES_LIST)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`${res.status}`))))
+      .then((json) => (this.#index = speciesIndex(json.species ?? [])))
+      .catch(() => null);
+    return this.#names;
+  }
+
+  /**
+   * As a name is typed into "Add a species": suggests BirdNET's names of the
+   * kind the field holds, and when it holds one, fills in the other name --
+   * unless that one was typed by hand. A name filled in is taken out again if
+   * the one it came from stops matching.
+   */
+  async #lookUp(field) {
+    const names = await this.#namesOf();
+    const form = field.form;
+    if (!names || !form?.isConnected) return;
+    const { scientificName: scientific, commonName: common } = form.elements;
+    const kind = field === scientific ? "scientific" : "common";
+    const other = field === scientific ? common : scientific;
+    delete field.dataset.filled;
+
+    const list = this.shadowRoot.getElementById(field.getAttribute("list"));
+    if (list) {
+      list.innerHTML = names
+        .suggest(field.value, kind)
+        .map(({ scientificName, commonName }) =>
+          kind === "scientific"
+            ? `<option value="${escapeHTML(scientificName)}" label="${escapeHTML(commonName)}"></option>`
+            : `<option value="${escapeHTML(commonName)}" label="${escapeHTML(scientificName)}"></option>`,
+        )
+        .join("");
+    }
+
+    const match = names.find(field.value, kind);
+    if (match && (!other.value.trim() || other.dataset.filled)) {
+      other.value = kind === "scientific" ? match.commonName : match.scientificName;
+      other.dataset.filled = "true";
+    } else if (!match && other.dataset.filled) {
+      other.value = "";
+      delete other.dataset.filled;
+    }
+
+    const hint = this.$("#add-hint");
+    if (hint) hint.textContent = addHint(names, scientific.value);
+  }
+
+  /**
+   * The species "Add a species" names: as BirdNET spells it when the list has
+   * it -- a common name typed where the scientific one goes, too -- and as
+   * typed when it doesn't. A common name typed by hand is kept.
+   */
+  #named(form) {
+    const scientificName = String(form.get("scientificName") ?? "").trim().replace(/\s+/g, " ");
+    const commonName = String(form.get("commonName") ?? "").trim().replace(/\s+/g, " ");
+    const match = this.#index?.find(scientificName, "scientific") ?? this.#index?.find(scientificName, "common");
+    if (!match) return { scientificName, commonName: commonName || scientificName };
+    const typed = fold(commonName);
+    return {
+      scientificName: match.scientificName,
+      commonName: !typed || typed === fold(match.commonName) || typed === fold(scientificName) ? match.commonName : commonName,
     };
   }
 
@@ -293,9 +367,12 @@ class ReviewRules extends BaseElement {
         .settings .hint { font-size: 0.75rem; color: var(--bs-text-muted); margin-top: 0.375rem; }
         .totals { display: flex; flex-wrap: wrap; gap: var(--bs-space-5); margin-bottom: var(--bs-space-4); font-size: 0.875rem; }
         .totals strong { font-family: var(--bs-font-mono); font-weight: 500; font-size: 1.125rem; display: block; }
-        .find { display: flex; flex-wrap: wrap; gap: var(--bs-space-3); align-items: end; margin-bottom: var(--bs-space-3); }
+        .find { display: flex; flex-wrap: wrap; gap: var(--bs-space-3); align-items: start; margin-bottom: var(--bs-space-3); }
         .find .search { flex: 1 1 14rem; }
         .find form { display: flex; flex-wrap: wrap; gap: var(--bs-space-2); align-items: end; }
+        .add { display: grid; }
+        /* As wide as the form above it, however long the hint. */
+        .add .hint { width: 0; min-width: 100%; font-size: 0.75rem; color: var(--bs-text-muted); margin-top: 0.375rem; }
         .field--row { min-height: 2.25rem; font-size: 0.875rem; }
         .name { font-size: 0.9375rem; }
         .latin { font-size: 0.78125rem; font-style: italic; color: var(--bs-text-muted); }
@@ -424,17 +501,24 @@ class ReviewRules extends BaseElement {
           <input class="field field--sunk field--row" id="rules-search" type="search" value="${escapeHTML(this.#search)}"
                  placeholder="Common or scientific name" data-input="search" />
         </div>
-        <form data-submit="add" aria-label="Add a rule for a species not heard lately">
-          <div>
-            <label class="label" for="add-scientific">Add a species</label>
-            <input class="field field--sunk field--row" id="add-scientific" name="scientificName" placeholder="Strix varia" required />
-          </div>
-          <div>
-            <label class="label" for="add-common"><span class="visually-hidden">Common name</span>&nbsp;</label>
-            <input class="field field--sunk field--row" id="add-common" name="commonName" placeholder="Barred Owl" />
-          </div>
-          <button class="btn btn--quiet btn--tiny">Add</button>
-        </form>
+        <div class="add">
+          <form data-submit="add" aria-label="Add a rule for a species not heard lately">
+            <div>
+              <label class="label" for="add-scientific">Add a species<span class="visually-hidden">: scientific name</span></label>
+              <input class="field field--sunk field--row" id="add-scientific" name="scientificName" placeholder="Strix varia" required
+                     autocomplete="off" list="add-scientific-names" aria-describedby="add-hint" data-input="lookup" />
+              <datalist id="add-scientific-names"></datalist>
+            </div>
+            <div>
+              <label class="label" for="add-common"><span class="visually-hidden">Common name</span>&nbsp;</label>
+              <input class="field field--sunk field--row" id="add-common" name="commonName" placeholder="Barred Owl"
+                     autocomplete="off" list="add-common-names" aria-describedby="add-hint" data-input="lookup" />
+              <datalist id="add-common-names"></datalist>
+            </div>
+            <button class="btn btn--quiet btn--tiny">Add</button>
+          </form>
+          <p class="hint" id="add-hint" aria-live="polite">${escapeHTML(addHint(this.#index, ""))}</p>
+        </div>
       </div>
 
       <div class="table-scroll">
@@ -494,6 +578,20 @@ class ReviewRules extends BaseElement {
         <td class="num">${reviewed ? `${count(heard.confirmed)} ✓ ${count(heard.rejected)} ✗` : dash}</td>
       </tr>`;
   }
+}
+
+/** What "Add a species" says under its fields, given the scientific name typed so far. */
+function addHint(names, typed) {
+  const general = "Type either name, and BirdNET's list fills in the other.";
+  if (!names || !fold(typed)) return general;
+  if (names.find(typed, "scientific")) return general;
+  const common = names.find(typed, "common");
+  if (common) return `${common.commonName} is a common name: the rule will be for ${common.scientificName}.`;
+  if (names.suggest(typed, "scientific").length) return general;
+  return (
+    "BirdNET has no species by that scientific name, so a rule for it would route nothing. " +
+    "It spells some names its own way: Corthylio calendula, not Regulus calendula."
+  );
 }
 
 /** The two actions as options, with selected chosen. */

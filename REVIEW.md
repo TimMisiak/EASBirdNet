@@ -106,7 +106,11 @@ replace-if-unchanged for an edit.
   species the table didn't have (*How a bout resolves*); a person edits it
   like any other.
 - Species are matched by scientific name, which is how BirdNET's labels,
-  corrections and the public page already key them.
+  corrections and the public page already key them. The rules page's "Add a
+  species" looks either name up in BirdNET's own list
+  (`frontend/data/birdnet-species.json`) and fills in the other, so a row
+  names a species as BirdNET spells it; a name the list doesn't have is
+  added as typed, with a warning that it will route nothing.
 
 **No rules document means no routing.** Until the first table is saved,
 every detection stays `unreviewed` with no `route`, as today. Turning the
