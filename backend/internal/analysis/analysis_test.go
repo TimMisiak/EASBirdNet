@@ -446,6 +446,24 @@ func TestAnalyzingAFileAgainKeepsItsReviews(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Another was put in a bout when the card was prepared.
+	first, err := f.store.ListDetections(t.Context(), db.DetectionFilter{UploadID: ref, AudioFileID: owl.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inBout string
+	for _, d := range first {
+		if d.ID != barred {
+			inBout = d.ID
+			break
+		}
+	}
+	if _, err := f.store.UpdateDetection(t.Context(), ref, inBout, func(d *db.Detection) error {
+		d.BoutID, d.Route = "bout_1", db.RouteReview
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Back to where the worker that died left it.
 	if _, err := f.store.UpdateAudioFile(t.Context(), ref, owl.ID, func(a *db.AudioFile) error {
@@ -477,9 +495,13 @@ func TestAnalyzingAFileAgainKeepsItsReviews(t *testing.T) {
 			if d.ReviewStatus != db.ReviewConfirmed || d.Review == nil || *d.Review != *review {
 				t.Errorf("the reviewed detection is %s, %+v; want it still confirmed as a Spotted Owl", d.ReviewStatus, d.Review)
 			}
+		case inBout:
+			if d.BoutID != "bout_1" || d.Route != db.RouteReview || d.ReviewStatus != db.ReviewUnreviewed {
+				t.Errorf("the detection in a bout is in %q, routed %q, %s; want it still in its bout", d.BoutID, d.Route, d.ReviewStatus)
+			}
 		default:
-			if d.ReviewStatus != db.ReviewUnreviewed || d.Review != nil {
-				t.Errorf("%s is %s, %+v; want it unreviewed, as found", d.CommonName, d.ReviewStatus, d.Review)
+			if d.ReviewStatus != db.ReviewUnreviewed || d.Review != nil || d.BoutID != "" {
+				t.Errorf("%s is %s, %+v, in %q; want it unreviewed, as found", d.CommonName, d.ReviewStatus, d.Review, d.BoutID)
 			}
 		}
 	}

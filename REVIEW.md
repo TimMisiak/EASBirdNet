@@ -4,8 +4,8 @@ How detections get from BirdNET to a verdict: a table of review rules routes
 each detection when it is stored, so the common birds are accepted without
 anyone listening; what is left is grouped into *bouts*; and reviewers hear
 bouts, not detections, two to agree, in a Review tab built for speed.
-Disagreements go to a birding expert. Being built in milestones: M0 is
-built; **Milestones** is the order, and the **Status** table at the end is
+Disagreements go to a birding expert. Being built in milestones: M0 to M2
+are built; **Milestones** is the order, and the **Status** table at the end is
 where to resume. Where this and
 the code disagree, the code is what runs -- fix whichever is wrong.
 
@@ -250,7 +250,10 @@ card when:
   fileCount`) -- Perch can still be running; a card waiting for Perch is
   still `processing`, and review needn't wait for it -- and
 - the card isn't `deleting`, and
-- its `review.rulesVersion` isn't the current rules' version.
+- its `review.rulesVersion` isn't the current rules' version, or its
+  `review.preparation` is older than `review.Preparation` -- a card
+  prepared before a step was added to preparing (bouts, in M2) is prepared
+  again for it, though the rules haven't changed.
 
 Preparing a card, all of it in the card's own partition:
 
@@ -262,8 +265,12 @@ Preparing a card, all of it in the card's own partition:
    no verdict and are no longer produced; set `boutId` on detections whose
    bout changed.
 3. Write the card's summary (*What the landing page reads*) and its review
-   counts on the upload, `review: {rulesVersion, preparedAt, bouts,
-   resolved, disputed}`, which the card picker shows.
+   counts on the upload, `review: {rulesVersion, preparation, preparedAt,
+   bouts, resolved, disputed}`, which the card picker shows.
+
+A bout given a verdict between step 2's read and its write is left as it
+is, and the pass stops for that card without recording it as prepared, so
+the next pass prepares it again with that bout kept.
 
 Every step is idempotent and bout ids are deterministic, so a pass cut part
 way is finished by the next. A card's first preparation, after the fact,
@@ -420,10 +427,31 @@ is cut while the original is certainly there.
 
 ## Measure before tuning
 
-- **The gap.** Before fixing `boutGapMinutes`, count a real card's bouts at
-  5, 15, 30 and 60 minutes per species (a small `cmd/` reading one card's
-  detections). The answer to pick is the gap past which bouts stop getting
-  fewer much faster.
+- **The gap.** `cmd/bouts` routes and bouts a `detections_export` CSV
+  exactly as the preparer would, at several gaps. Measured on the Marymoor
+  card (`OWL-20261016-SR01`, 32,460 detections) under the suggested table,
+  which routes 797 to review and accepts 13,491:
+
+  | Gap | Review bouts | Of one detection | Largest | Spot-checks (largest) | Clips to hear |
+  |---|---|---|---|---|---|
+  | 2 min | 662 | 579 | 8 | 113 | 942 |
+  | 5 min | 636 | 540 | 8 | 113 (65) | 951 |
+  | 15 min | 578 | 465 | 10 | 113 (90) | 934 |
+  | 30 min | 532 | 414 | 12 | 113 (28) | 907 |
+  | 60 min | 475 | 348 | 23 | 113 (461) | 868 |
+  | 2 h | 402 | 268 | 24 | 113 | 837 |
+
+  There is no knee: each step takes off 4–15%, and the gap hardly moves
+  what a reviewer hears (the best three clips of each bout), because what
+  goes to review is mostly scattered single detections. Great Horned Owl is
+  most of the difference (160 bouts at 15 minutes, 99 at an hour, 60 at two)
+  -- its detections are faint and spread through the day as well as the
+  night, which bouting can't fix and its floor can. The default stays at
+  15 minutes: wider buys little, and at an hour a spot-check bout of an
+  accepted species already swallows 461 detections. The lever on the queue
+  is the rules -- the owl's floor above all -- not the gap. At 15 minutes,
+  with two listeners on a review bout and one on a spot-check, the card is
+  ~1,270 bouts heard.
 - **The floor.** The default 0.5 is from the table above. Per-species floors
   come from what reviewers reject: the rules page's rejection rate is the
   measurement.
@@ -472,8 +500,9 @@ differently yet.
 
 **M2 — Bouts.**
 - Bouting and spot-checks in the preparation loop; `boutId`; the card's
-  review counts.
-- The gap measured on a real card (*Measure before tuning*).
+  review counts; the `bouts` container. A card prepared by M1 is prepared
+  again for its bouts (`review.preparation`).
+- The gap measured on a real card (*Measure before tuning*): `cmd/bouts`.
 
 **M3 — The review API.** Verdicts, resolution, copying to detections and the
 summary, blind verdicts, adding confirmed species to the rules.
@@ -497,7 +526,7 @@ the column, M3 the data); months per species; eBird import.
 | This design | Written |
 | M0: re-runs keep reviews; `accepted` read everywhere; card summaries and the landing page; the `cardSummaries` container; SCHEMA.md, DEPLOYMENT.md, ROLLBACK.md, CLAUDE.md | Built, not deployed |
 | M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Built, not deployed. The first table ships as the page's suggested one; saving it, on the page, is what turns routing on |
-| M2: bouts and spot-checks; the card's review counts; the gap measured | Not started |
+| M2: bouts and spot-checks; the card's review counts; the `bouts` container; the gap measured | Built, not deployed. Measured: the gap barely matters (*Measure before tuning*), so it stays at 15 minutes |
 | M3: the review API | Not started |
 | M4: the Review tab | Not started |
 | M5: disagreements and overrides | Not started |

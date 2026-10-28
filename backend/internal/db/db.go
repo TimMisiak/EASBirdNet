@@ -60,8 +60,8 @@ type Store interface {
 	// CreateUpload requires an id. ErrConflict if it is taken.
 	CreateUpload(ctx context.Context, u Upload) (Upload, error)
 	UpdateUpload(ctx context.Context, id string, mutate func(*Upload) error) (Upload, error)
-	// DeleteUpload removes a card for good, with its audio files, detections
-	// and summary. The card goes last, so a delete that fails part way leaves
+	// DeleteUpload removes a card for good, with its audio files, detections,
+	// bouts and summary. The card goes last, so a delete that fails part way leaves
 	// it listed to be deleted again. ErrNotFound if there is no such card;
 	// anything still stored under its id is removed all the same.
 	DeleteUpload(ctx context.Context, id string) error
@@ -110,6 +110,17 @@ type Store interface {
 	PutCardSummary(ctx context.Context, s CardSummary) error
 	// UpdateCardSummary changes a card's summary; ErrNotFound if it has none.
 	UpdateCardSummary(ctx context.Context, id string, mutate func(*CardSummary) error) (CardSummary, error)
+
+	// ListBouts returns a card's bouts in the order they were heard.
+	ListBouts(ctx context.Context, uploadID string) ([]Bout, error)
+	// CreateBout requires an id and a card. ErrConflict if the id is taken.
+	CreateBout(ctx context.Context, b Bout) (Bout, error)
+	UpdateBout(ctx context.Context, uploadID, id string, mutate func(*Bout) error) (Bout, error)
+	// DeleteBout removes a bout if check, given it as stored, returns nil;
+	// an error from check keeps it and is returned. A bout changed between
+	// the check and the delete is checked again, as an update is mutated
+	// again. ErrNotFound if there is no such bout.
+	DeleteBout(ctx context.Context, uploadID, id string, check func(Bout) error) error
 
 	// Ping says whether this backend is reachable from here. It answers the
 	// readiness probe, so it runs on a timer for as long as the server does:
@@ -180,7 +191,7 @@ type Config struct {
 	LocalPath string
 	// CosmosEndpoint is the account URI, e.g. https://acct.documents.azure.com:443/.
 	CosmosEndpoint string
-	// CosmosDatabase is the database holding the seven containers.
+	// CosmosDatabase is the database holding the eight containers.
 	CosmosDatabase string
 	// CosmosKey switches from Entra ID auth to an account key. It exists for
 	// the Cosmos DB emulator; production accounts disable key auth.
@@ -357,6 +368,32 @@ func prepareCardSummary(c *CardSummary, t time.Time) error {
 	return nil
 }
 
+func prepareBout(b *Bout, t time.Time) error {
+	if b.ID == "" || b.UploadID == "" {
+		return errors.New("db: a bout needs an id and its card's")
+	}
+	if b.DetectionIDs == nil {
+		b.DetectionIDs = []string{}
+	}
+	if b.Best == nil {
+		b.Best = []string{}
+	}
+	if b.Reviews == nil {
+		b.Reviews = []BoutVerdict{}
+	}
+	if b.Status == "" {
+		b.Status = BoutOpen
+	}
+	stamp(&b.CreatedAt, &b.UpdatedAt, t)
+	return nil
+}
+
+func sortBouts(bs []Bout) {
+	slices.SortFunc(bs, func(a, b Bout) int {
+		return cmpThen(a.FirstHeardAt.Compare(b.FirstHeardAt), strings.Compare(a.ScientificName, b.ScientificName), strings.Compare(a.ID, b.ID))
+	})
+}
+
 func stamp(created, updated *time.Time, t time.Time) {
 	if created.IsZero() {
 		*created = t
@@ -386,6 +423,10 @@ func (f *AudioFile) keep(old AudioFile, t time.Time) {
 
 func (d *Detection) keep(old Detection, t time.Time) {
 	d.ID, d.UploadID, d.CreatedAt, d.UpdatedAt = old.ID, old.UploadID, old.CreatedAt, t
+}
+
+func (b *Bout) keep(old Bout, t time.Time) {
+	b.ID, b.UploadID, b.CreatedAt, b.UpdatedAt = old.ID, old.UploadID, old.CreatedAt, t
 }
 
 func (c *CardSummary) keep(old CardSummary, t time.Time) {

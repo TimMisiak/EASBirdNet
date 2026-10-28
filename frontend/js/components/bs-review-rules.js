@@ -397,13 +397,13 @@ class ReviewRules extends BaseElement {
           <label class="label" for="bout-gap">Bout gap, minutes</label>
           <input class="field field--sunk" id="bout-gap" name="boutGapMinutes" type="number" min="1" max="240" step="1"
                  value="${d.boutGapMinutes}" data-change="setting" />
-          <p class="hint">How far apart one species' detections may be and still be heard as one. For the Review tab, which is still to come.</p>
+          <p class="hint">How long a species may go unheard and still be one bout: what a reviewer hears as one, a verdict standing for all of it.</p>
         </div>
         <div>
           <label class="label" for="spot-checks">Spot-checks per species</label>
           <input class="field field--sunk" id="spot-checks" name="spotChecksPerSpecies" type="number" min="0" max="20" step="1"
                  value="${d.spotChecksPerSpecies}" data-change="setting" />
-          <p class="hint">Bouts of each accepted species heard anyway, per card. Also for the Review tab.</p>
+          <p class="hint">Bouts of each accepted species heard anyway, per card, to check the rule.</p>
         </div>
       </div>
 

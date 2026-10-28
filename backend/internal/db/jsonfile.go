@@ -38,6 +38,8 @@ type fileData struct {
 	CardSummaries map[string]CardSummary `json:"cardSummaries"`
 	// ReviewRules is the one rules document, absent until it is first saved.
 	ReviewRules *ReviewRules `json:"reviewRules,omitempty"`
+	// Bouts is absent from a file written before them; fill makes it good.
+	Bouts map[string]Bout `json:"bouts"`
 }
 
 const fileVersion = 1
@@ -93,6 +95,9 @@ func (d *fileData) fill() {
 	}
 	if d.CardSummaries == nil {
 		d.CardSummaries = map[string]CardSummary{}
+	}
+	if d.Bouts == nil {
+		d.Bouts = map[string]Bout{}
 	}
 }
 
@@ -260,14 +265,16 @@ func (s *jsonFile) DeleteUpload(_ context.Context, id string) error {
 	upload, had := s.data.Uploads[id]
 	files := take(s.data.AudioFiles, func(f AudioFile) bool { return f.UploadID == id })
 	detections := take(s.data.Detections, func(d Detection) bool { return d.UploadID == id })
+	bouts := take(s.data.Bouts, func(b Bout) bool { return b.UploadID == id })
 	summary, hadSummary := s.data.CardSummaries[id]
 	delete(s.data.CardSummaries, id)
 	delete(s.data.Uploads, id)
-	if had || len(files) > 0 || len(detections) > 0 || hadSummary {
+	if had || len(files) > 0 || len(detections) > 0 || len(bouts) > 0 || hadSummary {
 		// One write for the lot, so the file never holds half a card.
 		if err := s.save(); err != nil {
 			maps.Copy(s.data.AudioFiles, files)
 			maps.Copy(s.data.Detections, detections)
+			maps.Copy(s.data.Bouts, bouts)
 			if hadSummary {
 				s.data.CardSummaries[id] = summary
 			}
@@ -504,6 +511,61 @@ func (s *jsonFile) UpdateCardSummary(_ context.Context, id string, mutate func(*
 		c.keep(old, now())
 		return nil
 	})
+}
+
+// --- bouts ---
+
+func (s *jsonFile) ListBouts(_ context.Context, uploadID string) ([]Bout, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bouts := list(s.data.Bouts, func(b Bout) bool { return b.UploadID == uploadID })
+	sortBouts(bouts)
+	return bouts, nil
+}
+
+func (s *jsonFile) CreateBout(_ context.Context, b Bout) (Bout, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := prepareBout(&b, now()); err != nil {
+		return Bout{}, err
+	}
+	if _, taken := s.data.Bouts[b.ID]; taken {
+		return Bout{}, ErrConflict
+	}
+	return b, put(s, s.data.Bouts, b.ID, clone(b))
+}
+
+func (s *jsonFile) UpdateBout(_ context.Context, uploadID, id string, mutate func(*Bout) error) (Bout, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b, ok := s.data.Bouts[id]; !ok || b.UploadID != uploadID {
+		return Bout{}, ErrNotFound
+	}
+	return update(s, s.data.Bouts, id, func(b *Bout, old Bout) error {
+		if err := mutate(b); err != nil {
+			return err
+		}
+		b.keep(old, now())
+		return nil
+	})
+}
+
+func (s *jsonFile) DeleteBout(_ context.Context, uploadID, id string, check func(Bout) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.data.Bouts[id]
+	if !ok || b.UploadID != uploadID {
+		return ErrNotFound
+	}
+	if err := check(clone(b)); err != nil {
+		return err
+	}
+	delete(s.data.Bouts, id)
+	if err := s.save(); err != nil {
+		s.data.Bouts[id] = b
+		return err
+	}
+	return nil
 }
 
 // --- plumbing (callers hold s.mu) ---

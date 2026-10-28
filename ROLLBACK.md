@@ -119,6 +119,14 @@ drops `route` (*Documents the old code already wrote*). Rolling forward again
 needs nothing: a card analyzed meanwhile has no `review.rulesVersion`, so the
 preparer routes it, and only its clips stay short.
 
+**Bouts.** An image from before bouts (REVIEW.md, M2) neither makes nor
+reads them: the `bouts` container stays as it was, and a detection that
+image writes (a review) loses its `boutId`. Rolling forward again, a card it
+analyzed has no `review.preparation`, so the preparer bouts it; a card whose
+detections lost `boutId` gets it back only when it is next prepared --
+the next time the rules are saved. Until verdicts are given on bouts (M3)
+nothing depends on either.
+
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).
 No image can bring them back.

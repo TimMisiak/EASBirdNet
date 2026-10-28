@@ -1116,17 +1116,22 @@ func replaced(stored, found []db.Detection) []db.Detection {
 // died after storing its detections but before marking it analyzed, and the
 // card's detections are reviewable meanwhile; storing writes whole documents,
 // so without this every review given in between would go back to unreviewed.
-// A detection a person has settled is the one with a Review.
+// A detection a person has settled is the one with a Review. One in a bout
+// keeps its bout, and the route and status its card was prepared with, which
+// only preparing the card again changes.
 func keepVerdicts(found, stored []db.Detection) {
 	settled := map[string]db.Detection{}
 	for _, d := range stored {
-		if d.Review != nil {
+		if d.Review != nil || d.BoutID != "" {
 			settled[d.ID] = d
 		}
 	}
 	for i := range found {
 		if old, ok := settled[found[i].ID]; ok {
 			found[i].ReviewStatus, found[i].Review = old.ReviewStatus, old.Review
+			if old.BoutID != "" {
+				found[i].BoutID, found[i].Route = old.BoutID, old.Route
+			}
 		}
 	}
 }

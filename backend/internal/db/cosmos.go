@@ -20,7 +20,7 @@ import (
 
 // The local backend and its tests define the behaviour this one has to match.
 
-// Containers and their partition keys. DEPLOYMENT.md lists the same seven; the
+// Containers and their partition keys. DEPLOYMENT.md lists the same eight; the
 // app never creates them (its data-plane role can't, and Terraform owns them).
 const (
 	containerUsers      = "users"         // partition key /id
@@ -30,6 +30,7 @@ const (
 	containerDetections = "detections"    // partition key /uploadId
 	containerSummaries  = "cardSummaries" // partition key /id
 	containerSettings   = "settings"      // partition key /id
+	containerBouts      = "bouts"         // partition key /uploadId
 )
 
 const (
@@ -50,7 +51,7 @@ const (
 )
 
 type cosmosStore struct {
-	users, recorders, uploads, audioFiles, detections, summaries, settings *azcosmos.ContainerClient
+	users, recorders, uploads, audioFiles, detections, summaries, settings, bouts *azcosmos.ContainerClient
 }
 
 var _ Store = (*cosmosStore)(nil)
@@ -98,6 +99,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 		containerDetections: &s.detections,
 		containerSummaries:  &s.summaries,
 		containerSettings:   &s.settings,
+		containerBouts:      &s.bouts,
 	} {
 		c, err := client.NewContainer(cfg.CosmosDatabase, name)
 		if err != nil {
@@ -113,7 +115,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 
 // Ping reads one container's metadata, which is the cheapest call that still
 // proves this replica holds a token and can reach the account. OpenCosmos
-// makes the same call against all seven at startup.
+// makes the same call against all eight at startup.
 func (s *cosmosStore) Ping(ctx context.Context) error {
 	if _, err := s.uploads.Read(ctx, nil); err != nil {
 		return fmt.Errorf("db: cosmos: %w", err)
@@ -262,7 +264,7 @@ func (s *cosmosStore) DeleteUpload(ctx context.Context, id string) error {
 	if err != nil && !missing {
 		return err
 	}
-	for _, c := range []*azcosmos.ContainerClient{s.audioFiles, s.detections} {
+	for _, c := range []*azcosmos.ContainerClient{s.audioFiles, s.detections, s.bouts} {
 		if err := deletePartition(ctx, c, id); err != nil {
 			return err
 		}
@@ -496,6 +498,57 @@ func (s *cosmosStore) UpdateCardSummary(ctx context.Context, id string, mutate f
 		c.keep(old, now())
 		return nil
 	})
+}
+
+// --- bouts ---
+
+func (s *cosmosStore) ListBouts(ctx context.Context, uploadID string) ([]Bout, error) {
+	bouts, err := queryDocs[Bout](ctx, s.bouts, uploadID, "SELECT * FROM c")
+	sortBouts(bouts)
+	return bouts, err
+}
+
+func (s *cosmosStore) CreateBout(ctx context.Context, b Bout) (Bout, error) {
+	if err := prepareBout(&b, now()); err != nil {
+		return Bout{}, err
+	}
+	return b, createDoc(ctx, s.bouts, b.UploadID, b)
+}
+
+func (s *cosmosStore) UpdateBout(ctx context.Context, uploadID, id string, mutate func(*Bout) error) (Bout, error) {
+	return updateDoc(ctx, s.bouts, uploadID, id, func(b *Bout, old Bout) error {
+		if err := mutate(b); err != nil {
+			return err
+		}
+		b.keep(old, now())
+		return nil
+	})
+}
+
+// DeleteBout is read, check, delete-if-unchanged: a 412 means the bout was
+// written in between, so it reads and checks again.
+func (s *cosmosStore) DeleteBout(ctx context.Context, uploadID, id string, check func(Bout) error) error {
+	pk := azcosmos.NewPartitionKeyString(uploadID)
+	for range maxUpdateAttempts {
+		resp, err := s.bouts.ReadItem(ctx, pk, id, nil)
+		if err != nil {
+			return cosmosErr(err)
+		}
+		var b Bout
+		if err := decodeDoc(resp.Value, &b); err != nil {
+			return err
+		}
+		if err := check(b); err != nil {
+			return err
+		}
+		etag := resp.ETag
+		_, err = s.bouts.DeleteItem(ctx, pk, id, &azcosmos.ItemOptions{IfMatchEtag: &etag})
+		if hasStatus(err, http.StatusPreconditionFailed) {
+			continue
+		}
+		return cosmosErr(err)
+	}
+	return fmt.Errorf("%w: %s kept changing underneath the delete", ErrConflict, id)
 }
 
 // --- plumbing ---

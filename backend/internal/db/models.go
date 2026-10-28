@@ -197,10 +197,21 @@ type Upload struct {
 }
 
 // UploadReview is a card's preparation for review: which version of the review
-// rules its detections were last routed by, and when.
+// rules its detections were last routed by, and when; and how far its bouts
+// have got, as of then.
 type UploadReview struct {
-	RulesVersion int       `json:"rulesVersion"`
-	PreparedAt   time.Time `json:"preparedAt"`
+	RulesVersion int `json:"rulesVersion"`
+	// Preparation is which preparation the card had, so one prepared before
+	// a step was added is prepared again: 2 since bouts; absent (0) on a
+	// card prepared by routing alone.
+	Preparation int       `json:"preparation,omitempty"`
+	PreparedAt  time.Time `json:"preparedAt"`
+	// Bouts is how many the card has, spot-checks included; Resolved how
+	// many of them are confirmed or rejected, and Disputed how many wait for
+	// a birding expert.
+	Bouts    int `json:"bouts"`
+	Resolved int `json:"resolved"`
+	Disputed int `json:"disputed"`
 }
 
 // RecorderSnapshot is the part of a Recorder an upload keeps for itself.
@@ -391,7 +402,11 @@ type Detection struct {
 	// Route is where the review rules sent it: RouteAccept, RouteReview or
 	// RouteIgnore. Absent on Perch's, which aren't routed, and on any stored
 	// before there were rules.
-	Route        string    `json:"route,omitempty"`
+	Route string `json:"route,omitempty"`
+	// BoutID is the bout it is heard in, when it is in one: routed review,
+	// or picked as a spot-check of what was accepted (Bout). The preparer
+	// sets it.
+	BoutID       string    `json:"boutId,omitempty"`
 	ReviewStatus string    `json:"reviewStatus"`
 	Review       *Review   `json:"review,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
@@ -518,6 +533,78 @@ type SpeciesTallies struct {
 	LastDetectedAt time.Time `json:"lastDetectedAt"`
 }
 
+// Kinds of bout (Bout.Kind).
+const (
+	// BoutReview is detections routed review: people decide whether they
+	// count.
+	BoutReview = "review"
+	// BoutSpotCheck is a sample of what the rules accepted, heard to check
+	// the rule.
+	BoutSpotCheck = "spotcheck"
+)
+
+// Bout statuses (Bout.Status).
+const (
+	BoutOpen      = "open"
+	BoutConfirmed = "confirmed"
+	BoutRejected  = "rejected"
+	// BoutDisputed is a bout its listeners didn't agree on, which waits for a
+	// birding expert.
+	BoutDisputed = "disputed"
+)
+
+// Bout is one species heard on one card in detections no more than the
+// review rules' gap apart: the unit people review, so that a verdict on its
+// best clips stands for every detection in it (REVIEW.md). internal/review
+// makes them when it prepares a card. Its id is BoutID.
+type Bout struct {
+	ID         string `json:"id"`
+	UploadID   string `json:"uploadId"`
+	RecorderID string `json:"recorderId"`
+	// Kind is BoutReview or BoutSpotCheck.
+	Kind           string `json:"kind"`
+	ScientificName string `json:"scientificName"`
+	CommonName     string `json:"commonName"`
+	// FirstHeardAt and LastHeardAt are when its first and last detections
+	// were heard (their DetectedAt).
+	FirstHeardAt time.Time `json:"firstHeardAt"`
+	LastHeardAt  time.Time `json:"lastHeardAt"`
+	// DetectionIDs are its detections, in the order they were heard.
+	DetectionIDs []string `json:"detectionIds"`
+	// Best are its most confident detections, most confident first: the clips
+	// a reviewer is played.
+	Best          []string `json:"best"`
+	MaxConfidence float64  `json:"maxConfidence"`
+	// Status is BoutOpen until its listeners settle it.
+	Status  string        `json:"status"`
+	Reviews []BoutVerdict `json:"reviews"`
+	// Resolution is a birding expert's final say, on a disputed bout or over
+	// its listeners'.
+	Resolution *BoutVerdict `json:"resolution,omitempty"`
+	CreatedAt  time.Time    `json:"createdAt"`
+	UpdatedAt  time.Time    `json:"updatedAt"`
+}
+
+// BoutVerdict is one person's verdict on a bout.
+type BoutVerdict struct {
+	UserID   string `json:"userId"`
+	UserName string `json:"userName"`
+	// Verdict is confirm, reject or unsure.
+	Verdict string `json:"verdict"`
+	// ScientificName and CommonName are the species confirmed, when it isn't
+	// the bout's own.
+	ScientificName string    `json:"scientificName,omitempty"`
+	CommonName     string    `json:"commonName,omitempty"`
+	At             time.Time `json:"at"`
+}
+
+// Heard says whether anyone has given a verdict on the bout. One that has is
+// kept as it is, whatever the rules say later: preparing a card again
+// neither rebuilds nor deletes it, nor routes its detections again.
+func (b Bout) Heard() bool {
+	return len(b.Reviews) > 0 || b.Resolution != nil || (b.Status != "" && b.Status != BoutOpen)
+}
+
 // --- ids ---
 
 // NewID returns a random id such as "usr_3f9a0c2b7d1e4a65".
@@ -611,6 +698,12 @@ func ModelDetectionID(model, audioFileID string, startMs int64, scientificName s
 		return DetectionID(audioFileID, startMs, scientificName)
 	}
 	return "det_" + digest(audioFileID, fmt.Sprint(startMs), scientificName, model)
+}
+
+// BoutID is derived from the card, the species and the bout's first
+// detection, so preparing a card again names the same bouts the same.
+func BoutID(uploadID, scientificName, firstDetectionID string) string {
+	return "bout_" + digest(uploadID, scientificName, firstDetectionID)
 }
 
 func digest(parts ...string) string {

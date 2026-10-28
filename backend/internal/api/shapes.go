@@ -170,7 +170,9 @@ type Detection struct {
 	Clip *Clip `json:"clip,omitempty"`
 	// Route is where the review rules sent it (db.RouteAccept, RouteReview
 	// or RouteIgnore), absent when nothing routed it.
-	Route        string  `json:"route,omitempty"`
+	Route string `json:"route,omitempty"`
+	// BoutID is the bout it is heard in, when it is in one.
+	BoutID       string  `json:"boutId,omitempty"`
 	ReviewStatus string  `json:"reviewStatus"` // one of db.ReviewStatuses
 	Review       *Review `json:"review,omitempty"`
 
@@ -326,7 +328,7 @@ func detectionOf(d db.Detection) Detection {
 	out := Detection{
 		ID: d.ID, Model: d.ModelOf(), AudioFileID: d.AudioFileID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
 		ScientificName: d.ScientificName, CommonName: d.CommonName,
-		Confidence: d.Confidence, Route: d.Route, ReviewStatus: d.ReviewStatus,
+		Confidence: d.Confidence, Route: d.Route, BoutID: d.BoutID, ReviewStatus: d.ReviewStatus,
 	}
 	if d.Clip != nil {
 		out.Clip = &Clip{StartSec: d.Clip.StartSec, EndSec: d.Clip.EndSec}

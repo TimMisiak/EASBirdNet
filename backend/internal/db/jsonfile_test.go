@@ -370,6 +370,9 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 		if err := s.PutCardSummary(ctx, CardSummary{ID: id}); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := s.CreateBout(ctx, Bout{ID: BoutID(id, "Strix varia", "det_1"), UploadID: id}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	left := func(s Store, id string) int {
 		t.Helper()
@@ -385,7 +388,11 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		n := len(files) + len(found)
+		bouts, err := s.ListBouts(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := len(files) + len(found) + len(bouts)
 		for _, c := range summaries {
 			if c.ID == id {
 				n++
@@ -405,8 +412,8 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 	if n := left(s, card.ID); n != 0 {
 		t.Errorf("%d documents left under the deleted card", n)
 	}
-	if n := left(s, other); n != 3 {
-		t.Errorf("the other card has %d documents, want its 3", n)
+	if n := left(s, other); n != 4 {
+		t.Errorf("the other card has %d documents, want its 4", n)
 	}
 	if err := s.DeleteUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("delete again: err = %v, want ErrNotFound", err)
@@ -428,7 +435,7 @@ func TestJSONFileDeleteUpload(t *testing.T) {
 	if _, err := reopened.GetUpload(ctx, card.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("deleted card is back after reopening: err = %v", err)
 	}
-	if _, err := reopened.GetUpload(ctx, other); err != nil || left(reopened, other) != 3 {
+	if _, err := reopened.GetUpload(ctx, other); err != nil || left(reopened, other) != 4 {
 		t.Errorf("the other card after reopening: err = %v, %d documents", err, left(reopened, other))
 	}
 }
@@ -620,5 +627,70 @@ func TestJSONFileUpdateDetections(t *testing.T) {
 	}
 	if d, _ := s.GetDetection(ctx, "OWL-20260914-SR03", "det_other"); d.Route != "" {
 		t.Errorf("another card's detection was changed: %+v", d)
+	}
+}
+
+func TestJSONFileBouts(t *testing.T) {
+	s, path := openTemp(t)
+	ctx := context.Background()
+	const card = "OWL-20260914-SR02"
+	at := time.Date(2026, time.September, 13, 6, 0, 0, 0, time.UTC)
+	for i, species := range []string{"Strix varia", "Bubo virginianus"} {
+		b := Bout{ID: BoutID(card, species, "det_1"), UploadID: card, ScientificName: species, FirstHeardAt: at.Add(-time.Duration(i) * time.Hour)}
+		got, err := s.CreateBout(ctx, b)
+		if err != nil || got.Status != BoutOpen || got.DetectionIDs == nil || got.Reviews == nil || got.CreatedAt.IsZero() {
+			t.Fatalf("create = %+v, %v; want it open, with empty lists, stamped", got, err)
+		}
+		if _, err := s.CreateBout(ctx, b); !errors.Is(err, ErrConflict) {
+			t.Errorf("create again: %v, want ErrConflict", err)
+		}
+	}
+	if _, err := s.CreateBout(ctx, Bout{ID: "bout_x"}); err == nil {
+		t.Error("a bout with no card was created")
+	}
+	owl, barred := BoutID(card, "Bubo virginianus", "det_1"), BoutID(card, "Strix varia", "det_1")
+	bouts, err := s.ListBouts(ctx, card)
+	if err != nil || len(bouts) != 2 || bouts[0].ID != owl {
+		t.Fatalf("list = %+v, %v; want both, the first heard first", bouts, err)
+	}
+	if other, _ := s.ListBouts(ctx, "OWL-20260914-SR03"); len(other) != 0 {
+		t.Errorf("another card lists %d bouts", len(other))
+	}
+
+	if _, err := s.UpdateBout(ctx, card, owl, func(b *Bout) error {
+		b.Reviews = append(b.Reviews, BoutVerdict{UserID: "usr_1", Verdict: "confirm"})
+		b.UploadID = "elsewhere"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateBout(ctx, "OWL-20260914-SR03", owl, func(*Bout) error { return nil }); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update under another card: %v, want ErrNotFound", err)
+	}
+
+	heard := errors.New("heard")
+	keepHeard := func(b Bout) error {
+		if b.Heard() {
+			return heard
+		}
+		return nil
+	}
+	if err := s.DeleteBout(ctx, card, owl, keepHeard); !errors.Is(err, heard) {
+		t.Errorf("deleting a heard bout: %v, want the check's error", err)
+	}
+	if err := s.DeleteBout(ctx, card, barred, keepHeard); err != nil {
+		t.Errorf("deleting an unheard bout: %v", err)
+	}
+	if err := s.DeleteBout(ctx, card, barred, keepHeard); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleting it again: %v, want ErrNotFound", err)
+	}
+
+	reopened, err := OpenJSONFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bouts, err = reopened.ListBouts(ctx, card)
+	if err != nil || len(bouts) != 1 || bouts[0].ID != owl || bouts[0].UploadID != card || len(bouts[0].Reviews) != 1 {
+		t.Errorf("after reopening: %+v, %v; want the heard bout, on its card", bouts, err)
 	}
 }

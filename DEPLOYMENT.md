@@ -92,9 +92,9 @@ can't pull its image. Its `client_id` goes into the app's `AZURE_CLIENT_ID`.
 | name | `birdsense` |
 | throughput | *unset* (serverless) |
 
-### 5. Cosmos DB containers — `azurerm_cosmosdb_sql_container` ×7
+### 5. Cosmos DB containers — `azurerm_cosmosdb_sql_container` ×8
 
-All seven share these settings: `partition_key_version = 2`, default indexing
+All eight share these settings: `partition_key_version = 2`, default indexing
 policy (consistent, all paths included), no unique keys, no default TTL, no
 throughput (serverless).
 
@@ -107,6 +107,7 @@ throughput (serverless).
 | `detections` | `["/uploadId"]`     |
 | `cardSummaries` | `["/id"]`        |
 | `settings`   | `["/id"]`           |
+| `bouts`      | `["/uploadId"]`     |
 
 **Names and partition keys can't be changed after creation** without copying
 the data to a new container. They must match
@@ -114,7 +115,7 @@ the data to a new container. They must match
 case-sensitive.
 
 The app never creates the database or containers. On startup it checks that
-all seven exist and exits if one is missing. A new container is applied in the
+all eight exist and exits if one is missing. A new container is applied in the
 same `terraform apply` as the image that first needs it: the app and the job
 both depend on the containers, so they are created first.
 
@@ -1002,7 +1003,7 @@ run a laptop against the Azure account (e.g. to test `cosmos.go`):
 
 **Emulator** (untested). The Cosmos DB Linux emulator accepts the well-known
 emulator key via `BIRDSENSE_COSMOS_KEY`. Create the `birdsense` database and the
-seven containers first (same partition keys), since the app won't. Run the
+eight containers first (same partition keys), since the app won't. Run the
 emulator over HTTP, or trust its self-signed certificate, or the Go client will
 refuse the TLS handshake.
 

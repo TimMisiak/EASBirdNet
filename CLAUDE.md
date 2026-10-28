@@ -23,6 +23,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │   ├── cmd/analyze/    CLI: BirdNET over audio files, JSON out (not the server); -bench measures
 │   ├── cmd/perf/       CLI: summarizes internal/perf's records for sizing analysis
 │   ├── cmd/perchcover/ CLI: what running Perch only around BirdNET's detections saves and misses
+│   ├── cmd/bouts/      CLI: what bouting makes of exported detections, at several gaps
 │   └── internal/
 │       ├── analysis/   The BirdNET queue: analyzes received cards, stores detections;
 │       │               and the Dispatcher that starts the job's workers
@@ -34,8 +35,8 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
-│       ├── review/     The review rules: routing detections, preparing cards, and
-│       │               each card's summary of what counts (REVIEW.md)
+│       ├── review/     The review rules: routing detections, preparing cards and
+│       │               their bouts, and each card's summary of what counts (REVIEW.md)
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
@@ -864,9 +865,14 @@ is the whole rule, and it runs in two places: the worker routes each file's
 detections as it stores them, and the web app's `Preparer` routes a whole
 card again -- once BirdNET has been over every file of it, and whenever the
 rules' `version` isn't the one on the card (`upload.review.rulesVersion`) --
-then rebuilds the card's summary, which is what puts right an adjustment a
-build missed. A detection a person has reviewed keeps their verdict through
-all of it; Undo puts a detection back where its route says. Three gotchas:
+groups what people will hear into *bouts* (one species on one card, its
+detections no more than `boutGapMinutes` apart; the `bouts` container),
+picks a few bouts of each accepted species as spot-checks, and rebuilds the
+card's summary, which is what puts right an adjustment a build missed. A
+detection a person has reviewed keeps their verdict through all of it, and
+a bout anyone has given a verdict on is never rebuilt or deleted, nor its
+detections routed again; Undo puts a detection back where its route says.
+Four gotchas:
 - Routing goes by BirdNET's label, not a correction, and matches the
   scientific name exactly as BirdNET spells it (`Corthylio calendula`, not
   `Regulus calendula`): a rule for a name BirdNET doesn't use routes nothing,
@@ -874,6 +880,10 @@ all of it; Undo puts a detection back where its route says. Three gotchas:
 - Context is cut now or never: a detection routed `review` gets a clip with
   10 s either side (`contextPadSec`), because the original is gone a month
   on. A species moved to `review` later keeps the short clips it had.
+- A card prepared before a step was added to preparing is prepared again
+  for it (`upload.review.preparation` below `review.Preparation`), so a
+  change to what preparing does bumps that constant, or cards prepared
+  under today's rules never get it.
 - No rules document means no routing at all, not "review everything": every
   detection stays `unreviewed` as before rules existed, so turning this on is
   saving a first table, and a store that lost the document routes nothing
@@ -1189,8 +1199,10 @@ where they set everyone's roles. Reviewing is being rebuilt around review
 rules and bouts (REVIEW.md, which has where it stands): once a birding expert
 saves the rules, common birds are `accepted` and count publicly, and the
 rest are routed to review or left below their floors (*Review rules route
-detections*), but there are no bouts or Review tab yet, so what is routed to
-review is still reviewed one detection at a time on its own page. Nothing moves a card from `in_review`
+detections*), and each card's review is grouped into bouts with spot-checks
+beside them; but nothing gives a verdict on a bout and there is no Review
+tab yet, so what is routed to review is still reviewed one detection at a
+time on its own page. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

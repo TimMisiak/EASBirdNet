@@ -22,6 +22,7 @@ One database, `birdsense`, with one container per entity:
 | `detections` | one species heard in one recording      | `/uploadId`   | `det_` + hash of file, start, species  |
 | `cardSummaries` | what counts on one card, by species and date | `/id` | the card reference                  |
 | `settings`   | the review rules: one document          | `/id`         | `reviewRules`                          |
+| `bouts`      | one species heard in a stretch of one card, for review | `/uploadId` | `bout_` + hash of card, species, first detection |
 
 ```mermaid
 erDiagram
@@ -31,9 +32,11 @@ erDiagram
     AUDIO_FILE ||--o{ DETECTION : "heard in"
     USER ||--o{ DETECTION : reviews
     UPLOAD ||--o| CARD_SUMMARY : "counted in"
+    UPLOAD ||--o{ BOUT : "heard in"
+    BOUT ||--|{ DETECTION : groups
 ```
 
-Audio files and detections are partitioned by upload. Their volume grows with
+Audio files, detections and bouts are partitioned by upload. Their volume grows with
 every card, and the questions asked of them ("what's on this card", "what needs
 review on this card") are per card. The other five containers are small, so
 partitioning them by `id` keeps point reads cheap and costs nothing.
@@ -160,7 +163,7 @@ would name the same card; `POST /admin/stations` refuses the second.
 | `status`         | string   | See [Upload status](#upload-status). |
 | `statusDetail?`  | string   | Short human reason shown instead of the status label, e.g. `2 unreadable`. |
 | `analysis?`      | object   | How BirdNET was run over the card; see below. |
-| `review?`        | object   | Where its preparation for review stands: `{rulesVersion, preparedAt}`, the version of the [review rules](#settings) its detections were last routed by and when. Absent until it is first prepared. Set by `internal/review`'s preparer, which routes the card again whenever this isn't the rules' version. |
+| `review?`        | object   | Where its preparation for review stands: `{rulesVersion, preparation, preparedAt, bouts, resolved, disputed}`, the version of the [review rules](#settings) its detections were last routed and bouted by; which preparation it had (`2` since bouts; absent on a card prepared by routing alone, which is prepared again); when; and as of then how many [bouts](#bouts) it has (spot-checks included), how many of them are confirmed or rejected, and how many are disputed. Absent until it is first prepared. Set by `internal/review`'s preparer, which prepares the card again whenever `rulesVersion` isn't the rules' version or `preparation` is older than its own. |
 | `startedAt`      | instant  | When the transfer (re)started. |
 | `receivedAt?`    | instant  | When the last file landed. |
 | `processedAt?`   | instant  | When BirdNET finished the card's last file (and Perch, when it runs, finished its last one too). |
@@ -349,6 +352,7 @@ overwrites rather than duplicates.
 | `confidence`     | number  | 0–1, the highest of the run's windows. BirdNET's is a sigmoid per species; Perch's is a softmax over the window's classes, so the two aren't on the same footing. |
 | `clip?`          | object  | The stretch of the recording stored for review; see below. Absent on detections stored before clips were cut. |
 | `route?`         | string  | Where the [review rules](#settings) sent it: `accept` (counted on BirdNET's word), `review` (a reviewer hears it) or `ignore` (below its species' confidence floor: kept, neither counted nor heard). Set by the analysis queue as it stores a file's detections, and again by the preparer when the rules change. Absent on Perch's, which aren't routed, and on any stored before there were rules. |
+| `boutId?`        | string  | → `bouts.id`: the [bout](#bouts) it is heard in, routed `review` or picked as a spot-check. Set by the preparer; absent on a detection in no bout. Kept, with `route` and `reviewStatus`, when its file is analyzed again. |
 | `reviewStatus`   | string  | `unreviewed` (BirdNET's word alone), `accepted` (the review rules took BirdNET's word for it, unheard; REVIEW.md), `confirmed` or `rejected`. Top-level so it can be filtered on. |
 | `review?`        | object  | The review a person gave; see below. Absent while unreviewed, and on an accepted detection nobody has listened to. |
 | `createdAt`      | instant | |
@@ -476,8 +480,8 @@ an admin or birding expert, whole, over the version it was read at.
 | `id`                    | string  | `reviewRules`. **Partition key.** |
 | `version`               | integer | 1 for the first save, one more for each after. A save names the version it was read at, and is refused (`ErrConflict`, a 409) if that isn't the one stored. A card is routed again when its `review.rulesVersion` differs. |
 | `defaults`              | object  | `{action, minConfidence}`: the rule for a species with no row. `action` is `accept` or `review`. |
-| `boutGapMinutes`        | integer | 1–240. How far apart one species' detections on a card may be and still be one bout. For the Review tab (REVIEW.md, M2); unread so far. |
-| `spotChecksPerSpecies`  | integer | 0–20. How many bouts of each accepted species on a card are heard anyway. Also for M2. |
+| `boutGapMinutes`        | integer | 1–240. How long one species may go unheard on a card -- from the end of one detection to the start of the next -- and still be one [bout](#bouts). |
+| `spotChecksPerSpecies`  | integer | 0–20. How many bouts of each accepted species on a card are heard anyway, as spot-checks. |
 | `species`               | array   | One row per species, sorted by scientific name: `{scientificName, commonName, action, minConfidence, note?, source?}`. Matched by the scientific name BirdNET labelled a detection with, not a reviewer's correction. `source` is `review` for a row added because reviewers confirmed a species the rules didn't have (M3). |
 | `updatedBy`, `updatedByName` | string | Who saved this version. |
 | `createdAt`, `updatedAt` | instant | When the first version was saved, and this one. |
@@ -505,13 +509,78 @@ an admin or birding expert, whole, over the version it was read at.
 is ready once BirdNET has been over every file on it -- `processing` (Perch may
 still be running), `in_review` or `needs_attention`, with `filesAnalyzed +
 filesFailed` at `fileCount` -- and is prepared whenever its `review.rulesVersion`
-isn't the rules' `version`: its BirdNET detections are read a page at a time,
-each is routed by the rules (`route`, and `accepted` or `unreviewed` for one
-no person has reviewed; a reviewed one keeps its verdict), those that changed
-are written back -- each read again as it is written, so a review given
-meanwhile stands -- the card's summary is built whole, and `review` is set.
+isn't the rules' `version`, or its `review.preparation` is older than the
+preparer's (a card prepared before bouts):
+1. Its bouts are read, and its BirdNET detections a page at a time. Each
+   detection not in a bout someone has heard is routed by the rules
+   (`route`, and `accepted` or `unreviewed` for one no person has reviewed;
+   a reviewed one keeps its verdict).
+2. What is routed `review` is bouted, and so is what is `accepted`, from
+   which `spotChecksPerSpecies` bouts of each species are kept as
+   spot-checks (less any of its spot-checks someone has heard). A detection
+   with a `review` of its own -- reviewed on its page, before bouts -- is in
+   no bout. New and changed bouts are written, and those no longer made are
+   deleted; a bout someone has heard is never rewritten or deleted, and one
+   heard between the read and the write stops the pass for the card, which
+   is prepared again next time.
+3. The detections whose route or bout changed are written back, each read
+   again as it is written so a review given meanwhile stands; the card's
+   summary is built whole, and `review` is set.
+
 It runs at startup, when the rules are saved, after a failure's delay, and
 every five minutes. A card being deleted is left alone.
+
+## `bouts`
+
+One species heard on one card in detections no more than the rules'
+`boutGapMinutes` apart: what a reviewer hears, so a verdict on its best clips
+stands for every detection in it (REVIEW.md). Made by the preparer (above),
+of two kinds: `review`, every detection routed `review`; and `spotcheck`, a
+few bouts of each species the rules accepted, picked by id. Verdicts are
+given on them from M3; until then every bout is `open`.
+
+| Field            | Type     | Notes |
+|------------------|----------|-------|
+| `id`             | string   | `bout_` + hash of card, species and its first detection's id, so preparing the card again names the same bouts the same. |
+| `uploadId`       | string   | → `uploads.id`. **Partition key.** |
+| `recorderId`     | string   | → `recorders.id` |
+| `kind`           | string   | `review` or `spotcheck`. |
+| `scientificName` | string   | As BirdNET labelled its detections. |
+| `commonName`     | string   | |
+| `firstHeardAt`   | instant  | Its first detection's `detectedAt`. |
+| `lastHeardAt`    | instant  | Its last detection's `detectedAt`. |
+| `detectionIds`   | string[] | → `detections.id`, in the order heard. At most 2,000; a species heard longer without a gap carries on in a second bout. |
+| `best`           | string[] | Its three most confident detections, most confident first: the clips a reviewer is played. |
+| `maxConfidence`  | number   | The highest of its detections'. |
+| `status`         | string   | `open`, `confirmed`, `rejected` or `disputed`. |
+| `reviews`        | array    | One verdict per listener: `{userId, userName, verdict, scientificName?, commonName?, at}`, `verdict` being `confirm` (of another species, when `scientificName` says so), `reject` or `unsure`. Empty until M3. |
+| `resolution?`    | object   | A birding expert's final say, in the same shape (M5). |
+| `createdAt`      | instant  | |
+| `updatedAt`      | instant  | |
+
+A bout with a verdict -- anything in `reviews`, a `resolution`, or a status
+other than `open` -- is *heard*, and is kept as it is from then on: its
+detections aren't routed or bouted again, whatever the rules say later.
+
+```json
+{
+  "id": "bout_4be0c1d27a9f83e6b5d1027c4e9a3f18",
+  "uploadId": "OWL-20261016-SR01",
+  "recorderId": "SW-01",
+  "kind": "review",
+  "scientificName": "Bubo virginianus",
+  "commonName": "Great Horned Owl",
+  "firstHeardAt": "2026-10-03T05:12:40Z",
+  "lastHeardAt": "2026-10-03T05:31:07Z",
+  "detectionIds": ["det_1f…", "det_8a…", "det_c3…", "det_e0…"],
+  "best": ["det_8a…", "det_e0…", "det_1f…"],
+  "maxConfidence": 0.71,
+  "status": "open",
+  "reviews": [],
+  "createdAt": "2026-10-16T20:04:11Z",
+  "updatedAt": "2026-10-16T20:04:11Z"
+}
+```
 
 ## Denormalized copies
 
@@ -545,12 +614,12 @@ Every read the API needs, and what it costs in Cosmos:
 | What was heard in one file (a detection's neighbours) | `ListDetections{UploadID, AudioFileID, Model}` | `detections` | single partition |
 | Public species summary | `ListCardSummaries`, beside `ListUploads` | `cardSummaries` | cross-partition: one small document per card, not its detections |
 | The review rules (the worker, once per file; the preparer; the rules page) | `GetReviewRules` | `settings` | point read |
-| Preparing a card: its BirdNET detections, then those whose route changed | `EachDetection{UploadID, Model: birdnet}`, then `UpdateDetections` | `detections` | single partition: a page at a time, then a read and a replace per changed detection |
+| Preparing a card: its bouts, its BirdNET detections, then the bouts and detections that changed | `ListBouts`, `EachDetection{UploadID, Model: birdnet}`; `CreateBout`, `UpdateBout`, `DeleteBout`; `UpdateDetections` | `bouts`, `detections` | single partition: a page at a time, then a read and a replace (or delete) per changed document |
 | What was heard lately, for the rules page | `EachDetection{Since, Until, Model: birdnet}` | `detections` | cross-partition, a page at a time (no `MaxDetectionScan`); at most 31 days, two at once with the MCP tools |
 | Building a card's summary | `EachDetection{UploadID, Model: birdnet, ReviewStatus}`, once for `accepted` and once for `confirmed` | `detections` | single partition |
 | One card's detections (Detections tab, `?card=`, linked from the card's page) | `ListDetections{UploadID, Model, Since?, ...}` | `detections` | single partition: the card bounds it, so no default window; still sorted and paged in Go, under `db.MaxDetectionScan` |
 | Every detection (Detections tab) | `ListDetections{Since, Model, ReviewStatus?, Until?, MinConfidence?}` | `detections` | cross-partition: reads every match, then sorts and pages in Go. `Since` is always set — the API defaults it to a week — so the date range is what keeps the read small, and `db.MaxDetectionScan` is what stops a wide one: past it the query is `ErrTooMany` rather than served |
-| Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `cardSummaries`, then `uploads` | single partition: a query for the ids, then a delete per document |
+| Deleting a card | `DeleteUpload` | `audioFiles`, then `detections`, then `bouts`, then `cardSummaries`, then `uploads` | single partition: a query for the ids, then a delete per document |
 
 **Query limits.** The Go SDK (`azcosmos`) runs cross-partition queries only when
 the Cosmos gateway can serve them. So cross-partition queries are limited to
@@ -762,7 +831,7 @@ What the analysis queue (`internal/analysis`) does, one file at a time, oldest
 | Before it starts | Checks BirdNET can run -- and Perch too, when `BIRDSENSE_PERCH` is on -- and keeps checking until it can. Touches no document: cards stay in `processing`, and `queue` says what it is waiting for. |
 | First file on a card | Sets `analysis` (settings, `startedAt`). |
 | Starting a file | `uploaded` (or `analyzing`, after a restart) → `analyzing`. |
-| BirdNET answers | Merges each species' consecutive windows into one detection, and routes each by the [review rules](#settings), if any are saved: `route` set, and `accepted` for one routed `accept`. `analyzer/clip.py` cuts a clip of each from the local copy -- with 10 s either side for one routed `review` -- and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.flac`. Reads the file's stored detections and upserts a `detections` document per merged detection, `unreviewed` or `accepted`, with its `clip` -- keeping `reviewStatus` and `review` from a stored one a person reviewed -- then adjusts the card's summary; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. With Perch on, the file's `perch` is set `queued`. A file BirdNET can't read is `failed`. |
+| BirdNET answers | Merges each species' consecutive windows into one detection, and routes each by the [review rules](#settings), if any are saved: `route` set, and `accepted` for one routed `accept`. `analyzer/clip.py` cuts a clip of each from the local copy -- with 10 s either side for one routed `review` -- and reads the file's duration and sample rate; each clip is stored at `clips/{uploadId}/{detectionId}.flac`. Reads the file's stored detections and upserts a `detections` document per merged detection, `unreviewed` or `accepted`, with its `clip` -- keeping `reviewStatus` and `review` from a stored one a person reviewed, and `boutId`, `route` and `reviewStatus` from one in a bout -- then adjusts the card's summary; sets the file `analyzed` with `analyzedAt`, `detectionCount`, `durationSec`, `sampleRate` and `recordedAt`; sets `analysis.model`. With Perch on, the file's `perch` is set `queued`. A file BirdNET can't read is `failed`. |
 | BirdNET or `clip.py` fails | The file goes back to `uploaded` and the queue pauses (30 s, then 60 s). The third failure on the same file fails it. |
 | Card deleted meanwhile | A document the queue reads (the upload or a file) has gone, which only deleting the card does. The queue drops the card, and deletes whatever documents it stored for it after the delete swept past. It checks the file is still there before storing clips and detections, so only a delete landing in the moment between that check and the writes can leave that file's clips in storage. |
 | Perch, with it on | After BirdNET has caught up on every card, one file queued for Perch, oldest card first, then back to BirdNET, so a new card never waits behind Perch. The same steps: `perch.status` `queued` → `analyzing`, Perch over the local copy, windows merged, clips cut, `detections` upserted with `model: perch`; then `perch` is `analyzed` with its `detectionCount`, and `analysis.perchModel` is set. A file Perch can't read, or that fails three times over, has `perch.status` `failed`; the file's own `status` stays `analyzed`, and the card doesn't need attention for it. |
@@ -783,12 +852,14 @@ by id:
   "audioFiles": { "af_5b1e...": { "...": "..." } },
   "detections": { "det_9c41...": { "...": "..." } },
   "cardSummaries": { "OWL-20260907-SR02": { "...": "..." } },
-  "reviewRules": { "id": "reviewRules", "...": "..." }
+  "reviewRules": { "id": "reviewRules", "...": "..." },
+  "bouts":      { "bout_4be0...": { "...": "..." } }
 }
 ```
 
-A file written before `cardSummaries` loads without them, and each card's is
-built the first time the landing page reads it.
+A file written before `cardSummaries` or `bouts` loads without them: a card's
+summary is built the first time the landing page reads it, and its bouts when
+it is next prepared.
 
 The file is read once at startup, held in memory and rewritten in full,
 atomically, after every change. It's fine to hand-edit it while the server
