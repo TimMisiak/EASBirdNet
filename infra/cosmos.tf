@@ -1,5 +1,5 @@
-# Documents: the roster, recorders, cards, their files, detections, and each
-# card's summary of what counts.
+# Documents: the roster, recorders, cards, their files, detections, each
+# card's summary of what counts, and settings (the review rules).
 # SCHEMA.md describes what is in them.
 
 resource "azurerm_cosmosdb_account" "this" {
@@ -57,7 +57,7 @@ resource "azurerm_cosmosdb_sql_database" "this" {
 # Names and partition keys cannot be changed after creation without copying the
 # data to a new container, and the names are case-sensitive. They must match
 # backend/internal/db/cosmos.go. The app never creates these: it checks at
-# startup that all six exist and exits if one is missing.
+# startup that all seven exist and exits if one is missing.
 locals {
   cosmos_containers = {
     users         = "/id"
@@ -66,6 +66,7 @@ locals {
     audioFiles    = "/uploadId"
     detections    = "/uploadId"
     cardSummaries = "/id" # one per card, read by the landing page (internal/review)
+    settings      = "/id" # the review rules, one document (internal/review)
   }
 }
 

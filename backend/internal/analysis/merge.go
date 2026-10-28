@@ -20,6 +20,10 @@ const (
 	// clipPadSec is how much of the recording a clip keeps either side of what
 	// was heard, so the call doesn't start on the first sample.
 	clipPadSec = 1.0
+	// contextPadSec is that for a detection the review rules send to a
+	// reviewer, who may want to hear what came before and after it. Clips
+	// are the only audio kept past a month, so it is cut now or never.
+	contextPadSec = 10.0
 	// maxClipSec is the longest clip. A dawn chorus can run for many minutes;
 	// its clip is the stretch around the most confident window.
 	maxClipSec = 30.0
@@ -66,11 +70,11 @@ func merge(found []birdnet.Detection) []heard {
 }
 
 // clipSpan is the stretch of the recording cut out for a detection: the run
-// and clipPadSec either side, or, for a run too long for that, the maxClipSec
+// and pad either side, or, for a run too long for that, the maxClipSec
 // centred on its most confident window. The end may be past the end of the
 // recording; the cut is clamped to it.
-func clipSpan(h heard) (startSec, endSec float64) {
-	startSec, endSec = h.StartSec-clipPadSec, h.EndSec+clipPadSec
+func clipSpan(h heard, pad float64) (startSec, endSec float64) {
+	startSec, endSec = h.StartSec-pad, h.EndSec+pad
 	if endSec-startSec > maxClipSec {
 		mid := (h.PeakStartSec + h.PeakEndSec) / 2
 		startSec = min(max(mid-maxClipSec/2, startSec), endSec-maxClipSec)

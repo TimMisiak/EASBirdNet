@@ -34,7 +34,8 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
-│       ├── review/     What counts, and each card's summary of it (REVIEW.md)
+│       ├── review/     The review rules: routing detections, preparing cards, and
+│       │               each card's summary of what counts (REVIEW.md)
 │       ├── storage/    Card audio and clips: a tusd data store on disk (dev) or Azure Blob Storage
 │       └── web/        serves frontend/ (cache headers, SPA fallback, security headers)
 ├── analyzer/           analyze.py, clip.py + pinned requirements.txt: BirdNET in Python
@@ -50,6 +51,8 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │   │                   eastsideaudubon.org -- replace, don't edit)
 │   │                   barred-owl.jpg: the home and sign-in banner, CC BY
 │   │                   4.0 -- its credit on both pages must stay with it
+│   ├── data/           suggested-review-rules.json: the first table the Review
+│   │                   rules page offers, drafted from two weeks at Marymoor
 │   ├── vendor/          Third-party files served as they were published, with their
 │   │                    hashes in THIRD_PARTY_NOTICES.md: libflac.js (FLAC encoder)
 │   └── js/
@@ -198,7 +201,9 @@ GET    /api/v1/detections/export      the same, every row rather than a page: a 
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
-PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo
+PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo (back to what the rules say)
+GET    PUT /api/v1/review/rules           the review rules; save them over the version read (admin or birding expert)
+GET    /api/v1/review/species?days=       what was heard lately, species by species, for the rules page
 GET    /api/v1/admin/uploads              every card, admin only
 GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it (202: it goes in the background)
 GET    POST /api/v1/admin/people          the roster
@@ -300,12 +305,14 @@ yields ~2,300 detections a day, and a year of the ones that count is more than
 one read may hold (`db.MaxDetectionScan`), so the page reads a summary per
 card instead: `cardSummaries`, the card's counted detections by species and
 Pacific date (SCHEMA.md). `internal/review` keeps them: built whole from the
-card's detections the first time the page meets a card without one, and
-adjusted by every write that changes what counts -- a review, today. Counting
-by date makes the window the last `days` dates, not the last `days`×24 hours.
-Gotcha: a change landing while its card's summary is being built whole can be
-missed, since the build stores what it read; the next whole build fixes it,
-and REVIEW.md's preparation loop is what will rebuild them.
+card's detections the first time the page meets a card without one and each
+time the card is prepared for review, and adjusted by every write that
+changes what counts -- a review, and the worker storing a file's detections.
+Counting by date makes the window the last `days` dates, not the last
+`days`×24 hours. Gotcha: a change landing while its card's summary is being
+built whole can be missed, since the build stores what it read; the next
+whole build -- the next time the rules change, or the preparer runs over the
+card for another reason -- fixes it.
 On top of that, `overviewCache` holds each window's answer for the minute it
 is stamped with, and admits one scan at a time, so an anonymous flood costs
 one scan a minute per window size rather than one scan each; the response
@@ -321,7 +328,8 @@ summary per recorder-year, kept the same way.
 
 **Routes are paths, not hashes.** `/`, `/signin`, the tabs everyone signed in
 has (`/app/upload` and its steps, such as `/app/upload/check`; `/app/uploads`;
-`/app/detections`), the three a coordinator has as well (`/admin/uploads`,
+`/app/detections`), a birding expert's `/app/review-rules`, the three a
+coordinator has as well (`/admin/uploads`,
 `/admin/recorders`, `/admin/people`), a card (`/admin/uploads/{reference}`) and
 a detection opened from it
 (`/admin/uploads/{reference}/detections/{id}`), and one opened from the
@@ -637,8 +645,8 @@ images and update the app but not touch state; that is the point of
 **One set of tabs, each for a role.** Someone on the roster has an access
 level, `role` -- `admin` or `volunteer` -- and any number of volunteer
 `roles`: `field_volunteer` (Upload and My uploads), `reviewer` (Detections, and
-the Review tab to come) and `birding_expert` (a reviewer, with expert tools in
-that tab). An admin may do everything whatever their roles say, and keeps the
+the Review tab to come) and `birding_expert` (a reviewer, who also sets the
+review rules, with expert tools in the Review tab to come). An admin may do everything whatever their roles say, and keeps the
 roles for if they stop being one; a birding expert is a reviewer whether or not
 `reviewer` is also stored. `db.User.Has` is that whole rule, and `requireRole`
 asks it of every route; `js/roles.js` is the same rule in the browser, so a tab
@@ -843,6 +851,36 @@ Terraform refuses it on less than 4Gi (DEPLOYMENT.md, *Perch*; ANALYSIS.md,
 *Revisit when:* Perch's detections turn out to be worth publishing. Then the
 public page needs a rule for a bird both models heard -- one detection per
 species per window, say -- not a second count.
+
+**Review rules route detections.** A recorder hears ~2,300 detections a day,
+most of them crows, geese and sparrows that are certainly there, so nobody
+can listen to all of them (REVIEW.md has the numbers). The review rules --
+one document in `settings`, edited whole on the Review rules page by an
+admin or birding expert -- say per species whether BirdNET's word is taken
+(`accept`) or a person hears it (`review`), each above a confidence floor of
+its own, below which a detection is neither counted nor heard (`ignore`); a
+species with no row follows the default. `internal/review`'s `Table.Apply`
+is the whole rule, and it runs in two places: the worker routes each file's
+detections as it stores them, and the web app's `Preparer` routes a whole
+card again -- once BirdNET has been over every file of it, and whenever the
+rules' `version` isn't the one on the card (`upload.review.rulesVersion`) --
+then rebuilds the card's summary, which is what puts right an adjustment a
+build missed. A detection a person has reviewed keeps their verdict through
+all of it; Undo puts a detection back where its route says. Three gotchas:
+- Routing goes by BirdNET's label, not a correction, and matches the
+  scientific name exactly as BirdNET spells it (`Corthylio calendula`, not
+  `Regulus calendula`): a rule for a name BirdNET doesn't use routes nothing,
+  which the rules page shows as a rule with nothing heard beside it.
+- Context is cut now or never: a detection routed `review` gets a clip with
+  10 s either side (`contextPadSec`), because the original is gone a month
+  on. A species moved to `review` later keeps the short clips it had.
+- No rules document means no routing at all, not "review everything": every
+  detection stays `unreviewed` as before rules existed, so turning this on is
+  saving a first table, and a store that lost the document routes nothing
+  rather than flooding review.
+*Revisit when:* a species' expectedness has to vary by season (a row gains the
+months its action applies in) or by site, or the table should come from eBird
+rather than by hand.
 
 **A stuck card says why.** Whether BirdNET can run at all is the queue's own
 business, not the server's: `Queue.Run` won't start until `Check` passes and
@@ -1140,16 +1178,19 @@ change anything. claude.ai's connector hasn't been tried against a deployment
 yet -- the flow is tested end to end with the MCP SDK's own client.
 Field volunteers upload and reviewers review (*One set of tabs, each for a
 role*); the Review tab, and the birding expert's tools in it, aren't built
-yet, so for now a birding expert has exactly what a reviewer has. Everyone
+yet, so for now a birding expert has what a reviewer has, and the Review
+rules tab. Everyone
 works in the same shell (`<bs-app-page>`), seeing the tabs their roles give
 them: Upload, holding the card upload's four steps; My uploads, their own
-cards, where an unfinished one is resumed; and Detections. A coordinator gets
+cards, where an unfinished one is resumed; Detections; and Review rules, for a
+birding expert. A coordinator gets
 all of those and three more after them -- All uploads, Recorders and People,
 where they set everyone's roles. Reviewing is being rebuilt around review
-rules and bouts (REVIEW.md, which has where it stands): a detection can
-already be `accepted` and counts publicly if so, and the landing page reads
-card summaries, but nothing sets `accepted` yet, so every detection is still
-reviewed one at a time on its own page. Nothing moves a card from `in_review`
+rules and bouts (REVIEW.md, which has where it stands): once a birding expert
+saves the rules, common birds are `accepted` and count publicly, and the
+rest are routed to review or left below their floors (*Review rules route
+detections*), but there are no bouts or Review tab yet, so what is routed to
+review is still reviewed one detection at a time on its own page. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

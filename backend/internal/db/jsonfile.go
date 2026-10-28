@@ -36,6 +36,8 @@ type fileData struct {
 	// CardSummaries is absent from a file written before them, which fill
 	// makes good: a card with no summary has one built when it is read.
 	CardSummaries map[string]CardSummary `json:"cardSummaries"`
+	// ReviewRules is the one rules document, absent until it is first saved.
+	ReviewRules *ReviewRules `json:"reviewRules,omitempty"`
 }
 
 const fileVersion = 1
@@ -416,6 +418,56 @@ func (s *jsonFile) UpdateDetection(_ context.Context, uploadID, id string, mutat
 		d.keep(old, now())
 		return nil
 	})
+}
+
+func (s *jsonFile) UpdateDetections(_ context.Context, uploadID string, ids []string, mutate func(*Detection) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := now()
+	batch := make(map[string]Detection, len(ids))
+	for _, id := range ids {
+		old, ok := s.data.Detections[id]
+		if !ok || old.UploadID != uploadID {
+			continue
+		}
+		d := clone(old)
+		if err := mutate(&d); err != nil {
+			return err
+		}
+		d.keep(old, t)
+		batch[id] = d
+	}
+	// One write for the lot: a card's worth of detections, written one at a
+	// time, would rewrite the whole file thousands of times.
+	return putAll(s, s.data.Detections, batch)
+}
+
+// --- review rules ---
+
+func (s *jsonFile) GetReviewRules(_ context.Context) (ReviewRules, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.ReviewRules == nil {
+		return ReviewRules{}, ErrNotFound
+	}
+	return clone(*s.data.ReviewRules), nil
+}
+
+func (s *jsonFile) SaveReviewRules(_ context.Context, r ReviewRules) (ReviewRules, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next, err := nextRules(r, s.data.ReviewRules, now())
+	if err != nil {
+		return ReviewRules{}, err
+	}
+	old := s.data.ReviewRules
+	stored := clone(next)
+	s.data.ReviewRules = &stored
+	if err := s.save(); err != nil {
+		s.data.ReviewRules = old
+		return ReviewRules{}, err
+	}
+	return next, nil
 }
 
 // --- card summaries ---

@@ -51,8 +51,10 @@ type ProgramStats struct {
 	Recorders int `json:"recorders"`
 	// Recordings is how many files have come in off cards whose recording
 	// began this year.
-	Recordings          int `json:"recordings"`
-	ConfirmedDetections int `json:"confirmedDetections"`
+	Recordings int `json:"recordings"`
+	// Detections is how many were heard this year and count: confirmed by
+	// reviewers, or accepted by the review rules.
+	Detections int `json:"detections"`
 }
 
 // QueueStatus is where BirdNET analysis stands on this server: not a stored
@@ -165,8 +167,11 @@ type Detection struct {
 	CommonName     string    `json:"commonName"`
 	Confidence     float64   `json:"confidence"`
 	// Clip is the stretch of the file that can be played, when one was cut.
-	Clip         *Clip   `json:"clip,omitempty"`
-	ReviewStatus string  `json:"reviewStatus"` // db.ReviewUnreviewed, db.ReviewConfirmed or db.ReviewRejected
+	Clip *Clip `json:"clip,omitempty"`
+	// Route is where the review rules sent it (db.RouteAccept, RouteReview
+	// or RouteIgnore), absent when nothing routed it.
+	Route        string  `json:"route,omitempty"`
+	ReviewStatus string  `json:"reviewStatus"` // one of db.ReviewStatuses
 	Review       *Review `json:"review,omitempty"`
 
 	// Model is which model heard it: db.ModelBirdNET or db.ModelPerch.
@@ -321,7 +326,7 @@ func detectionOf(d db.Detection) Detection {
 	out := Detection{
 		ID: d.ID, Model: d.ModelOf(), AudioFileID: d.AudioFileID, StartSec: d.StartSec, EndSec: d.EndSec, DetectedAt: d.DetectedAt,
 		ScientificName: d.ScientificName, CommonName: d.CommonName,
-		Confidence: d.Confidence, ReviewStatus: d.ReviewStatus,
+		Confidence: d.Confidence, Route: d.Route, ReviewStatus: d.ReviewStatus,
 	}
 	if d.Clip != nil {
 		out.Clip = &Clip{StartSec: d.Clip.StartSec, EndSec: d.Clip.EndSec}

@@ -3,7 +3,8 @@ import { tables, typography } from "../shared-styles.js";
 import { count, dateAtTime } from "../format.js";
 
 /**
- * <bs-species-table> lists what has been confirmed, one row per species. Set
+ * <bs-species-table> lists what has been heard and counted -- confirmed by
+ * reviewers, or accepted by the review rules -- one row per species. Set
  * the `species` property with the array from the API.
  *
  * At narrow widths the table restacks into one line per species rather than
@@ -70,7 +71,7 @@ class SpeciesTable extends BaseElement {
             ${
               this.#species.length
                 ? this.#species.map(row).join("")
-                : `<tr><td colspan="5" class="empty">Nothing confirmed in these days yet.</td></tr>`
+                : `<tr><td colspan="5" class="empty">Nothing heard in these days yet.</td></tr>`
             }
           </tbody>
         </table>

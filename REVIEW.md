@@ -237,10 +237,14 @@ buys from volunteers who are trying.
 
 ## Preparing a card
 
-A background loop in the web app -- the Deleter's shape (`internal/deletion`):
-woken when a card's BirdNET analysis finishes and when the rules are saved,
-with a backstop pass every five minutes and a growing delay after a failed
-one. It prepares a card when:
+A background loop in the web app -- the Deleter's shape (`internal/deletion`),
+`review.Preparer`: it runs at startup, is woken when the rules are saved, and
+otherwise looks every five minutes, with a growing delay after a failed pass.
+Nothing wakes it when a card's BirdNET analysis finishes -- that happens in
+the analysis job, another process -- so a new card waits up to five minutes
+for its preparation; its detections were routed as they were stored, so what
+waits is only the summary's rebuild (and, from M2, its bouts). It prepares a
+card when:
 
 - BirdNET is done with every file (`filesAnalyzed + filesFailed ==
   fileCount`) -- Perch can still be running; a card waiting for Perch is
@@ -330,6 +334,7 @@ server instructions (`mcp.go`) describe it.
 ```
 GET  /api/v1/review/rules                         the rules (a reviewer)
 PUT  /api/v1/review/rules                         save them, with the version read (an admin or birding expert; 409 on a stale version)
+GET  /api/v1/review/species?days=                 what was heard lately, species by species in confidence bands (a reviewer)
 GET  /api/v1/review/cards                         cards with bouts, and their progress
 GET  /api/v1/review/cards/{ref}/bouts             the card's bouts, the caller's verdicts on them, and what is left for them
 GET  /api/v1/review/cards/{ref}/bouts/{id}        one bout, with its detections; others' verdicts once the caller has given one
@@ -364,10 +369,14 @@ that doesn't carry it yet.
 - **Disagreements** (`/app/disagreements`), for a birding expert: disputed
   bouts, everyone's verdicts, and the final say.
 - **Review rules** (`/app/review-rules`), for an admin or birding expert:
-  a row per species with its action and floor, and beside each the
-  program's own detections of it over the last four weeks -- count, mean
-  confidence, and the spot-check rejection rate once there is one -- so the
-  choice is made against the data. JSON import and export.
+  every species heard in the last four weeks and every species with a rule,
+  in one table, each with its action and floor, and beside it what those
+  four weeks come to under the rule as drafted -- counted, to review, below
+  the floor -- and how many reviewers confirmed and rejected; the totals of
+  all of them sit above the table, so a change shows its effect before it is
+  saved. The spot-check rejection rate joins them once there is one (M3).
+  JSON import and export, and with no rules yet, the suggested table
+  (`frontend/data/suggested-review-rules.json`) to start from.
 
 `<bs-app-page>`'s tab table gets Review (for a reviewer); Disagreements and
 Review rules sit under it for those who have them. A detection's own page
@@ -487,7 +496,7 @@ the column, M3 the data); months per species; eBird import.
 |---|---|
 | This design | Written |
 | M0: re-runs keep reviews; `accepted` read everywhere; card summaries and the landing page; the `cardSummaries` container; SCHEMA.md, DEPLOYMENT.md, ROLLBACK.md, CLAUDE.md | Built, not deployed |
-| M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Not started |
+| M1: `internal/review`; routing and context clips in the worker; the preparation loop (routing); rules API and page; the first table | Built, not deployed. The first table ships as the page's suggested one; saving it, on the page, is what turns routing on |
 | M2: bouts and spot-checks; the card's review counts; the gap measured | Not started |
 | M3: the review API | Not started |
 | M4: the Review tab | Not started |

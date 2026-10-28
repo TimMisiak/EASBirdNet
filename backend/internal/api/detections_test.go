@@ -452,8 +452,8 @@ func TestPerchDetectionsAreListedApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.ConfirmedDetections != before.ConfirmedDetections {
-		t.Errorf("confirmed on the public page went %d -> %d; Perch's shouldn't count", before.ConfirmedDetections, after.ConfirmedDetections)
+	if after.Detections != before.Detections {
+		t.Errorf("confirmed on the public page went %d -> %d; Perch's shouldn't count", before.Detections, after.Detections)
 	}
 }
 
@@ -517,7 +517,7 @@ func TestACardBeingDeletedIsNotCounted(t *testing.T) {
 	overview := decodeInto[struct {
 		Program ProgramStats `json:"program"`
 	}](t, rec)
-	if want := len(confirmed) - onCard(confirmed); overview.Program.ConfirmedDetections != want {
-		t.Errorf("confirmed detections = %d, want %d", overview.Program.ConfirmedDetections, want)
+	if want := len(confirmed) - onCard(confirmed); overview.Program.Detections != want {
+		t.Errorf("confirmed detections = %d, want %d", overview.Program.Detections, want)
 	}
 }

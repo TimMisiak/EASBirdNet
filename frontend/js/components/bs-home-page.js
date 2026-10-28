@@ -26,12 +26,12 @@ const STEPS = [
   {
     n: "03",
     title: "BirdNET listens back",
-    body: "The model scans every hour of audio and flags anything that might be an owl.",
+    body: "The model scans every hour of audio and names the birds it hears.",
   },
   {
     n: "04",
-    title: "People confirm",
-    body: "Trained volunteers listen to the candidates. Only what they confirm reaches this page.",
+    title: "People listen",
+    body: "Trained volunteers listen to the owls and anything unusual, and only what they confirm reaches this page. Birds common here are counted on BirdNET's word.",
   },
 ];
 
@@ -189,13 +189,13 @@ class HomePage extends BaseElement {
             <h1>We leave recorders in the woods and listen for owls.</h1>
             <p>
               Volunteers carry SD cards home from five stations across the Eastside. Every
-              hour of audio runs through BirdNET, and trained volunteers confirm what the
-              model heard before it appears here.
+              hour of audio runs through BirdNET, and trained volunteers listen to the owls
+              and anything unusual before they appear here.
             </p>
             <div class="figures">
               ${figure(program.recorders, "recorders in the field")}
               ${figure(program.recordings, "recordings this year")}
-              ${figure(program.confirmedDetections, "confirmed detections this year")}
+              ${figure(program.detections, "detections this year")}
             </div>
           </div>
           <p class="credit">
@@ -209,7 +209,7 @@ class HomePage extends BaseElement {
 
       <section id="detections" tabindex="-1">
         <div class="section-head">
-          <h2>Confirmed in the last ${data?.windowDays ?? 7} days</h2>
+          <h2>Heard in the last ${data?.windowDays ?? 7} days</h2>
           ${data ? `<div class="updated">updated ${escapeHTML(stamp(data.updatedAt))}</div>` : ""}
         </div>
         ${
@@ -219,8 +219,9 @@ class HomePage extends BaseElement {
               ? `<p class="loading">Couldn't load the detections: ${escapeHTML(error.message)}</p>`
               : `<bs-species-table></bs-species-table>
                  <p class="caveat">
-                   Every detection on this page has been listened to and confirmed by a trained
-                   volunteer. BirdNET candidates that haven't been reviewed yet are not shown.
+                   Owls, and anything unusual, appear here once a trained volunteer has listened and
+                   confirmed them. Birds common here are counted on BirdNET's word. BirdNET's other
+                   candidates are not shown.
                  </p>`
         }
       </section>

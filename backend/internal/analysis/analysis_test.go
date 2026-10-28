@@ -18,6 +18,7 @@ import (
 
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -484,6 +485,62 @@ func TestAnalyzingAFileAgainKeepsItsReviews(t *testing.T) {
 	}
 }
 
+// With review rules saved, BirdNET's detections are routed as they are
+// stored: a common bird accepted, an owl sent to a reviewer with the recording
+// either side of it, and something unexpected and faint left alone.
+func TestTheWorkerRoutesWhatItStores(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	f.bird.answer = func(string) (birdnet.File, error) {
+		return birdnet.File{Detections: []birdnet.Detection{
+			{StartSec: 732, EndSec: 735, ScientificName: "Corvus brachyrhynchos", CommonName: "American Crow", Confidence: 0.9},
+			{StartSec: 732, EndSec: 735, ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl", Confidence: 0.3},
+			{StartSec: 900, EndSec: 903, ScientificName: "Poecile gambeli", CommonName: "Mountain Chickadee", Confidence: 0.3},
+		}}, nil
+	}
+	if _, err := f.store.SaveReviewRules(ctx, db.ReviewRules{
+		Defaults:       db.RuleAction{Action: db.RouteReview, MinConfidence: 0.5},
+		BoutGapMinutes: 15, SpotChecksPerSpecies: 3,
+		Species: []db.SpeciesRule{
+			{ScientificName: "Corvus brachyrhynchos", CommonName: "American Crow", RuleAction: db.RuleAction{Action: db.RouteAccept, MinConfidence: 0.5}},
+			{ScientificName: "Bubo virginianus", CommonName: "Great Horned Owl", RuleAction: db.RuleAction{Action: db.RouteReview, MinConfidence: 0.25}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.card(db.StatusProcessing, owlFile)
+	// The card has a summary, so what the worker stores is counted in it.
+	if _, err := review.Build(ctx, f.store, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.queue.drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	dets, err := f.store.ListDetections(ctx, db.DetectionFilter{UploadID: ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range dets {
+		got = append(got, fmt.Sprintf("%s: %s, %s, clip %g-%g", d.CommonName, d.Route, d.ReviewStatus, d.Clip.StartSec, d.Clip.EndSec))
+	}
+	want := []string{
+		"American Crow: accept, accepted, clip 731-736",
+		"Great Horned Owl: review, unreviewed, clip 722-745",
+		"Mountain Chickadee: ignore, unreviewed, clip 899-904",
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("detections:\n got  %q\n want %q", got, want)
+	}
+
+	summaries, err := f.store.ListCardSummaries(ctx)
+	if err != nil || len(summaries) != 1 || summaries[0].Detections != 1 || summaries[0].Species[0].CommonName != "American Crow" {
+		t.Errorf("summaries = %+v (%v); want the card's, counting the accepted crow", summaries, err)
+	}
+}
+
 func TestClipSpan(t *testing.T) {
 	run := func(start, end, peak float64) heard {
 		return heard{Detection: birdnet.Detection{StartSec: start, EndSec: end}, PeakStartSec: peak, PeakEndSec: peak + 3}
@@ -491,16 +548,20 @@ func TestClipSpan(t *testing.T) {
 	cases := []struct {
 		name       string
 		run        heard
+		pad        float64
 		start, end float64
 	}{
-		{"one window, a second either side", run(732, 735, 732), 731, 736},
-		{"at the start of the file", run(0, 3, 0), 0, 4},
-		{"a long run is cut around its peak", run(0, 300, 150), 136.5, 166.5},
-		{"a peak near the start of a long run", run(60, 300, 60), 59, 89},
-		{"a peak at the end of a long run", run(0, 300, 297), 271, 301},
+		{"one window, a second either side", run(732, 735, 732), clipPadSec, 731, 736},
+		{"at the start of the file", run(0, 3, 0), clipPadSec, 0, 4},
+		{"a long run is cut around its peak", run(0, 300, 150), clipPadSec, 136.5, 166.5},
+		{"a peak near the start of a long run", run(60, 300, 60), clipPadSec, 59, 89},
+		{"a peak at the end of a long run", run(0, 300, 297), clipPadSec, 271, 301},
+		// What a reviewer will hear comes with ten seconds either side.
+		{"one window, for review", run(732, 735, 732), contextPadSec, 722, 745},
+		{"a run whose context is too long is cut around its peak", run(100, 115, 106), contextPadSec, 92.5, 122.5},
 	}
 	for _, c := range cases {
-		if start, end := clipSpan(c.run); start != c.start || end != c.end {
+		if start, end := clipSpan(c.run, c.pad); start != c.start || end != c.end {
 			t.Errorf("%s: clip %g-%g, want %g-%g", c.name, start, end, c.start, c.end)
 		}
 	}

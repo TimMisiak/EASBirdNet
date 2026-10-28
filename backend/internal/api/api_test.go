@@ -381,7 +381,7 @@ func TestPublicOverview(t *testing.T) {
 	// night for 14 + 14 + 3 nights, the card begun last December not
 	// counted; four confirmed detections this year, the rejected and
 	// unreviewed ones not counted.
-	if want := (ProgramStats{Recorders: 3, Recordings: 744, ConfirmedDetections: 4}); body.Program != want {
+	if want := (ProgramStats{Recorders: 3, Recordings: 744, Detections: 4}); body.Program != want {
 		t.Errorf("program = %+v, want %+v", body.Program, want)
 	}
 	// The corrected Great Horned Owl counts as the Barred Owl it was confirmed
@@ -443,11 +443,11 @@ func TestTheLandingPageFollowsAReview(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if program.ConfirmedDetections != before.ConfirmedDetections+step.more ||
+		if program.Detections != before.Detections+step.more ||
 			count(after, d.ScientificName) != count(species, d.ScientificName)+step.more {
 			t.Errorf("after %s: %d counted, %d of %s; want %d and %d", step.status,
-				program.ConfirmedDetections, count(after, d.ScientificName), d.CommonName,
-				before.ConfirmedDetections+step.more, count(species, d.ScientificName)+step.more)
+				program.Detections, count(after, d.ScientificName), d.CommonName,
+				before.Detections+step.more, count(species, d.ScientificName)+step.more)
 		}
 	}
 }

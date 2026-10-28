@@ -27,6 +27,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/web"
 )
@@ -171,6 +172,17 @@ func main() {
 		deleter.Run(deleteCtx)
 	}()
 
+	// Preparing cards for review: routing their detections by the review
+	// rules once BirdNET has been over them, and again when the rules change.
+	// Here for the same reason as the deleter.
+	preparer := review.NewPreparer(store, log)
+	prepareCtx, stopPreparing := context.WithCancel(context.Background())
+	prepareDone := make(chan struct{})
+	go func() {
+		defer close(prepareDone)
+		preparer.Run(prepareCtx)
+	}()
+
 	// Sign-in. Reaching the provider is a network call, so a provider that is
 	// unreachable now is retried when someone signs in rather than stopping
 	// the server -- the same call BirdNET's check makes above.
@@ -193,7 +205,7 @@ func main() {
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: requestLogger(log, web.SecurityHeaders(
-			newMux(cfg, store, files, analysisAPI, deleter, auth, log),
+			newMux(cfg, store, files, analysisAPI, deleter, preparer, auth, log),
 			// Dev is http://localhost, where HSTS is ignored anyway.
 			web.SecurityOptions{StaticDir: cfg.StaticDir, HTTPS: !cfg.Dev, Log: log},
 		)),
@@ -223,6 +235,9 @@ func main() {
 	// A card being deleted is left in deleting; the next start finishes it.
 	stopDeleting()
 	<-deleteDone
+	// A card part way through being prepared is prepared again next start.
+	stopPreparing()
+	<-prepareDone
 	if err := store.Close(); err != nil {
 		log.Error("closing the database", "err", err)
 	}
@@ -264,10 +279,10 @@ func shutdownHTTP(srv *http.Server, grace time.Duration, log *slog.Logger) error
 // newMux wires the two route owners together: the API claims /api/, the
 // frontend takes everything else. Registration order doesn't matter, but the
 // patterns do -- see web.Register.
-func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, deleter api.Deleter, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
+func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, deleter api.Deleter, preparer api.Preparer, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Options{
-		Store: store, Files: files, Queue: queue, Deleter: deleter, Log: log,
+		Store: store, Files: files, Queue: queue, Deleter: deleter, Preparer: preparer, Log: log,
 		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
 		PublicURL: cfg.Auth.PublicURL,
 	})

@@ -1,7 +1,7 @@
 import { BaseElement } from "./base-element.js";
 import { navigate, onNavigate, path } from "../router.js";
 import * as session from "../session.js";
-import { ADMIN, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
+import { ADMIN, BIRDING_EXPERT, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
 import "./bs-site-header.js";
 import "./bs-site-footer.js";
 import "./bs-app-header.js";
@@ -37,6 +37,7 @@ const ROUTES = [
   { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detections" },
   // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
   { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detection" },
+  { path: "/app/review-rules", tag: "bs-app-page", chrome: "app", auth: true, role: BIRDING_EXPERT, title: "Review rules" },
   { path: "/admin", redirect: "/admin/uploads" },
   { path: "/admin/uploads", tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "All uploads" },
   // One card: /admin/uploads/OWL-20260914-SR03.

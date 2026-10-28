@@ -46,7 +46,10 @@ type Options struct {
 	// Deleter is told when a card has been marked for deletion, so it can
 	// start on it (internal/deletion).
 	Deleter Deleter
-	Log     *slog.Logger
+	// Preparer is told when the review rules change, so it can route the
+	// cards in review by them again (internal/review).
+	Preparer Preparer
+	Log      *slog.Logger
 	// Dev turns on the development-only routes -- the roster the sign-in page
 	// lets you pick an account from, and the sign-in that goes with it.
 	Dev bool
@@ -66,7 +69,7 @@ type Options struct {
 // Register mounts the API routes on mux.
 func Register(mux *http.ServeMux, o Options) {
 	h := &handlers{
-		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, log: o.Log, dev: o.Dev,
+		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, preparer: o.Preparer, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
 		retention: o.Retention, now: time.Now,
 	}
@@ -87,6 +90,12 @@ type Queue interface {
 // Deleter removes cards marked for deletion (internal/deletion). A marked
 // card is work by its status already; Wake only says to look now.
 type Deleter interface {
+	Wake()
+}
+
+// Preparer readies cards for review by the review rules (internal/review). A
+// card is work by its own state already; Wake only says to look now.
+type Preparer interface {
 	Wake()
 }
 
@@ -143,6 +152,12 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", review(h.getDetection))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", review(h.getClip))
 	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", review(h.reviewDetection))
+
+	// The review rules: a reviewer can read them, and what has been heard
+	// lately beside them; an admin or birding expert sets them (rules.go).
+	mux.HandleFunc("GET /api/v1/review/rules", review(h.getReviewRules))
+	mux.HandleFunc("GET /api/v1/review/species", review(h.speciesHeard))
+	mux.HandleFunc("PUT /api/v1/review/rules", h.requireRole(db.RoleBirdingExpert, h.saveReviewRules))
 
 	// Admin.
 	admin := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {
@@ -205,7 +220,10 @@ type handlers struct {
 	// deleter hears about cards marked for deletion. Nil leaves them marked
 	// until a deleter's backstop finds them.
 	deleter Deleter
-	log     *slog.Logger
+	// preparer hears that the review rules changed. Nil leaves the cards to
+	// its backstop.
+	preparer Preparer
+	log      *slog.Logger
 	// dev is set for local development; see Register.
 	dev bool
 	// auth is OIDC sign-in, or nil when none is configured.
@@ -1157,7 +1175,11 @@ func (h *handlers) reviewDetection(w http.ResponseWriter, r *http.Request, me db
 	d, err := h.store.UpdateDetection(r.Context(), ref, r.PathValue("id"), func(d *db.Detection) error {
 		before = *d
 		d.ReviewStatus, d.Review = body.Status, nil
-		if body.Status != db.ReviewUnreviewed {
+		// Undoing a verdict leaves the detection where the review rules
+		// put it: accepted, for a species they accept.
+		if body.Status == db.ReviewUnreviewed {
+			d.ReviewStatus = review.StatusOf(d.Route)
+		} else {
 			d.Review = &db.Review{UserID: me.ID, UserName: me.Name, At: at}
 		}
 		return nil

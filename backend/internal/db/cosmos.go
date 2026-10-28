@@ -20,7 +20,7 @@ import (
 
 // The local backend and its tests define the behaviour this one has to match.
 
-// Containers and their partition keys. DEPLOYMENT.md lists the same six; the
+// Containers and their partition keys. DEPLOYMENT.md lists the same seven; the
 // app never creates them (its data-plane role can't, and Terraform owns them).
 const (
 	containerUsers      = "users"         // partition key /id
@@ -29,6 +29,7 @@ const (
 	containerAudioFiles = "audioFiles"    // partition key /uploadId
 	containerDetections = "detections"    // partition key /uploadId
 	containerSummaries  = "cardSummaries" // partition key /id
+	containerSettings   = "settings"      // partition key /id
 )
 
 const (
@@ -49,7 +50,7 @@ const (
 )
 
 type cosmosStore struct {
-	users, recorders, uploads, audioFiles, detections, summaries *azcosmos.ContainerClient
+	users, recorders, uploads, audioFiles, detections, summaries, settings *azcosmos.ContainerClient
 }
 
 var _ Store = (*cosmosStore)(nil)
@@ -96,6 +97,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 		containerAudioFiles: &s.audioFiles,
 		containerDetections: &s.detections,
 		containerSummaries:  &s.summaries,
+		containerSettings:   &s.settings,
 	} {
 		c, err := client.NewContainer(cfg.CosmosDatabase, name)
 		if err != nil {
@@ -111,7 +113,7 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 
 // Ping reads one container's metadata, which is the cheapest call that still
 // proves this replica holds a token and can reach the account. OpenCosmos
-// makes the same call against all six at startup.
+// makes the same call against all seven at startup.
 func (s *cosmosStore) Ping(ctx context.Context) error {
 	if _, err := s.uploads.Read(ctx, nil); err != nil {
 		return fmt.Errorf("db: cosmos: %w", err)
@@ -424,6 +426,45 @@ func (s *cosmosStore) UpdateDetection(ctx context.Context, uploadID, id string, 
 		d.keep(old, now())
 		return nil
 	})
+}
+
+func (s *cosmosStore) UpdateDetections(ctx context.Context, uploadID string, ids []string, mutate func(*Detection) error) error {
+	for _, id := range ids {
+		if _, err := s.UpdateDetection(ctx, uploadID, id, mutate); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- review rules ---
+
+func (s *cosmosStore) GetReviewRules(ctx context.Context) (ReviewRules, error) {
+	return readDoc[ReviewRules](ctx, s.settings, ReviewRulesID, ReviewRulesID)
+}
+
+func (s *cosmosStore) SaveReviewRules(ctx context.Context, r ReviewRules) (ReviewRules, error) {
+	var next ReviewRules
+	_, err := updateDoc(ctx, s.settings, ReviewRulesID, ReviewRulesID, func(v *ReviewRules, old ReviewRules) error {
+		n, err := nextRules(r, &old, now())
+		next, *v = n, n
+		return err
+	})
+	switch {
+	case err == nil:
+		return next, nil
+	case !errors.Is(err, ErrNotFound):
+		return ReviewRules{}, err
+	}
+	// None stored yet, so this is the first save. Of two first saves at once,
+	// the second is a conflict, as it should be.
+	if next, err = nextRules(r, nil, now()); err != nil {
+		return ReviewRules{}, err
+	}
+	if err := createDoc(ctx, s.settings, ReviewRulesID, next); err != nil {
+		return ReviewRules{}, err
+	}
+	return next, nil
 }
 
 // --- card summaries ---

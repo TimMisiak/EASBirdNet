@@ -2,7 +2,7 @@ import { BaseElement, escapeHTML } from "./base-element.js";
 import { tabs, typography } from "../shared-styles.js";
 import { onNavigate, path } from "../router.js";
 import * as session from "../session.js";
-import { ADMIN, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
+import { ADMIN, BIRDING_EXPERT, FIELD_VOLUNTEER, REVIEWER } from "../roles.js";
 import * as flow from "../upload-flow.js";
 import "./bs-upload-steps.js";
 import "./bs-upload-details.js";
@@ -12,6 +12,7 @@ import "./bs-upload-done.js";
 import "./bs-my-uploads.js";
 import "./bs-detections.js";
 import "./bs-detection-detail.js";
+import "./bs-review-rules.js";
 import "./bs-admin-people.js";
 import "./bs-admin-recorders.js";
 import "./bs-admin-uploads.js";
@@ -21,8 +22,8 @@ import "./bs-admin-upload-detail.js";
  * <bs-app-page> is where everyone signed in works: one row of tabs, which are
  * routes, for volunteers and coordinators alike. Each tab is for a role
  * (roles.js) and shows only to someone who has it: Upload and My uploads to a
- * field volunteer, Detections to a reviewer, and three more to a coordinator,
- * who has them all. Nothing else about the page changes with the role, so
+ * field volunteer, Detections to a reviewer, Review rules to a birding expert,
+ * and three more to a coordinator, who has them all. Nothing else about the page changes with the role, so
  * there is one shell to keep working rather than one per role.
  *
  * Upload is the default, and holds the four steps of sending a card, from
@@ -53,6 +54,7 @@ const TABS = [
   { path: UPLOAD, label: "Upload", tag: "bs-upload-details", role: FIELD_VOLUNTEER },
   { path: "/app/uploads", label: "My uploads", tag: "bs-my-uploads", role: FIELD_VOLUNTEER },
   { path: DETECTIONS, label: "Detections", tag: "bs-detections", role: REVIEWER },
+  { path: "/app/review-rules", label: "Review rules", tag: "bs-review-rules", role: BIRDING_EXPERT },
   { path: "/admin/uploads", label: "All uploads", tag: "bs-admin-uploads", role: ADMIN },
   { path: "/admin/recorders", label: "Recorders", tag: "bs-admin-recorders", role: ADMIN },
   { path: "/admin/people", label: "People", tag: "bs-admin-people", role: ADMIN },

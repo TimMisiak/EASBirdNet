@@ -174,6 +174,9 @@ type Upload struct {
 	StatusDetail string `json:"statusDetail,omitempty"`
 
 	Analysis *Analysis `json:"analysis,omitempty"`
+	// Review is where the card's preparation for review stands: absent until
+	// the review rules have been applied to it (internal/review).
+	Review *UploadReview `json:"review,omitempty"`
 
 	StartedAt     time.Time  `json:"startedAt"`
 	ReceivedAt    *time.Time `json:"receivedAt,omitempty"`
@@ -191,6 +194,13 @@ type Upload struct {
 	DeleteRequestedAt *time.Time `json:"deleteRequestedAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
+// UploadReview is a card's preparation for review: which version of the review
+// rules its detections were last routed by, and when.
+type UploadReview struct {
+	RulesVersion int       `json:"rulesVersion"`
+	PreparedAt   time.Time `json:"preparedAt"`
 }
 
 // RecorderSnapshot is the part of a Recorder an upload keeps for itself.
@@ -338,6 +348,18 @@ const (
 // ReviewStatuses is every review status, in the order lists offer them.
 var ReviewStatuses = []string{ReviewUnreviewed, ReviewAccepted, ReviewConfirmed, ReviewRejected}
 
+// Routes: where the review rules send a detection (Detection.Route).
+const (
+	// RouteAccept is a species common enough where it was heard that BirdNET's
+	// word is taken for it: the detection is accepted, unheard.
+	RouteAccept = "accept"
+	// RouteReview is one people have to hear.
+	RouteReview = "review"
+	// RouteIgnore is one below its species' confidence floor: kept, but
+	// neither counted nor heard.
+	RouteIgnore = "ignore"
+)
+
 // The models a detection can come from (Detection.Model).
 const (
 	ModelBirdNET = "birdnet"
@@ -365,7 +387,11 @@ type Detection struct {
 	Confidence     float64   `json:"confidence"`
 	// Clip is the stretch of the recording stored on its own for review. It is
 	// absent for a detection stored before clips were cut.
-	Clip         *Clip     `json:"clip,omitempty"`
+	Clip *Clip `json:"clip,omitempty"`
+	// Route is where the review rules sent it: RouteAccept, RouteReview or
+	// RouteIgnore. Absent on Perch's, which aren't routed, and on any stored
+	// before there were rules.
+	Route        string    `json:"route,omitempty"`
 	ReviewStatus string    `json:"reviewStatus"`
 	Review       *Review   `json:"review,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
@@ -417,6 +443,52 @@ func (d Detection) Species() (scientificName, commonName string) {
 		return d.Review.CorrectedScientificName, d.Review.CorrectedCommonName
 	}
 	return d.ScientificName, d.CommonName
+}
+
+// ReviewRulesID is the id of the one ReviewRules document.
+const ReviewRulesID = "reviewRules"
+
+// ReviewRules decide what happens to each BirdNET detection: a species is
+// accepted on BirdNET's word, or reviewed, above a confidence floor of its own
+// (REVIEW.md). There is one such document, in the settings container; until
+// it exists, nothing is routed.
+type ReviewRules struct {
+	ID string `json:"id"`
+	// Version goes up by one with every save. A card's detections are routed
+	// again when it differs from the one they were routed by.
+	Version int `json:"version"`
+	// Defaults is the rule for a species with no row of its own.
+	Defaults RuleAction `json:"defaults"`
+	// BoutGapMinutes is how far apart one species' detections on a card may
+	// be and still be one bout, which is what reviewers hear.
+	BoutGapMinutes int `json:"boutGapMinutes"`
+	// SpotChecksPerSpecies is how many bouts of each accepted species on a
+	// card are heard anyway.
+	SpotChecksPerSpecies int           `json:"spotChecksPerSpecies"`
+	Species              []SpeciesRule `json:"species"`
+	UpdatedBy            string        `json:"updatedBy,omitempty"` // → users.id
+	UpdatedByName        string        `json:"updatedByName,omitempty"`
+	CreatedAt            time.Time     `json:"createdAt"`
+	UpdatedAt            time.Time     `json:"updatedAt"`
+}
+
+// RuleAction is what a rule does: RouteAccept or RouteReview, at or above
+// MinConfidence; below it, RouteIgnore.
+type RuleAction struct {
+	Action        string  `json:"action"`
+	MinConfidence float64 `json:"minConfidence"`
+}
+
+// SpeciesRule is one species' rule, matched by the scientific name BirdNET
+// labelled a detection with.
+type SpeciesRule struct {
+	ScientificName string `json:"scientificName"`
+	CommonName     string `json:"commonName"`
+	RuleAction
+	Note string `json:"note,omitempty"`
+	// Source is "review" for a row added because reviewers confirmed a
+	// species the rules didn't have; empty for one a person added.
+	Source string `json:"source,omitempty"`
 }
 
 // CardSummary is a card's counted detections (Detection.Counted), tallied by

@@ -147,9 +147,27 @@ export const fetchDetection = (reference, id) =>
 /** Where a detection's clip plays from: a FLAC, a few seconds either side of what was heard. */
 export const clipURL = (reference, id) =>
   `${BASE}/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/clip`;
-/** Record a verdict on a detection: "confirmed", "rejected", or back to "unreviewed". */
+/**
+ * Record a verdict on a detection: "confirmed", "rejected", or "unreviewed" to
+ * undo one -- which leaves it where the review rules put it, so the detection
+ * that comes back may say "accepted".
+ */
 export const reviewDetection = (reference, id, status) =>
   request("PUT", `/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/review`, { status });
+
+// The review rules (REVIEW.md): which species are accepted on BirdNET's word,
+// and which a reviewer hears, each above a confidence floor of its own.
+
+/** {rules, suggested}: rules is null until they are first saved; suggested is the defaults a first table starts from. */
+export const fetchReviewRules = () => get("/review/rules");
+/**
+ * Replace the rules: {version, defaults, boutGapMinutes, spotChecksPerSpecies,
+ * species}, version being the one they were read at (0 for the first save).
+ * A 409 means someone else saved them meanwhile. Admins and birding experts only.
+ */
+export const saveReviewRules = (rules) => request("PUT", "/review/rules", rules);
+/** What BirdNET heard in the last `days` days, species by species, in confidence bands: {since, until, species}. */
+export const fetchSpeciesHeard = (days) => get(`/review/species${days ? `?days=${days}` : ""}`);
 
 // Connecting an LLM tool over MCP: the consent page's two calls. signed is
 // the authorization request the server signed into the page's URL.

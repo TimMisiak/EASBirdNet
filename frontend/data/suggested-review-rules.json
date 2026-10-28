@@ -1,0 +1,382 @@
+{
+  "about": "A first table for Eastside Audubon's review rules, drafted from two weeks of BirdNET detections at Marymoor (Oct 1-15, 2026): the species heard most, on most days, that are common there in autumn are accepted above 0.5; every owl is reviewed above 0.3; anything else is reviewed above 0.5 (the default). Seasonal birds such as Golden-crowned Sparrow are accepted all year by it -- check them as the seasons turn.",
+  "defaults": {
+    "action": "review",
+    "minConfidence": 0.5
+  },
+  "boutGapMinutes": 15,
+  "spotChecksPerSpecies": 3,
+  "species": [
+    {
+      "scientificName": "Aegolius acadicus",
+      "commonName": "Northern Saw-whet Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Aegolius funereus",
+      "commonName": "Boreal Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Agelaius phoeniceus",
+      "commonName": "Red-winged Blackbird",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Anas platyrhynchos",
+      "commonName": "Mallard",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Asio flammeus",
+      "commonName": "Short-eared Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Asio otus",
+      "commonName": "Long-eared Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Athene cunicularia",
+      "commonName": "Burrowing Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Bombycilla cedrorum",
+      "commonName": "Cedar Waxwing",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Branta canadensis",
+      "commonName": "Canada Goose",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Branta hutchinsii",
+      "commonName": "Cackling Goose",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Bubo scandiacus",
+      "commonName": "Snowy Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Bubo virginianus",
+      "commonName": "Great Horned Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Calypte anna",
+      "commonName": "Anna's Hummingbird",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Certhia americana",
+      "commonName": "Brown Creeper",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Charadrius vociferus",
+      "commonName": "Killdeer",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Cistothorus palustris",
+      "commonName": "Marsh Wren",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Colaptes auratus",
+      "commonName": "Northern Flicker",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Corthylio calendula",
+      "commonName": "Ruby-crowned Kinglet",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Corvus brachyrhynchos",
+      "commonName": "American Crow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Cyanocitta stelleri",
+      "commonName": "Steller's Jay",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Dryobates pubescens",
+      "commonName": "Downy Woodpecker",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Dryocopus pileatus",
+      "commonName": "Pileated Woodpecker",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Glaucidium gnoma",
+      "commonName": "Northern Pygmy-Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Haemorhous mexicanus",
+      "commonName": "House Finch",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Haemorhous purpureus",
+      "commonName": "Purple Finch",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Junco hyemalis",
+      "commonName": "Dark-eyed Junco",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Megascops kennicottii",
+      "commonName": "Western Screech-Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Melospiza lincolnii",
+      "commonName": "Lincoln's Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Melospiza melodia",
+      "commonName": "Song Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Passer domesticus",
+      "commonName": "House Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Passerculus sandwichensis",
+      "commonName": "Savannah Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Passerella iliaca",
+      "commonName": "Fox Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Pipilo maculatus",
+      "commonName": "Spotted Towhee",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Poecile atricapillus",
+      "commonName": "Black-capped Chickadee",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Poecile rufescens",
+      "commonName": "Chestnut-backed Chickadee",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Psaltriparus minimus",
+      "commonName": "Bushtit",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Psiloscops flammeolus",
+      "commonName": "Flammulated Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Regulus satrapa",
+      "commonName": "Golden-crowned Kinglet",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Setophaga coronata",
+      "commonName": "Yellow-rumped Warbler",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Sitta canadensis",
+      "commonName": "Red-breasted Nuthatch",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Spinus pinus",
+      "commonName": "Pine Siskin",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Spinus tristis",
+      "commonName": "American Goldfinch",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Strix nebulosa",
+      "commonName": "Great Gray Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Strix occidentalis",
+      "commonName": "Spotted Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Strix varia",
+      "commonName": "Barred Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Sturnus vulgaris",
+      "commonName": "European Starling",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Surnia ulula",
+      "commonName": "Northern Hawk Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Thryomanes bewickii",
+      "commonName": "Bewick's Wren",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Troglodytes pacificus",
+      "commonName": "Pacific Wren",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Turdus migratorius",
+      "commonName": "American Robin",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Tyto alba",
+      "commonName": "Barn Owl",
+      "action": "review",
+      "minConfidence": 0.3,
+      "note": "An owl: what the program listens for, so every one is heard"
+    },
+    {
+      "scientificName": "Zonotrichia atricapilla",
+      "commonName": "Golden-crowned Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    },
+    {
+      "scientificName": "Zonotrichia leucophrys",
+      "commonName": "White-crowned Sparrow",
+      "action": "accept",
+      "minConfidence": 0.5,
+      "note": "Common at Marymoor in autumn"
+    }
+  ]
+}

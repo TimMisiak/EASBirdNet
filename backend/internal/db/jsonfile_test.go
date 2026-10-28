@@ -550,3 +550,75 @@ func TestListDetectionsIsBounded(t *testing.T) {
 		t.Errorf("MaxDetectionScan = %d: past ~400k a single list outgrows the replica's memory", MaxDetectionScan)
 	}
 }
+
+// The rules are saved over the version they were read at, and only that: two
+// people editing at once can't silently undo each other.
+func TestJSONFileReviewRulesAreVersioned(t *testing.T) {
+	s, path := openTemp(t)
+	ctx := context.Background()
+	if _, err := s.GetReviewRules(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rules before any were saved: %v, want ErrNotFound", err)
+	}
+	if _, err := s.SaveReviewRules(ctx, ReviewRules{Version: 2}); !errors.Is(err, ErrConflict) {
+		t.Errorf("a first save claiming version 2: %v, want ErrConflict", err)
+	}
+	rules := ReviewRules{Defaults: RuleAction{Action: RouteReview, MinConfidence: 0.5}}
+	first, err := s.SaveReviewRules(ctx, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Version != 1 || first.ID != ReviewRulesID || first.CreatedAt.IsZero() {
+		t.Errorf("first save = %+v, want version 1", first)
+	}
+
+	mine, theirs := first, first
+	mine.BoutGapMinutes = 20
+	second, err := s.SaveReviewRules(ctx, mine)
+	if err != nil || second.Version != 2 || !second.CreatedAt.Equal(first.CreatedAt) {
+		t.Fatalf("second save = %+v, %v; want version 2, created when the first was", second, err)
+	}
+	theirs.BoutGapMinutes = 30
+	if _, err := s.SaveReviewRules(ctx, theirs); !errors.Is(err, ErrConflict) {
+		t.Errorf("a save over version 1 after version 2: %v, want ErrConflict", err)
+	}
+
+	reopened, err := OpenJSONFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reopened.GetReviewRules(ctx); err != nil || got.Version != 2 || got.BoutGapMinutes != 20 {
+		t.Errorf("after reopening: %+v, %v; want version 2's", got, err)
+	}
+}
+
+func TestJSONFileUpdateDetections(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	const card = "OWL-20260914-SR02"
+	if err := s.UpsertDetections(ctx, card, []Detection{
+		{ID: "det_a", AudioFileID: "af_1", ScientificName: "Strix varia"},
+		{ID: "det_b", AudioFileID: "af_1", ScientificName: "Strix varia"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertDetections(ctx, "OWL-20260914-SR03", []Detection{{ID: "det_other", AudioFileID: "af_2"}}); err != nil {
+		t.Fatal(err)
+	}
+	// One gone, and one on another card: both are skipped.
+	err := s.UpdateDetections(ctx, card, []string{"det_a", "det_gone", "det_other"}, func(d *Detection) error {
+		d.Route, d.UploadID = RouteAccept, "somewhere else"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, route := range map[string]string{"det_a": RouteAccept, "det_b": ""} {
+		d, err := s.GetDetection(ctx, card, id)
+		if err != nil || d.Route != route || d.UploadID != card {
+			t.Errorf("%s = %+v, %v; want route %q, still on its card", id, d, err, route)
+		}
+	}
+	if d, _ := s.GetDetection(ctx, "OWL-20260914-SR03", "det_other"); d.Route != "" {
+		t.Errorf("another card's detection was changed: %+v", d)
+	}
+}

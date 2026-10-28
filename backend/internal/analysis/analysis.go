@@ -53,6 +53,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -1011,6 +1012,14 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 	}
 
 	res = result{model: ran.Model, start: start, startKnown: startKnown}
+	// BirdNET's detections are routed by the review rules as they are stored;
+	// Perch's never are.
+	var rules *review.Table
+	if s.model == birdnet.ModelBirdNET {
+		if rules, err = q.reviewRules(ctx); err != nil {
+			return result{}, err
+		}
+	}
 	found := merge(ran.Files[0].Detections)
 	detections := make([]db.Detection, len(found))
 	clips := make([]birdnet.Clip, len(found))
@@ -1025,7 +1034,13 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 			ScientificName: d.ScientificName, CommonName: d.CommonName, Confidence: d.Confidence,
 			ReviewStatus: db.ReviewUnreviewed,
 		}
-		clipStart, clipEnd := clipSpan(d)
+		rules.Apply(&detections[i])
+		// One a reviewer will hear gets the recording either side of it too.
+		pad := clipPadSec
+		if detections[i].Route == db.RouteReview {
+			pad = contextPadSec
+		}
+		clipStart, clipEnd := clipSpan(d, pad)
 		clips[i] = birdnet.Clip{Path: filepath.Join(filepath.Dir(local), fmt.Sprintf("clip-%d.flac", i)), StartSec: clipStart, EndSec: clipEnd}
 	}
 	// Cut even a file with nothing heard in it, for its duration and sample rate.
@@ -1057,9 +1072,43 @@ func (q *Queue) run(ctx context.Context, card db.Upload, f db.AudioFile, s step,
 		if err := q.store.UpsertDetections(ctx, card.ID, detections); err != nil {
 			return result{}, fmt.Errorf("storing the detections: %w", err)
 		}
+		// The detections are stored either way; a summary that missed them
+		// is put right when the card is next prepared for review.
+		if err := review.Adjust(ctx, q.store, card.ID, replaced(stored, detections), detections); err != nil {
+			q.log.Warn("couldn't count a file's detections in its card's summary", "upload", card.ID, "file", f.ID, "err", err)
+		}
 	}
 	res.detections = len(detections)
 	return res, nil
+}
+
+// reviewRules are what a file's BirdNET detections are routed by: nil while
+// no rules have been saved, which routes nothing.
+func (q *Queue) reviewRules(ctx context.Context) (*review.Table, error) {
+	rules, err := q.store.GetReviewRules(ctx)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the review rules: %w", err)
+	}
+	return review.NewTable(&rules), nil
+}
+
+// replaced is those of stored that found has the same ids as: what storing
+// found writes over.
+func replaced(stored, found []db.Detection) []db.Detection {
+	ids := make(map[string]bool, len(found))
+	for _, d := range found {
+		ids[d.ID] = true
+	}
+	var out []db.Detection
+	for _, d := range stored {
+		if ids[d.ID] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // keepVerdicts carries what people have said about a detection over to the

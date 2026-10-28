@@ -82,7 +82,7 @@ func overview(ctx context.Context, store db.Store, now time.Time, days int) (Pro
 			var t *tally
 			for date, n := range s.Days {
 				if strings.HasPrefix(date, year) {
-					program.ConfirmedDetections += n
+					program.Detections += n
 				}
 				if date < firstDate {
 					continue

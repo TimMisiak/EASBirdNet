@@ -106,9 +106,18 @@ detections instead, as it used to, and counts only `confirmed` ones. The
 `cardSummaries` container stays and nothing reads it, and the summaries go
 stale: a review given during the rollback isn't in them. Rolling forward
 again, delete the summaries of the cards reviewed meanwhile -- or all of
-them -- and the landing page builds them again. An `accepted` detection, once
-something writes one, shows in that older image as the raw word in a grey chip
-and doesn't count; its filters don't offer it.
+them -- and the landing page builds them again. An `accepted` detection shows in that
+older image as the raw word in a grey chip and doesn't count; its filters
+don't offer it.
+
+**Review rules and routing.** An image from before the rules (REVIEW.md, M1)
+routes nothing: cards analyzed while it runs store every detection
+`unreviewed`, with no `route`, and short clips. The `settings` container and
+the rules in it are left alone, and detections already routed keep their
+`route` and `accepted` until the older image writes one (a review), which
+drops `route` (*Documents the old code already wrote*). Rolling forward again
+needs nothing: a card analyzed meanwhile has no `review.rulesVersion`, so the
+preparer routes it, and only its clips stay short.
 
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).

@@ -89,6 +89,19 @@ type Store interface {
 	// detection with no id gets DetectionID from its file, start and species.
 	UpsertDetections(ctx context.Context, uploadID string, detections []Detection) error
 	UpdateDetection(ctx context.Context, uploadID, id string, mutate func(*Detection) error) (Detection, error)
+	// UpdateDetections applies mutate to each of a card's detections named,
+	// as UpdateDetection does to one, in one call: each is its own
+	// replace-if-unchanged, so a change made to one meanwhile is mutated
+	// rather than overwritten. A detection that has gone is skipped.
+	UpdateDetections(ctx context.Context, uploadID string, ids []string, mutate func(*Detection) error) error
+
+	// GetReviewRules returns the review rules; ErrNotFound until they are
+	// first saved.
+	GetReviewRules(ctx context.Context) (ReviewRules, error)
+	// SaveReviewRules stores r in place of the rules whose Version it
+	// carries -- 0 for none yet -- as the next version, and returns what it
+	// stored. ErrConflict when the stored rules aren't that version any more.
+	SaveReviewRules(ctx context.Context, r ReviewRules) (ReviewRules, error)
 
 	// ListCardSummaries returns every card's summary there is, in no
 	// particular order. A card has none until one is built for it.
@@ -167,7 +180,7 @@ type Config struct {
 	LocalPath string
 	// CosmosEndpoint is the account URI, e.g. https://acct.documents.azure.com:443/.
 	CosmosEndpoint string
-	// CosmosDatabase is the database holding the six containers.
+	// CosmosDatabase is the database holding the seven containers.
 	CosmosDatabase string
 	// CosmosKey switches from Entra ID auth to an account key. It exists for
 	// the Cosmos DB emulator; production accounts disable key auth.
@@ -310,6 +323,27 @@ func prepareDetection(uploadID string, d *Detection, t time.Time) error {
 	}
 	stamp(&d.CreatedAt, &d.UpdatedAt, t)
 	return nil
+}
+
+// nextRules is r as SaveReviewRules stores it over stored (nil for none): the
+// version after the one r was read at, or ErrConflict if that isn't the one
+// stored.
+func nextRules(r ReviewRules, stored *ReviewRules, t time.Time) (ReviewRules, error) {
+	switch {
+	case stored == nil && r.Version != 0, stored != nil && stored.Version != r.Version:
+		return ReviewRules{}, ErrConflict
+	}
+	r.ID = ReviewRulesID
+	r.Version++
+	if r.Species == nil {
+		r.Species = []SpeciesRule{}
+	}
+	r.CreatedAt = t
+	if stored != nil {
+		r.CreatedAt = stored.CreatedAt
+	}
+	r.UpdatedAt = t
+	return r, nil
 }
 
 func prepareCardSummary(c *CardSummary, t time.Time) error {
