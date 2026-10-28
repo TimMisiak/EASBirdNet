@@ -204,13 +204,15 @@ GET    /api/v1/detections/export      the same, every row rather than a page: a 
 GET    /api/v1/detections/{reference}?file=        a page of what was heard on a card, or in one of its files (?model= too)
 GET    /api/v1/detections/{reference}/{id}         one detection, with its card and file
 GET    /api/v1/detections/{reference}/{id}/clip    its clip, as a WAV
-PUT    /api/v1/detections/{reference}/{id}/review  confirm, discard, or undo (back to what the rules say)
+PUT    /api/v1/detections/{reference}/{id}/review  override its bout: confirm, discard, or undo (birding expert)
 GET    PUT /api/v1/review/rules           the review rules; save them over the version read (admin or birding expert)
 GET    /api/v1/review/species?days=       what was heard lately, species by species, for the rules page
 GET    /api/v1/review/cards               the cards with bouts, and how far each one's review has got
 GET    /api/v1/review/cards/{reference}/bouts       a card's bouts: what waits for you, verdicts blind until you give yours
 GET    /api/v1/review/cards/{reference}/bouts/{id}  one bout, with its detections
 PUT    /api/v1/review/cards/{reference}/bouts/{id}/verdict  confirm (or another species), reject or unsure: yours, until it settles
+PUT    /api/v1/review/cards/{reference}/bouts/{id}/resolution  the final say on a bout, disputed or not (birding expert)
+GET    /api/v1/review/disagreements       every card's disputed bouts (birding expert)
 GET    /api/v1/admin/uploads              every card, admin only
 GET    DELETE /api/v1/admin/uploads/{reference}  one card, with every file and its status; delete it (202: it goes in the background)
 GET    POST /api/v1/admin/people          the roster
@@ -655,8 +657,8 @@ images and update the app but not touch state; that is the point of
 level, `role` -- `admin` or `volunteer` -- and any number of volunteer
 `roles`: `field_volunteer` (Upload and My uploads), `reviewer` (Review and
 Detections) and `birding_expert` (a reviewer, who also sets the review rules,
-sees every bout's verdicts before giving their own, and gets the expert's
-tools to come). An admin may do everything whatever their roles say, and keeps the
+sees every bout's verdicts before giving their own, settles disputed bouts
+from Disagreements, and overrides a bout or a single detection). An admin may do everything whatever their roles say, and keeps the
 roles for if they stop being one; a birding expert is a reviewer whether or not
 `reviewer` is also stored. `db.User.Has` is that whole rule, and `requireRole`
 asks it of every route; `js/roles.js` is the same rule in the browser, so a tab
@@ -1209,22 +1211,23 @@ over MCP*) and read summaries and CSV exports of a span of time; it can't
 change anything. claude.ai's connector hasn't been tried against a deployment
 yet -- the flow is tested end to end with the MCP SDK's own client.
 Field volunteers upload and reviewers review (*One set of tabs, each for a
-role*); the birding expert's own tools -- the disagreements, and the final
-say on them -- aren't built yet, so for now a birding expert has what a
-reviewer has, sees verdicts before giving one, and has the Review rules tab.
-Everyone works in the same shell (`<bs-app-page>`), seeing the tabs their
+role*), and a birding expert settles what reviewers dispute and sets the
+review rules. Everyone works in the same shell (`<bs-app-page>`), seeing the tabs their
 roles give them: Upload, holding the card upload's four steps; My uploads,
 their own cards, where an unfinished one is resumed; Review, the cards with
-bouts to hear; Detections; and Review rules, for a birding expert. A coordinator gets
+bouts to hear; Detections; and Disagreements and Review rules, for a
+birding expert. A coordinator gets
 all of those and three more after them -- All uploads, Recorders and People,
 where they set everyone's roles. Reviewing is being rebuilt around review
 rules and bouts (REVIEW.md, which has where it stands): once a birding expert
 saves the rules, common birds are `accepted` and count publicly, and the
 rest are routed to review or left below their floors (*Review rules route
 detections*), and each card's review is grouped into bouts with spot-checks
-beside them, which reviewers hear in the Review tab, two to agree; but
-nothing yet lets a birding expert settle a disputed bout, and a detection's
-own page still has Confirm and Discard for anyone who reviews. Nothing moves a card from `in_review`
+beside them, which reviewers hear in the Review tab, two to agree, and a
+birding expert settles what they dispute and overrides what they got wrong
+-- a bout, or one detection on its own page, which is the only place left
+to review a single detection. With no rules saved there are no bouts, so
+nothing for a reviewer to review. Nothing moves a card from `in_review`
 to `results_sent` yet, and there is no email. Detections stored before clips
 were cut have no clip and weren't merged, and ones stored before clips were
 FLAC still have a WAV; nothing backfills either.

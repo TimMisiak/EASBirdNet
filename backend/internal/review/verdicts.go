@@ -47,6 +47,26 @@ func Give(b *db.Bout, v db.BoutVerdict) error {
 	return nil
 }
 
+// ErrNotAFinalSay is a final say that is neither a confirm nor a reject.
+var ErrNotAFinalSay = errors.New("a final say confirms or rejects")
+
+// Decide records a birding expert's final say on b (db.Bout.Resolution): a
+// confirm or reject that settles it whatever its listeners said -- a
+// disputed bout's, or an override of one they settled, or of one still
+// open. A later final say replaces it; the same one again changes nothing.
+func Decide(b *db.Bout, v db.BoutVerdict) error {
+	if v.Verdict != db.VerdictConfirm && v.Verdict != db.VerdictReject {
+		return ErrNotAFinalSay
+	}
+	v = ownSpecies(*b, v)
+	if r := b.Resolution; r != nil && r.Verdict == v.Verdict && r.ScientificName == v.ScientificName {
+		return nil
+	}
+	b.Resolution = &v
+	Settle(b)
+	return nil
+}
+
 // ownSpecies is v with no species named when it names none or the bout's
 // own, which is what a confirm of the bout's species stores.
 func ownSpecies(b db.Bout, v db.BoutVerdict) db.BoutVerdict {

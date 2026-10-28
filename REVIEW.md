@@ -4,7 +4,7 @@ How detections get from BirdNET to a verdict: a table of review rules routes
 each detection when it is stored, so the common birds are accepted without
 anyone listening; what is left is grouped into *bouts*; and reviewers hear
 bouts, not detections, two to agree, in a Review tab built for speed.
-Disagreements go to a birding expert. Being built in milestones: M0 to M4
+Disagreements go to a birding expert. Being built in milestones: M0 to M5
 are built; **Milestones** is the order, and the **Status** table at the end is
 where to resume. Where this and
 the code disagree, the code is what runs -- fix whichever is wrong.
@@ -381,8 +381,10 @@ that doesn't carry it yet and adds any confirmed species the rules lack --
 the verdict sets the card's `review.preparation` to 0 so that the pass
 comes, or, failing even that, answers an error the client retries.
 
-`disagreements` is cross-partition, and small: only disputed bouts. It and
-`resolution` come with M5; until then a disputed bout waits.
+`disagreements` is cross-partition, and small: only disputed bouts. A
+`resolution` may be given on any bout, not only a disputed one: on an open
+or settled bout it is the expert's override, and a later one replaces it,
+its verdict reaching the bout's detections in place of the last.
 
 ## Screens
 
@@ -403,7 +405,10 @@ comes, or, failing even that, answers an error the client retries.
   show, and Next (or Enter) goes on to the next bout waiting for the
   reviewer. Keys: C, R, U, space, ← →, Enter.
 - **Disagreements** (`/app/disagreements`), for a birding expert: disputed
-  bouts, everyone's verdicts, and the final say.
+  bouts on every card, with everyone's verdicts. Each opens in its card's
+  review, where the expert hears it; the final say is a panel there, open
+  on a disputed bout and a click away on any other, with no keys, so an
+  expert hearing ordinary bouts as a listener can't give it by accident.
 - **Review rules** (`/app/review-rules`), for an admin or birding expert:
   every species heard in the last four weeks and every species with a rule,
   in one table, each with its action and floor, and beside it what those
@@ -417,7 +422,9 @@ comes, or, failing even that, answers an error the client retries.
 `<bs-app-page>`'s tab table gets Review (for a reviewer); Disagreements and
 Review rules sit under it for those who have them. A detection's own page
 keeps its clip and spectrogram and links to its bout; its Confirm and
-Discard become an override for a birding expert or admin.
+Discard become an override for a birding expert or admin, and Undo shows
+only on an override. A reviewer sees where the detection stands, and why --
+in a bout, or not sent to reviewers at all.
 
 ## Why it stays correct
 
@@ -559,6 +566,12 @@ verdicts, progress.
 **M5 — Disagreements and overrides.** The Disagreements page and the expert's
 final say; a detection's page links to its bout, and its Confirm and Discard
 become an expert's or admin's override.
+- `GET /review/disagreements` (`Store.ListBoutsByStatus`), and `PUT
+  .../resolution` (`review.Decide`), which shares the verdict's path to the
+  detections; `<bs-disagreements>`, and the final say in a card's review.
+- `PUT /detections/{ref}/{id}/review` is a birding expert's. A program with
+  no rules saved therefore has nothing a reviewer can review: saving the
+  first table is part of turning review on.
 
 **Later.** Closing a card when every bout is resolved (TODO.md 2.6, which
 needs this first); the spot-check rejection rate on the rules page (M1 has
@@ -574,4 +587,4 @@ the column, M3 the data); months per species; eBird import.
 | M2: bouts and spot-checks; the card's review counts; the `bouts` container; the gap measured | Built, not deployed. Measured: the gap barely matters (*Measure before tuning*), so it stays at 15 minutes |
 | M3: the review API | Built, not deployed. Tried on the dev card through the API: blind verdicts, a correction to another species, a rejected spot-check, a dispute, a row added to the rules, and preparing again under it changing nothing. `disagreements` and `resolution` are M5's |
 | M4: the Review tab | Built, not deployed. Tried in a browser on the dev card (with test clips cut from the Osprey recording): two reviewers settling a bout blind, the expert's view, keys, context and half speed, another species, a phone's width |
-| M5: disagreements and overrides | Not started |
+| M5: disagreements and overrides | Built, not deployed. Tried in a browser on the dev card: a dispute settled from the Disagreements page, an override to another species on a settled bout, and a detection's page as an expert and as a reviewer |

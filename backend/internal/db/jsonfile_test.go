@@ -656,6 +656,15 @@ func TestJSONFileBouts(t *testing.T) {
 	if other, _ := s.ListBouts(ctx, "OWL-20260914-SR03"); len(other) != 0 {
 		t.Errorf("another card lists %d bouts", len(other))
 	}
+	if _, err := s.UpdateBout(ctx, card, barred, func(b *Bout) error { b.Status = BoutDisputed; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if disputed, err := s.ListBoutsByStatus(ctx, BoutDisputed); err != nil || len(disputed) != 1 || disputed[0].ID != barred {
+		t.Errorf("disputed = %+v, %v; want the Barred Owl bout", disputed, err)
+	}
+	if _, err := s.UpdateBout(ctx, card, barred, func(b *Bout) error { b.Status = BoutOpen; return nil }); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := s.UpdateBout(ctx, card, owl, func(b *Bout) error {
 		b.Reviews = append(b.Reviews, BoutVerdict{UserID: "usr_1", Verdict: "confirm"})

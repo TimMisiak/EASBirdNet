@@ -11,11 +11,12 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 )
 
-// The review API (REVIEW.md, M3): the cards with bouts, a card's bouts, and
-// a reviewer's verdict on one. A bout settles when its verdicts agree, and
-// its verdict then goes to every detection in it. Verdicts are blind: no
-// one sees a bout's other verdicts until they have given their own, except a
-// birding expert, who sees them always.
+// The review API (REVIEW.md): the cards with bouts, a card's bouts, and a
+// reviewer's verdict on one. A bout settles when its verdicts agree, and its
+// verdict then goes to every detection in it. Verdicts are blind: no one sees
+// a bout's other verdicts until they have given their own, except a birding
+// expert, who sees them always -- and who has the disputed bouts of every
+// card to settle, and the final say on any bout.
 
 // ReviewCard is a card with bouts, and how far its review has got.
 type ReviewCard struct {
@@ -191,6 +192,59 @@ func (h *handlers) getBout(w http.ResponseWriter, r *http.Request, me db.User) {
 
 const msgNoSuchBout = "no such bout on this card"
 
+// Disagreement is a disputed bout, and the card it is on.
+type Disagreement struct {
+	Card ReviewCard `json:"card"`
+	Bout ReviewBout `json:"bout"`
+}
+
+// listDisagreements answers {disagreements}: every card's disputed bouts,
+// in the order they were heard, for a birding expert to settle.
+func (h *handlers) listDisagreements(w http.ResponseWriter, r *http.Request, me db.User) {
+	bouts, err := h.store.ListBoutsByStatus(r.Context(), db.BoutDisputed)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	cards := map[string]*db.Upload{}
+	out := []Disagreement{}
+	for _, b := range bouts {
+		card, seen := cards[b.UploadID]
+		if !seen {
+			u, err := h.store.GetUpload(r.Context(), b.UploadID)
+			switch {
+			case err == nil && u.Status != db.StatusDeleting:
+				card = &u
+			case err != nil && !errors.Is(err, db.ErrNotFound):
+				h.fail(w, r, err)
+				return
+			}
+			cards[b.UploadID] = card
+		}
+		if card != nil {
+			out = append(out, Disagreement{Card: reviewCardOf(*card), Bout: reviewBoutOf(b, me)})
+		}
+	}
+	h.json(w, http.StatusOK, map[string]any{"disagreements": out})
+}
+
+// resolveBout records a birding expert's final say on a bout:
+// {verdict, scientificName?, commonName?}, confirm or reject. It settles a
+// disputed bout, or overrides how its listeners settled it -- or settles one
+// still open -- and its verdict goes to the bout's detections in place of
+// theirs, as a listeners' verdict does. Answers {bout}.
+func (h *handlers) resolveBout(w http.ResponseWriter, r *http.Request, me db.User) {
+	v, ok := h.boutVerdict(w, r, me)
+	if !ok {
+		return
+	}
+	if v.Verdict != db.VerdictConfirm && v.Verdict != db.VerdictReject {
+		h.problem(w, http.StatusBadRequest, "a final say confirms or rejects")
+		return
+	}
+	h.settleBout(w, r, me, v, review.Decide)
+}
+
 // giveVerdict records the caller's verdict on a bout, in place of any they
 // gave before: {verdict, scientificName?, commonName?}, the species only
 // for a confirm of one other than the bout's. A bout its verdicts settle
@@ -198,6 +252,16 @@ const msgNoSuchBout = "no such bout on this card"
 // Giving the same verdict again is harmless, and finishes that copy if it
 // was cut short.
 func (h *handlers) giveVerdict(w http.ResponseWriter, r *http.Request, me db.User) {
+	v, ok := h.boutVerdict(w, r, me)
+	if !ok {
+		return
+	}
+	h.settleBout(w, r, me, v, review.Give)
+}
+
+// boutVerdict reads a verdict on a bout from the request, or answers a
+// problem: {verdict, scientificName?, commonName?}.
+func (h *handlers) boutVerdict(w http.ResponseWriter, r *http.Request, me db.User) (db.BoutVerdict, bool) {
 	var body struct {
 		Verdict        string `json:"verdict"`
 		ScientificName string `json:"scientificName"`
@@ -205,32 +269,40 @@ func (h *handlers) giveVerdict(w http.ResponseWriter, r *http.Request, me db.Use
 	}
 	if err := decode(r, &body); err != nil {
 		h.problem(w, http.StatusBadRequest, err.Error())
-		return
+		return db.BoutVerdict{}, false
 	}
 	body.ScientificName, body.CommonName = strings.TrimSpace(body.ScientificName), strings.TrimSpace(body.CommonName)
+	problem := ""
 	switch {
 	case body.Verdict != db.VerdictConfirm && body.Verdict != db.VerdictReject && body.Verdict != db.VerdictUnsure:
-		h.problem(w, http.StatusBadRequest, "verdict must be confirm, reject or unsure")
-		return
+		problem = "verdict must be confirm, reject or unsure"
 	case body.Verdict != db.VerdictConfirm && (body.ScientificName != "" || body.CommonName != ""):
-		h.problem(w, http.StatusBadRequest, "only a confirm names a species")
-		return
+		problem = "only a confirm names a species"
 	case body.ScientificName == "" && body.CommonName != "":
-		h.problem(w, http.StatusBadRequest, "name the species by its scientific name")
-		return
+		problem = "name the species by its scientific name"
 	}
+	if problem != "" {
+		h.problem(w, http.StatusBadRequest, problem)
+		return db.BoutVerdict{}, false
+	}
+	return db.BoutVerdict{
+		UserID: me.ID, UserName: me.Name, Verdict: body.Verdict,
+		ScientificName: body.ScientificName, CommonName: body.CommonName, At: h.stamp(),
+	}, true
+}
+
+// settleBout records v on the bout the request names by record (review.Give
+// or review.Decide), then carries out whatever that settled
+// (review.Resolve), and answers {bout}.
+func (h *handlers) settleBout(w http.ResponseWriter, r *http.Request, me db.User, v db.BoutVerdict, record func(*db.Bout, db.BoutVerdict) error) {
 	card, ok := h.reviewCard(w, r)
 	if !ok {
 		return
 	}
-	v := db.BoutVerdict{
-		UserID: me.ID, UserName: me.Name, Verdict: body.Verdict,
-		ScientificName: body.ScientificName, CommonName: body.CommonName, At: h.stamp(),
-	}
 	var was string
 	b, err := h.store.UpdateBout(r.Context(), card.ID, r.PathValue("id"), func(b *db.Bout) error {
 		was = b.Status
-		return review.Give(b, v)
+		return record(b, v)
 	})
 	switch {
 	case errors.Is(err, db.ErrNotFound):

@@ -152,11 +152,14 @@ func TestReviewingABout(t *testing.T) {
 		t.Errorf("rules species = %+v, want the owl added by review", rules.Species)
 	}
 
-	// A reviewer overrules one detection on its own page; undoing that puts
-	// it back to its bout's verdict, not to unreviewed.
+	// The expert overrules one detection on its own page; undoing that puts
+	// it back to its bout's verdict, not to unreviewed. A reviewer can't.
 	path := "/api/v1/detections/" + b.UploadID + "/det_owl1/review"
+	if rec := do(t, mux, http.MethodPut, path, `{"status":"rejected"}`, jane); rec.Code != http.StatusForbidden {
+		t.Errorf("a reviewer overruling a detection = %d, want 403", rec.Code)
+	}
 	for _, step := range []struct{ send, want string }{{db.ReviewRejected, db.ReviewRejected}, {db.ReviewUnreviewed, db.ReviewConfirmed}} {
-		rec := do(t, mux, http.MethodPut, path, `{"status":"`+step.send+`"}`, jane)
+		rec := do(t, mux, http.MethodPut, path, `{"status":"`+step.send+`"}`, eve)
 		if d := decodeInto[struct {
 			Detection Detection `json:"detection"`
 		}](t, rec).Detection; rec.Code != http.StatusOK || d.ReviewStatus != step.want {
@@ -178,5 +181,81 @@ func TestReviewingABout(t *testing.T) {
 		Cards []ReviewCard `json:"cards"`
 	}](t, do(t, mux, http.MethodGet, cards, "", jane)); len(got.Cards) != 0 {
 		t.Errorf("cards = %+v, want none while it is deleted", got.Cards)
+	}
+}
+
+// Three listeners who don't agree leave a bout to a birding expert, who finds
+// it among the disagreements and has the final say -- and may change it.
+func TestTheExpertsFinalSay(t *testing.T) {
+	mux, store, b := reviewFixture(t)
+	ctx := t.Context()
+	jane := signInAs(t, mux, "jane@example.com")
+	raj := signInAs(t, mux, "raj@example.com")
+	eve := signInAs(t, mux, "eve@example.com")
+	bout := "/api/v1/review/cards/" + b.UploadID + "/bouts/" + b.ID
+	for _, v := range []struct {
+		who  *http.Cookie
+		body string
+	}{{jane, `{"verdict":"confirm"}`}, {raj, `{"verdict":"reject"}`}, {eve, `{"verdict":"unsure"}`}} {
+		if rec := do(t, mux, http.MethodPut, bout+"/verdict", v.body, v.who); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %s", v.body, rec.Code, rec.Body)
+		}
+	}
+	type disagreements struct {
+		Disagreements []Disagreement `json:"disagreements"`
+	}
+	if rec := do(t, mux, http.MethodGet, "/api/v1/review/disagreements", "", jane); rec.Code != http.StatusForbidden {
+		t.Errorf("a reviewer GET disagreements = %d, want 403", rec.Code)
+	}
+	rec := do(t, mux, http.MethodGet, "/api/v1/review/disagreements", "", eve)
+	got := decodeInto[disagreements](t, rec).Disagreements
+	if rec.Code != http.StatusOK || len(got) != 1 || got[0].Bout.ID != b.ID || got[0].Card.Reference != b.UploadID || len(got[0].Bout.Verdicts) != 3 {
+		t.Fatalf("GET disagreements = %d %s; want the one bout, with its three verdicts", rec.Code, rec.Body)
+	}
+	if u, _ := store.GetUpload(ctx, b.UploadID); u.Review.Disputed != 1 {
+		t.Errorf("card review = %+v, want one disputed", u.Review)
+	}
+
+	if rec := do(t, mux, http.MethodPut, bout+"/resolution", `{"verdict":"reject"}`, jane); rec.Code != http.StatusForbidden {
+		t.Errorf("a reviewer's final say = %d, want 403", rec.Code)
+	}
+	if rec := do(t, mux, http.MethodPut, bout+"/resolution", `{"verdict":"unsure"}`, eve); rec.Code != http.StatusBadRequest {
+		t.Errorf("an unsure final say = %d, want 400", rec.Code)
+	}
+	rec = do(t, mux, http.MethodPut, bout+"/resolution", `{"verdict":"reject"}`, eve)
+	if settled := decodeInto[boutBody](t, rec).Bout; rec.Code != http.StatusOK || settled.Status != db.BoutRejected ||
+		settled.Resolution == nil || settled.Resolution.By != "Eve Expert" {
+		t.Fatalf("the final say = %d %s; want the bout rejected by Eve", rec.Code, rec.Body)
+	}
+	if d, _ := store.GetDetection(ctx, b.UploadID, "det_owl1"); d.ReviewStatus != db.ReviewRejected || d.Review == nil || d.Review.UserName != "Eve Expert" {
+		t.Errorf("det_owl1 = %s, %+v; want rejected by Eve", d.ReviewStatus, d.Review)
+	}
+	if u, _ := store.GetUpload(ctx, b.UploadID); u.Review.Disputed != 0 || u.Review.Resolved != 1 {
+		t.Errorf("card review = %+v, want it resolved, nothing disputed", u.Review)
+	}
+	if got := decodeInto[disagreements](t, do(t, mux, http.MethodGet, "/api/v1/review/disagreements", "", eve)).Disagreements; len(got) != 0 {
+		t.Errorf("disagreements = %+v, want none left", got)
+	}
+
+	// On a second listen it's a Barred Owl: the final say changes, and the
+	// detections, the summary's species and the rules follow.
+	rec = do(t, mux, http.MethodPut, bout+"/resolution", `{"verdict":"confirm","scientificName":"Strix varia","commonName":"Barred Owl"}`, eve)
+	if settled := decodeInto[boutBody](t, rec).Bout; rec.Code != http.StatusOK || settled.Status != db.BoutConfirmed {
+		t.Fatalf("a changed final say = %d %s; want the bout confirmed", rec.Code, rec.Body)
+	}
+	for _, id := range b.DetectionIDs {
+		if d, _ := store.GetDetection(ctx, b.UploadID, id); d.ReviewStatus != db.ReviewConfirmed || d.Review.CorrectedScientificName != "Strix varia" {
+			t.Errorf("%s = %s, %+v; want confirmed as a Barred Owl", id, d.ReviewStatus, d.Review)
+		}
+	}
+	if u, _ := store.GetUpload(ctx, b.UploadID); u.Review.Resolved != 1 {
+		t.Errorf("card review = %+v, want still one resolved", u.Review)
+	}
+	if rules, _ := store.GetReviewRules(ctx); len(rules.Species) != 1 || rules.Species[0].ScientificName != "Strix varia" {
+		t.Errorf("rules species = %+v, want the Barred Owl added", rules.Species)
+	}
+	// Listeners can't reopen it.
+	if rec := do(t, mux, http.MethodPut, bout+"/verdict", `{"verdict":"confirm"}`, raj); rec.Code != http.StatusConflict {
+		t.Errorf("a verdict after the final say = %d, want 409", rec.Code)
 	}
 }

@@ -14,6 +14,7 @@ import "./bs-detections.js";
 import "./bs-detection-detail.js";
 import "./bs-review.js";
 import "./bs-review-card.js";
+import "./bs-disagreements.js";
 import "./bs-review-rules.js";
 import "./bs-admin-people.js";
 import "./bs-admin-recorders.js";
@@ -24,7 +25,8 @@ import "./bs-admin-upload-detail.js";
  * <bs-app-page> is where everyone signed in works: one row of tabs, which are
  * routes, for volunteers and coordinators alike. Each tab is for a role
  * (roles.js) and shows only to someone who has it: Upload and My uploads to a
- * field volunteer, Review and Detections to a reviewer, Review rules to a birding expert,
+ * field volunteer, Review and Detections to a reviewer, Disagreements and Review
+ * rules to a birding expert,
  * and three more to a coordinator, who has them all. Nothing else about the page changes with the role, so
  * there is one shell to keep working rather than one per role.
  *
@@ -59,6 +61,7 @@ const TABS = [
   { path: "/app/uploads", label: "My uploads", tag: "bs-my-uploads", role: FIELD_VOLUNTEER },
   { path: REVIEW, label: "Review", tag: "bs-review", role: REVIEWER },
   { path: DETECTIONS, label: "Detections", tag: "bs-detections", role: REVIEWER },
+  { path: "/app/disagreements", label: "Disagreements", tag: "bs-disagreements", role: BIRDING_EXPERT },
   { path: "/app/review-rules", label: "Review rules", tag: "bs-review-rules", role: BIRDING_EXPERT },
   { path: "/admin/uploads", label: "All uploads", tag: "bs-admin-uploads", role: ADMIN },
   { path: "/admin/recorders", label: "Recorders", tag: "bs-admin-recorders", role: ADMIN },

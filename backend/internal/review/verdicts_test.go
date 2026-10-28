@@ -82,6 +82,31 @@ func TestGivingAVerdict(t *testing.T) {
 	}
 }
 
+func TestTheFinalSay(t *testing.T) {
+	b := db.Bout{Kind: db.BoutReview, ScientificName: "Bubo virginianus", Status: db.BoutOpen}
+	for _, v := range []db.BoutVerdict{verdict("a", "confirm"), verdict("b", "reject"), verdict("c", "unsure")} {
+		if err := Give(&b, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b.Status != db.BoutDisputed {
+		t.Fatalf("status %s, want disputed", b.Status)
+	}
+	if err := Decide(&b, verdict("e", "unsure")); !errors.Is(err, ErrNotAFinalSay) {
+		t.Errorf("an unsure final say: %v", err)
+	}
+	if err := Decide(&b, verdict("e", "confirm", "Bubo virginianus")); err != nil || b.Status != db.BoutConfirmed || b.Resolution.ScientificName != "" {
+		t.Errorf("final say: %v, %s, %+v; want confirmed, of its own species", err, b.Status, b.Resolution)
+	}
+	if s, ok := Settled(b); !ok || len(s.By) != 1 || s.By[0].UserID != "e" {
+		t.Errorf("settled by %+v, want the expert alone", s.By)
+	}
+	// An override of a settled bout.
+	if err := Decide(&b, verdict("e", "reject")); err != nil || b.Status != db.BoutRejected {
+		t.Errorf("override: %v, %s; want rejected", err, b.Status)
+	}
+}
+
 // reviewedCard stores a prepared card with a bout of three owl detections
 // to review and its summary, under testRules, and answers the bout.
 func reviewedCard(t *testing.T, store db.Store) db.Bout {

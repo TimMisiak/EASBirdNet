@@ -151,7 +151,8 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/detections/{reference}", review(h.listCardDetections))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}", review(h.getDetection))
 	mux.HandleFunc("GET /api/v1/detections/{reference}/{id}/clip", review(h.getClip))
-	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", review(h.reviewDetection))
+	// A detection's own verdict overrides its bout's: an expert's to give.
+	mux.HandleFunc("PUT /api/v1/detections/{reference}/{id}/review", h.requireRole(db.RoleBirdingExpert, h.reviewDetection))
 
 	// The review rules: a reviewer can read them, and what has been heard
 	// lately beside them; an admin or birding expert sets them (rules.go).
@@ -162,6 +163,8 @@ func register(mux *http.ServeMux, h *handlers) {
 	mux.HandleFunc("GET /api/v1/review/cards/{reference}/bouts", review(h.listBouts))
 	mux.HandleFunc("GET /api/v1/review/cards/{reference}/bouts/{id}", review(h.getBout))
 	mux.HandleFunc("PUT /api/v1/review/cards/{reference}/bouts/{id}/verdict", review(h.giveVerdict))
+	mux.HandleFunc("PUT /api/v1/review/cards/{reference}/bouts/{id}/resolution", h.requireRole(db.RoleBirdingExpert, h.resolveBout))
+	mux.HandleFunc("GET /api/v1/review/disagreements", h.requireRole(db.RoleBirdingExpert, h.listDisagreements))
 
 	// Admin.
 	admin := func(next func(http.ResponseWriter, *http.Request, db.User)) http.HandlerFunc {

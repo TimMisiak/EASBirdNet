@@ -535,6 +535,14 @@ func (s *jsonFile) ListBouts(_ context.Context, uploadID string) ([]Bout, error)
 	return bouts, nil
 }
 
+func (s *jsonFile) ListBoutsByStatus(_ context.Context, status string) ([]Bout, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bouts := list(s.data.Bouts, func(b Bout) bool { return b.Status == status })
+	sortBouts(bouts)
+	return bouts, nil
+}
+
 func (s *jsonFile) CreateBout(_ context.Context, b Bout) (Bout, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -523,6 +523,13 @@ func (s *cosmosStore) ListBouts(ctx context.Context, uploadID string) ([]Bout, e
 	return bouts, err
 }
 
+func (s *cosmosStore) ListBoutsByStatus(ctx context.Context, status string) ([]Bout, error) {
+	bouts, err := queryDocs[Bout](ctx, s.bouts, "", "SELECT * FROM c WHERE c.status = @status",
+		azcosmos.QueryParameter{Name: "@status", Value: status})
+	sortBouts(bouts)
+	return bouts, err
+}
+
 func (s *cosmosStore) CreateBout(ctx context.Context, b Bout) (Bout, error) {
 	if err := prepareBout(&b, now()); err != nil {
 		return Bout{}, err

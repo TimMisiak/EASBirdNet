@@ -321,24 +321,27 @@ func TestADetectionCanBeHeardAndReviewed(t *testing.T) {
 			t.Errorf("%s %s = %d, want %d (%s)", c.method, c.path, rec.Code, c.want, rec.Body)
 		}
 	}
-	// Anyone signed in hears and reviews, on anyone's card: this one is Marcus's,
-	// and Jane reviews it. Someone not signed in can do neither.
+	// Any reviewer hears any card's detections: this one is Marcus's, and
+	// Jane hears it. A verdict on one detection overrides its bout's, which
+	// is a birding expert's to give. Someone not signed in can do none of it.
 	jane := signedIn(t, mux, db.RoleVolunteer)
-	for _, c := range []struct{ method, path, body string }{
-		{http.MethodGet, base + owl.ID, ""},
-		{http.MethodGet, base + owl.ID + "/clip", ""},
-		{http.MethodPut, base + owl.ID + "/review", `{"status":"confirmed"}`},
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{http.MethodGet, base + owl.ID, "", http.StatusOK},
+		{http.MethodGet, base + owl.ID + "/clip", "", http.StatusOK},
+		{http.MethodPut, base + owl.ID + "/review", `{"status":"confirmed"}`, http.StatusForbidden},
 	} {
-		if rec := do(t, mux, c.method, c.path, c.body, jane); rec.Code != http.StatusOK {
-			t.Errorf("volunteer %s %s = %d, want 200 (%s)", c.method, c.path, rec.Code, rec.Body)
+		if rec := do(t, mux, c.method, c.path, c.body, jane); rec.Code != c.want {
+			t.Errorf("volunteer %s %s = %d, want %d (%s)", c.method, c.path, rec.Code, c.want, rec.Body)
 		}
 		if rec := do(t, mux, c.method, c.path, c.body, nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("anonymous %s %s = %d, want 401", c.method, c.path, rec.Code)
 		}
 	}
-	if stored, err := store.GetDetection(ctx, ref, owl.ID); err != nil || stored.ReviewStatus != db.ReviewConfirmed ||
-		stored.Review == nil || stored.Review.UserName != "Jane Volunteer" {
-		t.Errorf("after Jane's review, stored = %+v (%v)", stored, err)
+	if stored, err := store.GetDetection(ctx, ref, owl.ID); err != nil || stored.ReviewStatus == db.ReviewConfirmed {
+		t.Errorf("after Jane was refused, stored = %+v (%v)", stored, err)
 	}
 }
 

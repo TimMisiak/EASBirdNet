@@ -5,6 +5,8 @@ import * as api from "../api.js";
 import { query, replaceQuery } from "../router.js";
 import { reviewChip } from "../upload-status.js";
 import * as rq from "../review-queue.js";
+import * as session from "../session.js";
+import { BIRDING_EXPERT } from "../roles.js";
 import "./bs-chip.js";
 import "./bs-progress-bar.js";
 import "./bs-spectrogram.js";
@@ -28,6 +30,13 @@ import "./bs-spectrogram.js";
  * and Next goes on to the next bout that waits for the reviewer. Moving
  * between bouts rewrites ?bout= in place, so the page and the clip loaded
  * aren't drawn again, and a reload or a link opens the same bout.
+ *
+ * A birding expert has the final say as well, on any bout: it settles a
+ * disputed one, or overrides how its listeners settled it -- or settles one
+ * still open -- for every detection in it. It is open by default only on a
+ * disputed bout, and has no keys, so an expert hearing ordinary bouts as a
+ * listener can't give it by accident. Opened from the disagreements
+ * (?from=disagreements), the way back goes there.
  *
  * Keys, unless focus is in a field: C confirm, R reject, U unsure, space play
  * or pause, ← → the previous and next bout, Enter the next that waits for you
@@ -70,7 +79,8 @@ class ReviewCard extends BaseElement {
   /** The detection in the player, or null for the bout's most confident. */
   #clip = null;
   #showAll = false;
-  #another = false;
+  /** Where "another species" is open: "verdict", "final" (the final say), or "" for nowhere. */
+  #another = "";
   #saving = "";
   #error = "";
   /** Species a confirm can name, once the rules have been read for them. */
@@ -107,14 +117,16 @@ class ReviewCard extends BaseElement {
         this.#renderAll();
       },
       verdict: (el) => this.#give(el.dataset.verdict),
-      another: () => this.#openAnother(),
+      finalSay: (el) => this.#give(el.dataset.verdict, null, true),
+      another: (el) => this.#openAnother(el.dataset.for),
       cancelAnother: () => {
-        this.#another = false;
+        this.#another = "";
         this.#renderVerdict();
       },
       context: (el) => this.#setPref("context", el.checked),
       slow: (el) => this.#setPref("slow", el.checked),
-      confirmAs: (form) => this.#confirmAs(form),
+      confirmAs: (form) => this.#confirmAs(form, false),
+      finalAs: (form) => this.#confirmAs(form, true),
     };
   }
 
@@ -149,7 +161,8 @@ class ReviewCard extends BaseElement {
     const was = this.#open;
     this.#open = id;
     this.#clip = null;
-    this.#showAll = this.#another = false;
+    this.#showAll = false;
+    this.#another = "";
     this.#error = "";
     const params = query();
     params.set("bout", id);
@@ -225,17 +238,21 @@ class ReviewCard extends BaseElement {
     return Boolean(b) && b.status === rq.OPEN && !this.#saving;
   }
 
-  async #give(verdict, species = null) {
+  /**
+   * Gives the reviewer's verdict on the open bout -- or, final, a birding
+   * expert's final say -- naming species when it confirms another.
+   */
+  async #give(verdict, species = null, final = false) {
     const id = this.#open;
     const b = this.#bouts.get(id);
-    if (!this.#canGive) return;
-    if (b.mine?.verdict === verdict && !species && !b.mine.scientificName) return;
-    this.#saving = verdict;
+    if (final ? !b || this.#saving : !this.#canGive) return;
+    if (!final && b.mine?.verdict === verdict && !species && !b.mine.scientificName) return;
+    this.#saving = final ? `final-${verdict}` : verdict;
     this.#error = "";
     this.#renderVerdict();
     try {
       const body = species ? { verdict, ...species } : { verdict };
-      const { bout } = await api.giveVerdict(this.reference, id, body);
+      const { bout } = await (final ? api.resolveBout : api.giveVerdict)(this.reference, id, body);
       this.#bouts.set(id, bout);
       const detail = this.#loaded && this.#open === id ? this.#loaded : null;
       if (bout.status !== rq.OPEN) {
@@ -245,7 +262,7 @@ class ReviewCard extends BaseElement {
       } else if (detail) {
         detail.bout = bout;
       }
-      this.#another = false;
+      this.#another = "";
     } catch (error) {
       this.#error = error.message;
       // Settled or disputed meanwhile: show it as it is now.
@@ -263,8 +280,8 @@ class ReviewCard extends BaseElement {
     if (!this.#error) this.$(".verdict [data-action=next]")?.focus();
   }
 
-  async #openAnother() {
-    this.#another = true;
+  async #openAnother(where) {
+    this.#another = where === "final" ? "final" : "verdict";
     this.#renderVerdict();
     if (!this.#known) {
       const rules = await api.fetchReviewRules().then((r) => r.rules?.species ?? [], () => []);
@@ -274,7 +291,7 @@ class ReviewCard extends BaseElement {
     this.$(".verdict input[name=species]")?.focus();
   }
 
-  #confirmAs(form) {
+  #confirmAs(form, final) {
     const text = new FormData(form).get("species") ?? "";
     const species = rq.parseSpecies(String(text), this.#known ?? []);
     if (!species) {
@@ -283,7 +300,7 @@ class ReviewCard extends BaseElement {
       this.$(".verdict input[name=species]")?.focus();
       return;
     }
-    this.#give("confirm", species);
+    this.#give("confirm", species, final);
   }
 
   // --- the player ---
@@ -446,6 +463,9 @@ class ReviewCard extends BaseElement {
         .verdict .listeners { margin: var(--bs-space-4) 0 0; padding: 0; list-style: none; font-size: 0.875rem; }
         .verdict .listeners li { padding: var(--bs-space-1) 0; color: var(--bs-text-body); }
         .verdict .listeners .you { font-weight: 600; }
+        .verdict .final { margin-top: var(--bs-space-5); padding-top: var(--bs-space-4); border-top: 1px solid var(--bs-border); }
+        .verdict .final summary { cursor: pointer; font-weight: 600; color: var(--bs-text); margin-bottom: var(--bs-space-2); }
+        .verdict .final .row { margin-top: var(--bs-space-3); }
         .verdict .then { margin-top: var(--bs-space-4); display: flex; gap: var(--bs-space-4); align-items: center; flex-wrap: wrap; }
 
         .all { margin-top: var(--bs-space-6); }
@@ -463,7 +483,7 @@ class ReviewCard extends BaseElement {
 
   #page(card) {
     return `
-      <a class="back" href="/app/review">← All cards</a>
+      ${this.#back()}
       <h1>${escapeHTML(card.stationName || card.stationId)}</h1>
       <p class="card-sub">${escapeHTML(dateRange(card.firstRecordingAt, card.lastRecordingAt))} · <span class="ref">${escapeHTML(card.reference)}</span></p>
       <div class="progress">${this.#progress()}</div>
@@ -476,6 +496,13 @@ class ReviewCard extends BaseElement {
              </div>`
       }
     `;
+  }
+
+  /** The way back: to the disagreements, when the bout was opened from them, or to every card. */
+  #back() {
+    return query().get("from") === "disagreements"
+      ? `<a class="back" href="/app/disagreements">← Disagreements</a>`
+      : `<a class="back" href="/app/review">← All cards</a>`;
   }
 
   #progress() {
@@ -711,13 +738,18 @@ class ReviewCard extends BaseElement {
     const label = (v, idle, doing) => (this.#saving === v ? doing : idle);
     const next = rq.nextForMe(this.#queue.order, this.#bouts, b.id);
 
-    const question = {
+    const finalBy = b.resolution
+      ? `Settled by ${escapeHTML(b.resolution.by)}'s final say: <strong>${escapeHTML(rq.verdictLabel(b.resolution, b))}</strong>, for every detection in it.`
+      : "";
+    const question = finalBy || {
       [rq.OPEN]: b.mine
         ? `Your verdict: <strong>${escapeHTML(rq.verdictLabel(b.mine, b))}</strong>. You can change it until the bout is settled.`
         : `Listen to the clips. Is this ${article} ${escapeHTML(b.commonName)}?`,
       confirmed: "Settled: its listeners agreed, and their verdict counts for every detection in it.",
       rejected: "Settled: its listeners agreed it isn't this bird, so none of its detections count.",
-      [rq.DISPUTED]: "Its three listeners didn't agree, so it waits for a birding expert.",
+      [rq.DISPUTED]: session.has(BIRDING_EXPERT)
+        ? "Its three listeners didn't agree, so it waits for your final say, below."
+        : "Its three listeners didn't agree, so it waits for a birding expert.",
     }[b.status];
 
     el.innerHTML = `
@@ -733,16 +765,17 @@ class ReviewCard extends BaseElement {
                <button class="btn btn--quiet btn--small" data-action="verdict" data-verdict="unsure" aria-pressed="${pressed("unsure")}" ${busy}>
                  ${label("unsure", "Unsure", "Saving…")}<kbd aria-hidden="true">U</kbd></button>
                ${
-                 this.#another
+                 this.#another === "verdict"
                    ? ""
-                   : `<button class="btn btn--quiet btn--small" data-action="another" aria-pressed="${Boolean(b.mine?.scientificName)}" ${busy}>Another species…</button>`
+                   : `<button class="btn btn--quiet btn--small" data-action="another" data-for="verdict" aria-pressed="${Boolean(b.mine?.scientificName)}" ${busy}>Another species…</button>`
                }
              </div>
-             ${this.#another ? this.#anotherForm() : ""}`
+             ${this.#another === "verdict" ? this.#anotherForm(false) : ""}`
           : ""
       }
       ${this.#error ? `<p class="error" role="alert">Couldn't save that: ${escapeHTML(this.#error)}</p>` : ""}
       ${this.#listeners(b)}
+      ${session.has(BIRDING_EXPERT) ? this.#finalSay(b) : ""}
       ${
         b.forMe
           ? ""
@@ -756,10 +789,43 @@ class ReviewCard extends BaseElement {
     `;
   }
 
-  #anotherForm() {
+  /**
+   * A birding expert's final say: open by default on a disputed bout, and a
+   * click away on any other, where it overrides its listeners.
+   */
+  #finalSay(b) {
+    const busy = this.#saving ? "disabled" : "";
+    const label = (v, idle) => (this.#saving === `final-${v}` ? "Saving…" : idle);
+    const lead =
+      b.status === rq.DISPUTED
+        ? "Your final say settles it, for every detection in it."
+        : b.resolution
+          ? "Another final say replaces this one."
+          : b.status === rq.OPEN
+            ? "A final say settles it now, without waiting for its listeners."
+            : "Its listeners settled it. A final say overrides them, for every detection in it.";
+    const open = b.status === rq.DISPUTED || this.#another === "final" || this.#saving.startsWith("final-");
+    return `
+      <details class="final" ${open ? "open" : ""}>
+        <summary>Final say</summary>
+        <p class="note">${lead}</p>
+        <div class="row">
+          <button class="btn btn--navy btn--small" data-action="finalSay" data-verdict="confirm" ${busy}>${label("confirm", "Confirm")}</button>
+          <button class="btn btn--quiet btn--danger btn--small" data-action="finalSay" data-verdict="reject" ${busy}>${label("reject", "Reject")}</button>
+          ${
+            this.#another === "final"
+              ? ""
+              : `<button class="btn btn--quiet btn--small" data-action="another" data-for="final" ${busy}>Another species…</button>`
+          }
+        </div>
+        ${this.#another === "final" ? this.#anotherForm(true) : ""}
+      </details>`;
+  }
+
+  #anotherForm(final) {
     const known = this.#known;
     return `
-      <form class="another" data-submit="confirmAs">
+      <form class="another" data-submit="${final ? "finalAs" : "confirmAs"}">
         <label>
           <span class="label">Which species is it?</span>
           <input class="field field--sunk" name="species" list="species-options" autocomplete="off"
@@ -769,7 +835,7 @@ class ReviewCard extends BaseElement {
         <datalist id="species-options">
           ${(known ?? []).map((s) => `<option value="${escapeHTML(rq.speciesOption(s))}"></option>`).join("")}
         </datalist>
-        <button class="btn btn--navy btn--small" type="submit" ${this.#saving ? "disabled" : ""}>Confirm as this species</button>
+        <button class="btn btn--navy btn--small" type="submit" ${this.#saving ? "disabled" : ""}>${final ? "Final say: this species" : "Confirm as this species"}</button>
         <button class="btn btn--quiet btn--small" type="button" data-action="cancelAnother">Cancel</button>
       </form>`;
   }

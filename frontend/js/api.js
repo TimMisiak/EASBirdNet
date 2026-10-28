@@ -148,9 +148,10 @@ export const fetchDetection = (reference, id) =>
 export const clipURL = (reference, id) =>
   `${BASE}/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/clip`;
 /**
- * Record a verdict on a detection: "confirmed", "rejected", or "unreviewed" to
- * undo one -- which leaves it where the review rules put it, so the detection
- * that comes back may say "accepted".
+ * Override a detection's verdict: "confirmed", "rejected", or "unreviewed" to
+ * undo the override -- which leaves it where its bout's verdict or the review
+ * rules put it, so the detection that comes back may say "accepted". A
+ * birding expert's or admin's.
  */
 export const reviewDetection = (reference, id, status) =>
   request("PUT", `/detections/${encodeURIComponent(reference)}/${encodeURIComponent(id)}/review`, { status });
@@ -189,6 +190,16 @@ export const fetchBout = (reference, id) =>
  */
 export const giveVerdict = (reference, id, body) =>
   request("PUT", `/review/cards/${encodeURIComponent(reference)}/bouts/${encodeURIComponent(id)}/verdict`, body);
+
+/** {disagreements}: every card's disputed bouts, each {card, bout}. A birding expert's. */
+export const fetchDisagreements = () => get("/review/disagreements");
+/**
+ * A birding expert's final say on a bout: {verdict: "confirm" | "reject"},
+ * and scientificName and commonName to confirm another species. It settles
+ * a disputed bout, or overrides how its listeners settled it. Answers {bout}.
+ */
+export const resolveBout = (reference, id, body) =>
+  request("PUT", `/review/cards/${encodeURIComponent(reference)}/bouts/${encodeURIComponent(id)}/resolution`, body);
 
 // Connecting an LLM tool over MCP: the consent page's two calls. signed is
 // the authorization request the server signed into the page's URL.

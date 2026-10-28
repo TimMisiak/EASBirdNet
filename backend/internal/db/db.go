@@ -118,6 +118,10 @@ type Store interface {
 	GetBout(ctx context.Context, uploadID, id string) (Bout, error)
 	// ListBouts returns a card's bouts in the order they were heard.
 	ListBouts(ctx context.Context, uploadID string) ([]Bout, error)
+	// ListBoutsByStatus returns every card's bouts in a status, in the order
+	// they were heard: a cross-partition read, for a status few bouts are in
+	// (disputed).
+	ListBoutsByStatus(ctx context.Context, status string) ([]Bout, error)
 	// CreateBout requires an id and a card. ErrConflict if the id is taken.
 	CreateBout(ctx context.Context, b Bout) (Bout, error)
 	UpdateBout(ctx context.Context, uploadID, id string, mutate func(*Bout) error) (Bout, error)

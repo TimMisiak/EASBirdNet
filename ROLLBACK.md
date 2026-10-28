@@ -136,7 +136,10 @@ were given -- though a detection that image writes (a review) loses its
 row's `addedIn` the next time they are saved, which only makes a save from
 the page read before a verdict-added row a conflict again. Rolling forward
 again needs nothing: a resolved bout's detections that lost `boutId` from
-their review keep the review they have.
+their review keep the review they have. An image from between verdicts and
+the final say (M3, M4) reads a `resolution` already given and honours it,
+but offers no way to give one, and lets any reviewer confirm or discard a
+detection on its own page again.
 
 **Audio that retention has deleted.** Originals go a month after a card is
 received, and that is permanent (CLAUDE.md, *Originals expire; clips don't*).

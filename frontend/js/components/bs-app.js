@@ -40,6 +40,7 @@ const ROUTES = [
   { path: "/app/detections", tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detections" },
   // One detection, opened from that list: /app/detections/OWL-20260914-SR03/det_….
   { path: "/app/detections/", prefix: true, tag: "bs-app-page", chrome: "app", auth: true, role: REVIEWER, title: "Detection" },
+  { path: "/app/disagreements", tag: "bs-app-page", chrome: "app", auth: true, role: BIRDING_EXPERT, title: "Disagreements" },
   { path: "/app/review-rules", tag: "bs-app-page", chrome: "app", auth: true, role: BIRDING_EXPERT, title: "Review rules" },
   { path: "/admin", redirect: "/admin/uploads" },
   { path: "/admin/uploads", tag: "bs-app-page", chrome: "app", auth: true, role: ADMIN, title: "All uploads" },

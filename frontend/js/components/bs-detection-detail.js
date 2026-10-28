@@ -6,12 +6,16 @@ import * as api from "../api.js";
 import * as list from "../detection-list.js";
 import { navigate } from "../router.js";
 import * as session from "../session.js";
+import { BIRDING_EXPERT } from "../roles.js";
 import "./bs-chip.js";
 import "./bs-spectrogram.js";
 
 /**
  * <bs-detection-detail reference="OWL-20260914-SR03" detection="det_…"> -- one
- * detection, for review: its clip to hear and see, and Confirm or Discard.
+ * detection: its clip to hear and see, where it stands, and a link to the bout
+ * it is reviewed in. Reviewers give verdicts on bouts, in the Review tab; a
+ * birding expert or admin may also override one detection here, with Confirm
+ * or Discard, and Undo puts it back to its bout's verdict or its route.
  *
  * It is opened from the list of detections -- every card's, or one card's,
  * which is what a card's page links to -- and goes back to it with that list's
@@ -495,22 +499,46 @@ class DetectionDetail extends BaseElement {
     }[d.reviewStatus];
     const busy = this.#saving ? "disabled" : "";
     const label = (status, idle, doing) => (this.#saving === status ? doing : idle);
+    // Its bout is where reviewers hear it; overriding it here is an expert's.
+    const bout = d.boutId
+      ? `<a class="next" href="/app/review/${encodeURIComponent(this.reference)}?bout=${encodeURIComponent(d.boutId)}">Hear it in its bout →</a>`
+      : "";
+    if (!session.has(BIRDING_EXPERT)) {
+      const where = {
+        unreviewed: "Not reviewed yet.",
+        accepted: "Accepted by the review rules, unheard: this species is common enough here that BirdNET's word is taken for it.",
+      }[d.reviewStatus] ?? verdict ?? "";
+      const why =
+        d.model === "perch"
+          ? "Perch's detections are a second opinion, and aren't reviewed."
+          : d.boutId
+            ? "Reviewers hear it in its bout, with the rest of that species' detections around it, and their verdict counts for each of them."
+            : `It isn't in a bout: the review rules don't send it to reviewers${d.route === "ignore" ? ", because it is below its species' confidence floor" : ""}.`;
+      return `
+        <h3>Review</h3>
+        <p class="verdict">${where}</p>
+        <p class="note">${why}</p>
+        ${bout}`;
+    }
 
     return `
       <h3>Review</h3>
       <p class="verdict">${verdict ?? ""}</p>
+      ${d.boutId ? `<p class="note">A verdict here overrides its bout's, for this detection alone.</p>` : ""}
       <div class="row">
         <button class="btn btn--navy btn--small" data-action="review" data-status="confirmed"
                 aria-pressed="${d.reviewStatus === "confirmed"}" ${busy}>${label("confirmed", "Confirm", "Confirming…")}</button>
         <button class="btn btn--quiet btn--danger btn--small" data-action="review" data-status="rejected"
                 aria-pressed="${d.reviewStatus === "rejected"}" ${busy}>${label("rejected", "Discard", "Discarding…")}</button>
         ${
-          d.review
+          // Only a verdict given here can be undone here; a bout's is its bout's.
+          d.review && !d.review.boutId
             ? `<button class="btn btn--quiet btn--small" data-action="review" data-status="unreviewed" ${busy}>${label("unreviewed", "Undo", "Undoing…")}</button>`
             : ""
         }
       </div>
       ${this.#saveError ? `<p class="error" role="alert">Couldn't save that: ${escapeHTML(this.#saveError)}</p>` : ""}
+      ${bout}
       ${d.review && next ? `<a class="next" href="${escapeHTML(next)}">Next detection →</a>` : ""}
       <p class="note">${
         d.model === "perch"
