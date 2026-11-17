@@ -16,6 +16,7 @@ One database, `birdsense`, with one container per entity:
 | Container    | Holds                                   | Partition key | `id`                                   |
 |--------------|-----------------------------------------|---------------|----------------------------------------|
 | `users`      | the roster: volunteers and admins       | `/id`         | random, `usr_<16 hex>`                 |
+| `credentials` | one person's password, once they set one | `/id`        | the user's `id`                        |
 | `recorders`  | listening stations (device + location)  | `/id`         | printed on the unit, e.g. `SW-02`      |
 | `uploads`    | one SD card's trip into storage         | `/id`         | the card reference, `OWL-YYYYMMDD-SRnn` |
 | `audioFiles` | one recording from a card               | `/uploadId`   | `af_` + hash of upload id and path     |
@@ -70,8 +71,9 @@ partitioning them by `id` keeps point reads cheap and costs nothing.
 
 ## `users`
 
-Someone on the roster. There is no password: the roster is the allow-list, and
-sign-in is delegated to Google or Microsoft. The first admin is added at startup
+Someone on the roster. The roster is the allow-list: sign-in is delegated to
+Google or Microsoft, or is a password kept in [`credentials`](#credentials),
+never here. The first admin is added at startup
 from `BIRDSENSE_BOOTSTRAP_ADMIN`, but only when the roster is empty (see
 DEPLOYMENT.md). Admins add everyone after that.
 
@@ -82,8 +84,9 @@ DEPLOYMENT.md). Admins add everyone after that.
 | `name`         | string    | Display name. May be empty until the person signs in. |
 | `role`         | string    | The access level: `volunteer` or `admin`. An admin may do everything, whatever `roles` says. |
 | `roles?`       | string[]  | The volunteer roles held, each once, in this order: `field_volunteer` (uploads cards), `reviewer` (hears and reviews detections), `birding_expert` (a reviewer, with expert review tools). A volunteer holds at least one; an admin may hold none, and keeps any for if they stop being one. Absent on a volunteer from before roles until the server's next start gives them `field_volunteer` (`db.BackfillRoles`). |
-| `identity?`    | object    | `{provider, subject}`. Bound at first sign-in, so later sign-ins match on the provider's stable `sub` claim, not only the address. `provider` is `google` or `microsoft`. |
+| `identity?`    | object    | `{provider, subject}`: how they last signed in. Bound at first sign-in, so later sign-ins match on the provider's stable `sub` claim, not only the address. `provider` is `google`, `microsoft` or `password`, whose `subject` is their own `id`. |
 | `lastSignInAt?`| instant   | |
+| `sessionsValidFrom?` | instant | Every session, MCP connection and export link begun before this is refused. Set by setting a password, and by being removed from the roster. |
 | `removedAt?`   | instant   | Set when taken off the roster. The document stays so uploads and reviews still resolve. |
 | `createdAt`    | instant   | When added to the roster. |
 | `updatedAt`    | instant   | |
@@ -101,6 +104,21 @@ DEPLOYMENT.md). Admins add everyone after that.
   "updatedAt": "2026-09-12T03:10:44Z"
 }
 ```
+
+## `credentials`
+
+Someone's password, in a container of its own: nothing that reads the roster
+holds a hash, and an older image rewriting a user it doesn't fully know can't lose
+one (ROLLBACK.md). Someone who has never set a password has no document, and being
+removed from the roster deletes theirs.
+
+| Field          | Type      | Notes |
+|----------------|-----------|-------|
+| `id`           | string    | The user's `id`, and the partition key. |
+| `passwordHash` | string    | argon2id in PHC form, carrying its own parameters and salt. |
+| `version`      | int       | Passwords set so far, from 1. A password link names the version it was issued against, and a write only goes over the version it read, which is what makes a link good for one use. |
+| `createdAt`    | instant   | |
+| `updatedAt`    | instant   | |
 
 ## `recorders`
 
@@ -636,6 +654,8 @@ Every read the API needs, and what it costs in Cosmos:
 |------|--------------|-----------|-----------|
 | Session: look up the signed-in person | `GetUserByEmail` | `users` | cross-partition |
 | Roster | `ListUsers` | `users` | cross-partition (small) |
+| Password sign-in, or a link to set one | `GetUserByEmail`, `GetCredential` | `users`, `credentials` | cross-partition (small), point read |
+| Setting a password | `GetUser`, `GetCredential`, `UpdateUser` twice, `SetCredential` | `users`, `credentials` | point reads, a replace each and a create or replace |
 | Recorder list / map | `ListRecorders` | `recorders` | cross-partition (small) |
 | One card | `GetUpload` | `uploads` | point read |
 | A volunteer's cards | `ListUploads{UserID}` | `uploads` | cross-partition |
@@ -851,7 +871,9 @@ What the write routes do to documents:
 | `GET /review/disagreements` | A birding expert's. `{disagreements}`: every disputed bout, in the order heard, on a card not being deleted, each `{card, bout}` in the shapes above, the bout with every verdict. |
 | `GET /review/species` | A reviewer's. What BirdNET heard in the last `days` days (28 by default, 1–31): `{since, until, species}`, each `{scientificName, commonName, detections, days (Pacific dates), confirmed, rejected, byConfidence}`, `byConfidence` being its detections in twenty bands of 0.05. BirdNET's alone, by its own labels; most heard first. |
 | `DELETE /admin/uploads/{ref}` | The one thing that removes detections and clips ([Audio retention](#audio-retention) never does). Marks the card in any status: `status` becomes `deleting` and `deleteRequestedAt` is set, unless it is already deleting, and it answers 202 `{"deleting": ref}` at once. A tus request for the card's files 404s from then on, and registering it again is a 409. The deleter (`internal/deletion`, in the web app) then removes it, a minute or more later: it leaves a card while analysis holds a lease on one of its files (see *Claims*), then deletes every blob under its `uploads/` prefix, finished or not, and its `clips/` prefix, then its `audioFiles`, its `detections`, its summary and the upload. If another card's reference spells the same prefix, the audio and clips are left and the server logs a warning. The upload goes last, so a pass that stops part way leaves the card in `deleting`, and the next pass finishes it. |
-| `DELETE /admin/people/{id}` | Sets `removedAt`. |
+| `POST /auth/password` | Sets `lastSignInAt` and `identity`. A wrong password, an address with none, a removed user and an unknown address are all the same 401. |
+| `PUT /auth/password` | Sets `sessionsValidFrom`, then the `credentials` document if it is still at the link's version (otherwise a 410), then `lastSignInAt` and `identity`. |
+| `DELETE /admin/people/{id}` | Sets `removedAt` and `sessionsValidFrom`, and deletes their `credentials` document. |
 | `POST /admin/people`, `PUT /admin/people/{id}` | Take `role` and `roles`, and store `roles` each once in the order above. A role that isn't one of the three, or a volunteer with none, is a 400. |
 | `POST /admin/people` | An address held by a removed user reinstates that document (clears `removedAt`, takes the new name, role and roles) instead of conflicting. |
 | `DELETE /admin/stations/{id}` | Sets `retiredAt`. |
@@ -903,7 +925,7 @@ by id:
 
 A file written before `cardSummaries` or `bouts` loads without them: a card's
 summary is built the first time the landing page reads it, and its bouts when
-it is next prepared.
+it is next prepared. Nor does it need `credentials`, which starts empty.
 
 The file is read once at startup, held in memory and rewritten in full,
 atomically, after every change. It's fine to hand-edit it while the server

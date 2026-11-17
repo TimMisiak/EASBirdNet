@@ -8,6 +8,7 @@ let current = null;
 let loaded = false;
 let dev = false;
 let providers = [];
+let password = false;
 let ended = false;
 const listeners = new Set();
 
@@ -21,6 +22,8 @@ export const has = (role) => roles.has(current, role);
 export const isDev = () => dev;
 /** The identity providers this server can sign people in with, e.g. ["microsoft"]. */
 export const identityProviders = () => providers;
+/** Whether this server offers signing in with a password. */
+export const passwordOffered = () => password;
 /** False until the first load() resolves, so the shell can hold off routing. */
 export const isLoaded = () => loaded;
 /** True when a session ended under them, rather than never having existed. */
@@ -34,11 +37,13 @@ export async function load() {
     current = session.user ?? null;
     dev = session.dev === true;
     providers = session.providers ?? [];
+    password = session.password === true;
   } catch {
     // A failed session check means anonymous; the public page still works.
     current = null;
     dev = false;
     providers = [];
+    password = false;
   }
   loaded = true;
   announce();
@@ -64,6 +69,17 @@ export async function signIn(body) {
   ended = false;
   announce();
   return current;
+}
+
+/**
+ * Someone a sign-in that went around signIn() has just signed in. It is apart
+ * from the call because announcing it redraws the app: a page with something
+ * still to say to them says it first, and calls this when they carry on.
+ */
+export function adopt(person) {
+  current = person;
+  ended = false;
+  announce();
 }
 
 export async function signOut() {

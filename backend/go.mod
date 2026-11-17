@@ -12,6 +12,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.16.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/tus/tusd/v2 v2.9.2
+	golang.org/x/crypto v0.58.0
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
 	golang.org/x/oauth2 v0.35.0
 )
@@ -28,7 +29,6 @@ require (
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

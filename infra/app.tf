@@ -50,6 +50,14 @@ resource "azurerm_container_app" "this" {
     name  = "session-key"
     value = var.session_key
   }
+  # The one data-plane key in the stack (DEPLOYMENT.md, Email).
+  dynamic "secret" {
+    for_each = var.email_enabled ? [1] : []
+    content {
+      name  = "mail-key"
+      value = azurerm_communication_service.this[0].primary_key
+    }
+  }
 
   # Pulls with AcrPull as the identity above; no password, no admin user.
   registry {
@@ -248,6 +256,29 @@ resource "azurerm_container_app" "this" {
         name        = "BIRDSENSE_SESSION_KEY"
         secret_name = "session-key"
       }
+      # Mail, which is what offers password sign-in. The domain's default
+      # sender: other names need a raised sending limit first.
+      dynamic "env" {
+        for_each = var.email_enabled ? [1] : []
+        content {
+          name  = "BIRDSENSE_MAIL_ENDPOINT"
+          value = "https://${azurerm_communication_service.this[0].hostname}"
+        }
+      }
+      dynamic "env" {
+        for_each = var.email_enabled ? [1] : []
+        content {
+          name        = "BIRDSENSE_MAIL_KEY"
+          secret_name = "mail-key"
+        }
+      }
+      dynamic "env" {
+        for_each = var.email_enabled ? [1] : []
+        content {
+          name  = "BIRDSENSE_MAIL_SENDER"
+          value = "DoNotReply@${var.email_domain}"
+        }
+      }
       # BIRDSENSE_ADDR, BIRDSENSE_STATIC_DIR, BIRDSENSE_STORAGE_DIR and the
       # BirdNET paths are already set in the image. BIRDSENSE_COSMOS_KEY is for
       # the emulator and must never be set here.
@@ -319,6 +350,7 @@ resource "azurerm_container_app" "this" {
     azurerm_cosmosdb_sql_role_assignment.app,
     azurerm_cosmosdb_sql_container.this,
     azurerm_role_assignment.app_job_starter,
+    azurerm_communication_service_email_domain_association.this,
   ]
 
   # Perch's process tree peaks near 2 GB on its own (1.95 GB measured on a

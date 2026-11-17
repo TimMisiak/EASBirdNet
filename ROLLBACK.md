@@ -92,6 +92,16 @@ them a field volunteer (`db.BackfillRoles`): a reviewer or birding expert who
 signed in during the rollback has to be given that role again on the People
 tab.
 
+**Passwords.** An image from before password sign-in has no such routes, so anyone
+with only a password can't get in until you roll forward again; anyone with a
+provider still can. Their `credentials`
+documents are untouched, being in a container that image doesn't open, and it
+doesn't mind the container being there. What it does lose is `sessionsValidFrom`
+on any user it writes, which is every sign-in: a session or MCP connection from
+before someone's last password change would work again, for as long as it had left.
+If someone reset a password because of a compromise, have them reset it again after
+rolling forward.
+
 **Cards being deleted.** Since `deleting` (DELETE-CARDS.md), a coordinator's
 delete only marks a card, and the web app's deleter removes it a minute or
 more later. An image from before that doesn't know the status: a card

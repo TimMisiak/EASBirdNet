@@ -27,12 +27,14 @@ type jsonFile struct {
 
 // fileData is the file on disk. Each map is keyed by document id.
 type fileData struct {
-	Version    int                  `json:"version"`
-	Users      map[string]User      `json:"users"`
-	Recorders  map[string]Recorder  `json:"recorders"`
-	Uploads    map[string]Upload    `json:"uploads"`
-	AudioFiles map[string]AudioFile `json:"audioFiles"`
-	Detections map[string]Detection `json:"detections"`
+	Version int             `json:"version"`
+	Users   map[string]User `json:"users"`
+	// Credentials is absent from a file written before them; fill makes it good.
+	Credentials map[string]Credential `json:"credentials"`
+	Recorders   map[string]Recorder   `json:"recorders"`
+	Uploads     map[string]Upload     `json:"uploads"`
+	AudioFiles  map[string]AudioFile  `json:"audioFiles"`
+	Detections  map[string]Detection  `json:"detections"`
 	// CardSummaries is absent from a file written before them, which fill
 	// makes good: a card with no summary has one built when it is read.
 	CardSummaries map[string]CardSummary `json:"cardSummaries"`
@@ -80,6 +82,9 @@ func OpenJSONFile(path string) (Store, error) {
 func (d *fileData) fill() {
 	if d.Users == nil {
 		d.Users = map[string]User{}
+	}
+	if d.Credentials == nil {
+		d.Credentials = map[string]Credential{}
 	}
 	if d.Recorders == nil {
 		d.Recorders = map[string]Recorder{}
@@ -177,6 +182,46 @@ func (s *jsonFile) emailTaken(email, exceptID string) bool {
 		}
 	}
 	return false
+}
+
+func (s *jsonFile) GetCredential(_ context.Context, userID string) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return get(s.data.Credentials, userID)
+}
+
+func (s *jsonFile) SetCredential(_ context.Context, userID string, expect int, hash string) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expect == 0 {
+		if _, taken := s.data.Credentials[userID]; taken {
+			return Credential{}, ErrConflict
+		}
+		c := newCredential(userID, hash, now())
+		return c, put(s, s.data.Credentials, userID, c)
+	}
+	c, err := update(s, s.data.Credentials, userID, func(c *Credential, _ Credential) error {
+		return c.replace(expect, hash, now())
+	})
+	if errors.Is(err, ErrNotFound) {
+		return Credential{}, ErrConflict
+	}
+	return c, err
+}
+
+func (s *jsonFile) DeleteCredential(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, had := s.data.Credentials[userID]
+	if !had {
+		return nil
+	}
+	delete(s.data.Credentials, userID)
+	if err := s.save(); err != nil {
+		s.data.Credentials[userID] = old
+		return err
+	}
+	return nil
 }
 
 // --- recorders ---

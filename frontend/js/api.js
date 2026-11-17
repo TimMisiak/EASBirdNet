@@ -61,6 +61,16 @@ export const fetchSession = () => get("/session");
 export const createSession = (body) => request("POST", "/session", body);
 export const deleteSession = () => request("DELETE", "/session");
 
+/** Sign in with an address and password. A wrong one is an ApiError like any other. */
+export const passwordSignIn = (body) => request("POST", "/auth/password", body);
+/** Ask for a link to set a password. The answer is the same whoever is asking. */
+export const requestPasswordLink = (email) => request("POST", "/auth/password/link", { email });
+/** Whose an emailed link is: {user, first}, or an ApiError if it's no longer good. */
+export const fetchPasswordLink = (token) =>
+  get(`/auth/password/link?${new URLSearchParams({ token })}`);
+/** Spend a link on a new password, which also signs this browser in. */
+export const setPassword = (body) => request("PUT", "/auth/password", body);
+
 /** Everyone on the roster, for the sign-in picker. Only exists in dev mode. */
 export const fetchDevPeople = () => get("/dev/people");
 

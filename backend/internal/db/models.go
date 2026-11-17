@@ -94,6 +94,9 @@ type User struct {
 	// is matched on the provider's stable subject rather than only the address.
 	Identity     *Identity  `json:"identity,omitempty"`
 	LastSignInAt *time.Time `json:"lastSignInAt,omitempty"`
+	// SessionsValidFrom ends every session and MCP connection begun before it:
+	// setting a password sets it, so a reset shuts out whoever had the old one.
+	SessionsValidFrom *time.Time `json:"sessionsValidFrom,omitempty"`
 	// RemovedAt takes someone off the roster without breaking the uploads and
 	// reviews that point at them.
 	RemovedAt *time.Time `json:"removedAt,omitempty"`
@@ -103,8 +106,24 @@ type User struct {
 
 // Identity is the external account a user signs in with.
 type Identity struct {
-	Provider string `json:"provider"` // "google" or "microsoft"
-	Subject  string `json:"subject"`  // the OIDC "sub" claim
+	Provider string `json:"provider"` // "google", "microsoft" or "password"
+	Subject  string `json:"subject"`  // the OIDC "sub" claim; for "password", the user's id
+}
+
+// Credential is someone's password, in a container of its own: nothing that
+// reads the roster ever holds a hash, and an older image rewriting a user it
+// doesn't fully know (ROLLBACK.md) can't lose one. Someone who has never set a
+// password has no document.
+type Credential struct {
+	// ID is the user's id.
+	ID string `json:"id"`
+	// PasswordHash is the argon2id hash in PHC form, with its own parameters.
+	PasswordHash string `json:"passwordHash"`
+	// Version counts the passwords set, from 1. A password link names the
+	// version it was issued against, so setting a password spends it.
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Recorder is one listening station: the device and the place it is mounted,

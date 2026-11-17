@@ -3,12 +3,13 @@ import { controls, forms, typography } from "../shared-styles.js";
 import { navigate, query } from "../router.js";
 import * as api from "../api.js";
 import * as session from "../session.js";
-import { labels } from "../roles.js";
+import * as roles from "../roles.js";
 import "./bs-brand-mark.js";
+import "./bs-password-warning.js";
 
 /**
- * <bs-signin-page>. The roster is the allow-list: there is no password, and
- * anyone whose address a coordinator hasn't added gets told so plainly.
+ * <bs-signin-page>. The roster is the allow-list: anyone whose address a
+ * coordinator hasn't added gets told so plainly once a provider has proved it.
  *
  * A provider button leaves the app: it is a full navigation to
  * /api/v1/auth/{provider}/start, which redirects to the provider and comes
@@ -16,6 +17,11 @@ import "./bs-brand-mark.js";
  * comes back to /signin?error=<reason>, which signInError turns into a
  * sentence. A sign-in the route guard sent here carries ?next=, the page they
  * were on its way to, and either kind of sign-in goes there afterwards.
+ *
+ * Where the server offers it, the form below them takes an address and a
+ * password, and sends an emailed link for a first or forgotten one; that form
+ * says nothing about who is on the roster. An admin who signs in with a password
+ * is warned before going on: this page is the first that knows who they are.
  *
  * In dev mode a boxed picker at the bottom lists everyone on the roster to
  * sign in as; the server only offers that roster in dev mode, and the page
@@ -28,6 +34,14 @@ class SignInPage extends BaseElement {
   #error = null;
   /** The roster for the dev picker: null until loaded, and never outside dev. */
   #people = null;
+  /** Which password form shows: the sign-in, or asking for a link. */
+  #asking = false;
+  /** The address a link was asked for, once it has been. */
+  #asked = null;
+  /** The address typed, which goes with them between those two forms. */
+  #address = "";
+  /** An admin just signed in with a password, held until they've read the warning. */
+  #warned = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -82,7 +96,64 @@ class SignInPage extends BaseElement {
         window.location.assign(`/api/v1/auth/${encodeURIComponent(el.dataset.provider)}/start${next}`);
       },
       dev: (form) => this.#signIn({ email: form.elements.email.value }),
+      password: (form) => this.#passwordSignIn(form),
+      link: (form) => this.#askForLink(form),
+      asking: () => this.#showForm(true),
+      signing: () => this.#showForm(false),
+      carryOn: () => {
+        session.adopt(this.#warned);
+        navigate(this.#next);
+      },
     };
+  }
+
+  #showForm(asking) {
+    this.#address = this.$('input[type="email"]')?.value ?? this.#address;
+    this.#asking = asking;
+    this.#asked = null;
+    this.#error = null;
+    this.render();
+  }
+
+  async #passwordSignIn(form) {
+    if (this.#busy) return;
+    this.#address = form.elements.email.value;
+    this.#busy = true;
+    this.#error = null;
+    this.render();
+    try {
+      const { user } = await api.passwordSignIn({ email: this.#address, password: form.elements.password.value });
+      if (roles.has(user, roles.ADMIN)) {
+        // Signed in already; the app hears of it when they carry on, because
+        // hearing of it redraws the app and this page with it.
+        this.#busy = false;
+        this.#warned = user;
+        this.render();
+        return;
+      }
+      session.adopt(user);
+      navigate(this.#next);
+    } catch (error) {
+      this.#busy = false;
+      this.#error = error;
+      this.render();
+    }
+  }
+
+  async #askForLink(form) {
+    if (this.#busy) return;
+    this.#address = form.elements.email.value;
+    this.#busy = true;
+    this.#error = null;
+    this.render();
+    try {
+      await api.requestPasswordLink(this.#address);
+      this.#asked = this.#address;
+    } catch (error) {
+      this.#error = error;
+    }
+    this.#busy = false;
+    this.render();
   }
 
   async #signIn(body) {
@@ -132,6 +203,78 @@ class SignInPage extends BaseElement {
       .join("");
   }
 
+  /** Signing in with a password, or asking for a link to set one. */
+  #passwordForm() {
+    if (!session.passwordOffered()) return "";
+    const busy = this.#busy ? "disabled" : "";
+    const address = `
+      <label class="label" for="address">Email address</label>
+      <input class="field" id="address" name="email" type="email" autocomplete="username"
+        value="${escapeHTML(this.#address)}" required ${busy}>
+    `;
+    const or = session.identityProviders().length ? `<p class="or"><span>or</span></p>` : "";
+    if (this.#asked) {
+      return `
+        ${or}
+        <p class="sent">
+          If <strong>${escapeHTML(this.#asked)}</strong> is on the roster, we've emailed it a
+          link to set a password. It works for an hour. Check your spam folder if you don't see it.
+        </p>
+        <button class="link" data-action="signing">Back to sign in</button>
+      `;
+    }
+    if (this.#asking) {
+      return `
+        ${or}
+        <form class="password" data-submit="link">
+          <p class="sent">We'll email you a link to set a password.</p>
+          ${address}
+          <button class="btn btn--navy" type="submit" ${busy}>Email me a link</button>
+        </form>
+        <button class="link" data-action="signing">Back to sign in</button>
+      `;
+    }
+    return `
+      ${or}
+      <form class="password" data-submit="password">
+        ${address}
+        <label class="label" for="password">Password</label>
+        <input class="field" id="password" name="password" type="password" autocomplete="current-password" required ${busy}>
+        <button class="btn btn--navy" type="submit" ${busy}>Sign in</button>
+      </form>
+      <button class="link" data-action="asking">First time, or forgot your password?</button>
+    `;
+  }
+
+  /** What an admin reads after signing in with a password, before going on. */
+  #warning() {
+    return `
+      <h1>You're signed in</h1>
+      <bs-password-warning></bs-password-warning>
+      <button class="btn btn--navy carry-on" data-action="carryOn">Continue</button>
+    `;
+  }
+
+  #signingIn() {
+    return `
+      <h1>Sign in</h1>
+      <p class="intro">
+        Use the email address your coordinator added to the roster.
+      </p>
+      <div class="providers">
+        ${this.#providerButtons()}
+      </div>
+      ${this.#passwordForm()}
+      ${this.#message ? `<p class="error">${escapeHTML(this.#message)}</p>` : ""}
+      <div class="help">
+        If we don't recognize your address, email
+        <a href="mailto:owls@eastsideaudubon.org">owls@eastsideaudubon.org</a>
+        and a coordinator will add you.
+      </div>
+      ${this.#devPicker()}
+    `;
+  }
+
   #devPicker() {
     if (!session.isDev() || !this.#people) return "";
     const group = (label, role) => {
@@ -142,7 +285,7 @@ class SignInPage extends BaseElement {
           ${people
             .map((p) => {
               // Who does what, so each tab's guard can be tried by picking someone.
-              const what = p.role === "admin" ? "" : ` — ${labels(p).join(", ")}`;
+              const what = p.role === "admin" ? "" : ` — ${roles.labels(p).join(", ")}`;
               return `<option value="${escapeHTML(p.email)}">${escapeHTML(p.name + what)}</option>`;
             })
             .join("")}
@@ -214,6 +357,33 @@ class SignInPage extends BaseElement {
         .provider:hover:not([disabled]) { border-color: var(--bs-navy); }
         /* The providers' own logo files, unaltered, as their brand rules require. */
         .provider .logo { width: 20px; height: 20px; flex: none; }
+        .or {
+          display: flex;
+          align-items: center;
+          gap: var(--bs-space-3);
+          margin-block: var(--bs-space-4);
+          font-size: 0.8125rem;
+          color: var(--bs-text-muted);
+        }
+        .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--bs-border); }
+        .password { display: flex; flex-direction: column; }
+        .password .field { margin-bottom: var(--bs-space-4); }
+        .password .sent { margin-bottom: var(--bs-space-4); }
+        .sent { font-size: 0.875rem; line-height: 1.6; color: var(--bs-text-body); overflow-wrap: anywhere; }
+        .link {
+          margin-top: var(--bs-space-3);
+          padding: 0;
+          border: 0;
+          background: none;
+          font: inherit;
+          font-size: 0.8125rem;
+          color: var(--bs-link);
+          text-decoration: underline;
+          text-underline-offset: 2px;
+          cursor: pointer;
+        }
+        .link:hover { color: var(--bs-link-hover); }
+        bs-password-warning { margin-block: var(--bs-space-4) var(--bs-space-5); }
         .help {
           border-top: 1px solid var(--bs-border);
           margin-top: 1.625rem;
@@ -277,20 +447,7 @@ class SignInPage extends BaseElement {
       </style>
       <div class="card">
         <bs-brand-mark variant="inline" size="48"></bs-brand-mark>
-        <h1>Sign in</h1>
-        <p class="intro">
-          Use the email address your coordinator added to the roster.
-        </p>
-        <div class="providers">
-          ${this.#providerButtons()}
-        </div>
-        ${this.#message ? `<p class="error">${escapeHTML(this.#message)}</p>` : ""}
-        <div class="help">
-          If we don't recognize your address, email
-          <a href="mailto:owls@eastsideaudubon.org">owls@eastsideaudubon.org</a>
-          and a coordinator will add you.
-        </div>
-        ${this.#devPicker()}
+        ${this.#warned ? this.#warning() : this.#signingIn()}
       </div>
       <p class="credit">
         Barred owl, Ravenna Park, Seattle. Photo:

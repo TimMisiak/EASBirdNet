@@ -74,29 +74,38 @@ func (k *keyset) sign(value string, expires time.Time) string {
 // verify returns the signed value, if the signature is ours and the expiry has
 // not passed.
 func (k *keyset) verify(cookie string, now time.Time) (string, error) {
+	value, _, err := k.verifyExpiring(cookie, now)
+	return value, err
+}
+
+// verifyExpiring is verify, and when the value expires, which for a value of a
+// known life says when it was signed.
+func (k *keyset) verifyExpiring(cookie string, now time.Time) (string, time.Time, error) {
+	var never time.Time
 	body, mac, ok := reverseCut(cookie)
 	if !ok {
-		return "", errors.New("api: malformed cookie")
+		return "", never, errors.New("api: malformed cookie")
 	}
 	if !hmac.Equal([]byte(mac), []byte(k.mac(body))) {
-		return "", errors.New("api: bad cookie signature")
+		return "", never, errors.New("api: bad cookie signature")
 	}
 	expiry, encoded, ok := strings.Cut(body, ".")
 	if !ok {
-		return "", errors.New("api: malformed cookie")
+		return "", never, errors.New("api: malformed cookie")
 	}
 	unix, err := strconv.ParseInt(expiry, 10, 64)
 	if err != nil {
-		return "", errors.New("api: malformed cookie expiry")
+		return "", never, errors.New("api: malformed cookie expiry")
 	}
-	if now.After(time.Unix(unix, 0)) {
-		return "", errors.New("api: the cookie has expired")
+	expires := time.Unix(unix, 0)
+	if now.After(expires) {
+		return "", never, errors.New("api: the cookie has expired")
 	}
 	value, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", errors.New("api: malformed cookie value")
+		return "", never, errors.New("api: malformed cookie value")
 	}
-	return string(value), nil
+	return string(value), expires, nil
 }
 
 // reverseCut moves the last "." to the front of the string, so strings.Cut

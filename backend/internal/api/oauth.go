@@ -676,7 +676,7 @@ func (h *handlers) token(w http.ResponseWriter, r *http.Request) {
 
 	// The roster is the allow-list here too: a code or a refresh token in the
 	// hands of someone since removed, or no longer a reviewer, is worth nothing.
-	if ok, err := h.mayReadDetections(r, grant.Email); err != nil {
+	if ok, err := h.mayReadDetections(r, grant.Email, time.Unix(grant.Granted, 0)); err != nil {
 		h.fail(w, r, err)
 		return
 	} else if !ok {
@@ -730,10 +730,11 @@ func (h *handlers) onRoster(r *http.Request, email string) (db.User, bool, error
 // mayReadDetections is onRoster for the MCP tools, which read every card's
 // detections: someone still on the roster who may read them, a reviewer, as
 // on the routes under /detections. A grant outlives a change of roles, so it
-// is asked on every use rather than only at Allow.
-func (h *handlers) mayReadDetections(r *http.Request, email string) (bool, error) {
+// is asked on every use rather than only at Allow. began is when what is being
+// used began, since setting a password ends every connection older than that.
+func (h *handlers) mayReadDetections(r *http.Request, email string, began time.Time) (bool, error) {
 	u, ok, err := h.onRoster(r, email)
-	return ok && u.Has(db.RoleReviewer), err
+	return ok && u.Has(db.RoleReviewer) && stillValid(u, began), err
 }
 
 // verifyAccess is the MCP endpoint's token check: signed by us, unexpired,
@@ -743,7 +744,7 @@ func (h *handlers) verifyAccess(r *http.Request, token string) (*auth.TokenInfo,
 	if err := verifyJSON(h.oauth.access, token, h.now(), &t); err != nil || t.Audience != h.oauth.resource {
 		return nil, auth.ErrInvalidToken
 	}
-	ok, err := h.mayReadDetections(r, t.Email)
+	ok, err := h.mayReadDetections(r, t.Email, time.Unix(t.Granted, 0))
 	switch {
 	case err != nil:
 		return nil, err

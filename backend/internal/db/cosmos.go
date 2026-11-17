@@ -23,14 +23,15 @@ import (
 // Containers and their partition keys. DEPLOYMENT.md lists the same eight; the
 // app never creates them (its data-plane role can't, and Terraform owns them).
 const (
-	containerUsers      = "users"         // partition key /id
-	containerRecorders  = "recorders"     // partition key /id
-	containerUploads    = "uploads"       // partition key /id
-	containerAudioFiles = "audioFiles"    // partition key /uploadId
-	containerDetections = "detections"    // partition key /uploadId
-	containerSummaries  = "cardSummaries" // partition key /id
-	containerSettings   = "settings"      // partition key /id
-	containerBouts      = "bouts"         // partition key /uploadId
+	containerUsers       = "users"         // partition key /id
+	containerRecorders   = "recorders"     // partition key /id
+	containerUploads     = "uploads"       // partition key /id
+	containerAudioFiles  = "audioFiles"    // partition key /uploadId
+	containerDetections  = "detections"    // partition key /uploadId
+	containerSummaries   = "cardSummaries" // partition key /id
+	containerSettings    = "settings"      // partition key /id
+	containerBouts       = "bouts"         // partition key /uploadId
+	containerCredentials = "credentials"   // partition key /id
 )
 
 const (
@@ -51,7 +52,7 @@ const (
 )
 
 type cosmosStore struct {
-	users, recorders, uploads, audioFiles, detections, summaries, settings, bouts *azcosmos.ContainerClient
+	users, credentials, recorders, uploads, audioFiles, detections, summaries, settings, bouts *azcosmos.ContainerClient
 }
 
 var _ Store = (*cosmosStore)(nil)
@@ -92,14 +93,15 @@ func OpenCosmos(ctx context.Context, cfg Config) (Store, error) {
 
 	s := &cosmosStore{}
 	for name, dst := range map[string]**azcosmos.ContainerClient{
-		containerUsers:      &s.users,
-		containerRecorders:  &s.recorders,
-		containerUploads:    &s.uploads,
-		containerAudioFiles: &s.audioFiles,
-		containerDetections: &s.detections,
-		containerSummaries:  &s.summaries,
-		containerSettings:   &s.settings,
-		containerBouts:      &s.bouts,
+		containerUsers:       &s.users,
+		containerRecorders:   &s.recorders,
+		containerUploads:     &s.uploads,
+		containerAudioFiles:  &s.audioFiles,
+		containerDetections:  &s.detections,
+		containerSummaries:   &s.summaries,
+		containerSettings:    &s.settings,
+		containerBouts:       &s.bouts,
+		containerCredentials: &s.credentials,
 	} {
 		c, err := client.NewContainer(cfg.CosmosDatabase, name)
 		if err != nil {
@@ -175,6 +177,33 @@ func (s *cosmosStore) UpdateUser(ctx context.Context, id string, mutate func(*Us
 		}
 		return nil
 	})
+}
+
+func (s *cosmosStore) GetCredential(ctx context.Context, userID string) (Credential, error) {
+	return readDoc[Credential](ctx, s.credentials, userID, userID)
+}
+
+func (s *cosmosStore) SetCredential(ctx context.Context, userID string, expect int, hash string) (Credential, error) {
+	if expect == 0 {
+		// Of two first passwords at once, the second is a conflict.
+		c := newCredential(userID, hash, now())
+		return c, createDoc(ctx, s.credentials, userID, c)
+	}
+	c, err := updateDoc(ctx, s.credentials, userID, userID, func(c *Credential, _ Credential) error {
+		return c.replace(expect, hash, now())
+	})
+	if errors.Is(err, ErrNotFound) {
+		return Credential{}, ErrConflict
+	}
+	return c, err
+}
+
+func (s *cosmosStore) DeleteCredential(ctx context.Context, userID string) error {
+	_, err := s.credentials.DeleteItem(ctx, azcosmos.NewPartitionKeyString(userID), userID, nil)
+	if err = cosmosErr(err); errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
 }
 
 func (s *cosmosStore) checkEmail(ctx context.Context, email, exceptID string) error {

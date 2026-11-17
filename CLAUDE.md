@@ -32,6 +32,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 │       ├── birdnet/    Runs analyzer/analyze.py (detections) and clip.py (clips)
 │       ├── db/         Data model + Store: Cosmos DB (prod) or a JSON file (dev)
 │       ├── deletion/   Removes the cards a coordinator deletes, in the background
+│       ├── email/      Sends mail: Azure Communication Services, or the log in dev
 │       ├── perf/       What analysis costs the machine: samples + per-file records
 │       ├── devseed/    Placeholder program written into an empty dev database
 │       ├── retention/  Deletes a card's originals a month on; clips are kept
@@ -197,6 +198,10 @@ GET    /api/v1/public/overview?days=      program stats + confirmed species
 GET    DELETE /api/v1/session             who you are; sign out
 GET    /api/v1/auth/{provider}/start      leave for Google or Microsoft
 GET    /api/v1/auth/{provider}/callback   come back from them, signed in
+POST   /api/v1/auth/password              sign in with an address and password (where there is mail)
+POST   /api/v1/auth/password/link         email a link to set a password: answers the same for anyone
+GET    /api/v1/auth/password/link?token=  whose a link is, for the page it lands on
+PUT    /api/v1/auth/password              spend a link on a password, which signs this browser in
 GET    /api/v1/stations                   recorders in the field
 GET    POST /api/v1/uploads               your cards; register a card and its files
 GET    /api/v1/uploads/{reference}       one of your cards, with its files and their status
@@ -239,8 +244,8 @@ POST   /api/v1/oauth/token                a code or a refresh token for tokens
 Dev mode follows `BIRDSENSE_DB=local` (Azure runs Cosmos, so it can't be on
 there). It registers the `/dev/*` routes *and* `POST /session`, and
 `GET /session` reports it as `dev`, so the sign-in page offers a picker of
-everyone on the roster. A deployed server registers neither, so its only way in
-is a provider.
+everyone on the roster. A deployed server registers neither, so its only ways
+in are a provider and, where mail is set up, a password.
 
 Every route but the session's and the public ones is for a role (*One set of
 tabs, each for a role*): `/uploads` and tus for a field volunteer,
@@ -409,7 +414,8 @@ length but not its strength: a deployment's key must be at least
 `api.MinSessionKeyLen` bytes, checked where the environment is read
 (`cmd/server`) and again at plan time in `infra/variables.tf`. `newKeyset`
 itself only refuses an empty key, so tests can sign with a short one. Removing someone from the roster already ends
-theirs, so there is no session store to revoke from.
+theirs, so there is no session store to revoke from; what ends one short of that
+is `users.sessionsValidFrom` (*Password sign-in* below).
 The browser finds out the same way it finds out anything: `api.js` turns any
 401 into a sign-out in `session.js`, so one ended session bounces the app to
 the sign-in page (`/signin?error=session-ended`) instead of leaving every
@@ -418,6 +424,66 @@ it. That is the only re-check there is -- `session.load()` runs once, at
 startup -- so a page that makes no API call won't notice.
 *Revisit when:* a provider has to be something other than Google or Microsoft,
 or sessions need to be listed and revoked one at a time.
+
+**Password sign-in is an emailed link and a hash.** For someone who would
+rather not use Google or Microsoft, `internal/api/password.go` offers an address
+and a password, where mail is configured; without it the routes aren't
+registered and the sign-in page doesn't show the form. It ends in the same
+session cookie, so nothing past sign-in knows which way someone came in. The
+roster is still the allow-list: nobody registers, and the only way to a password,
+first or forgotten, is a link mailed to the roster's address, so holding the
+address is proved before a password exists. Nothing about the way in says who is
+on the roster: asking for a link answers before it looks, and a failed sign-in
+reads the same and takes a hash's time whatever was wrong.
+- Hashes are argon2id at OWASP's minimum, two at a time (`passwordHashes`), since
+  each is 19 MiB and all the CPU it can get on a half-vCPU replica taking uploads.
+  They live in their own `credentials` container, not on `users`, because an
+  older image drops a field it doesn't know when it rewrites a document
+  (ROLLBACK.md), which would quietly lose passwords, and so nothing that reads
+  the roster ever holds one.
+- A link is signed, not stored, as `keyset.derive("password-link")`, for an hour,
+  and names the credential's `version` and the address. Setting a password moves
+  the version on, which is what spends every link issued against the old one
+  (`SetCredential` is compare-and-set), and moving someone to a new address kills
+  a link sent to the old one. Opening a link spends nothing, so a mail scanner
+  following it does no harm; only submitting the form does.
+- Setting a password ends everything begun before it, since a reset is often
+  because someone else may have the old one. The session cookie is only a signed
+  address, so the stored half is `users.sessionsValidFrom`: when a cookie began
+  is worked out from its signed expiry, and `stillValid` refuses one older than
+  that. MCP grants and export links go by the same test. Removing someone sets it
+  too and deletes their password, because adding them back reuses the document.
+- Limits are in memory, as tusd's locks are, because one replica is the whole
+  deployment: wrong passwords per address (10 per 15 minutes, from however many
+  machines, locking out only passwords, since a provider or a link still works),
+  attempts per client (50), and links per address (3 an hour), per client (20)
+  and overall (60, below ACS's 100). A client is the rightmost `X-Forwarded-For`
+  entry, the only one Container Apps' ingress vouches for.
+- An admin may use a password but is warned, by `<bs-password-warning>`: it has no
+  second step, and an admin's reaches cards and the roster. It shows on the page a
+  link lands on and after a password sign-in, never before, or the sign-in page
+  would tell a stranger which addresses are admins'.
+Gotcha: announcing a sign-in redraws `<bs-app>`, and the page with it, so the
+warning after a sign-in comes first and `session.adopt` only when they carry on;
+the cookie is already set by then, so a reload just skips the warning. And an
+outage of mail leaves anyone without a password or a provider stuck, which is why a
+provider is still required outside dev: a coordinator's way in can't hang on it.
+*Revisit when:* someone asks for a second factor (TOTP belongs beside the
+credential, and then the warning can go), or a person needs to change a password
+while signed in without going through their inbox. A breached-password check is
+not done: it would add an outside call to setting one.
+
+**Mail is Azure Communication Services, for now.** `internal/email` is one
+interface and two backends: ACS over its REST API, signed with the resource's
+access key, and the log in dev, where a developer reads the link out of the
+server's output. ACS Email is retiring on 2028-09-30 and is in maintenance mode, so
+moving is a known job, not a surprise (DEPLOYMENT.md, *Email*); only that package
+and `infra/email.tf` know which sender it is. A send is accepted (202) rather than
+delivered, so a bounce shows only in ACS's own logs, and a failed send can only
+be logged, since the person has already been told to look for the mail.
+*Revisit before:* 2028-09-30, or sooner if ACS stops taking new resources before
+ours exists. The "card received" and "results" emails can use this when they are
+built.
 
 **LLM tools connect over MCP, and Birdsense is the OAuth server.** The weekly
 report is written by an LLM tool reading the data as someone on the roster, so
@@ -1097,6 +1163,10 @@ would have no way in at all. Dev mode fills all four in (a random session key,
 is opt-in locally: set the three Microsoft variables and register
 `http://localhost:8080/api/v1/auth/microsoft/callback`, which providers allow
 over plain http for localhost only.
+Dev mode offers password sign-in too, and logs each link rather than mailing it:
+look for `email (development: logged, not sent)` in the server's output. Mail for
+real takes all three of `BIRDSENSE_MAIL_ENDPOINT`, `_KEY` and `_SENDER`
+(DEPLOYMENT.md, *Email*); a deployment with none of them offers no passwords.
 `BIRDSENSE_BOOTSTRAP_ADMIN="Name <email>"` adds the first admin to an empty
 roster (required on a first deploy, see DEPLOYMENT.md). In dev it runs before
 the seed, so setting it starts you from a clean roster. Outside dev mode it
@@ -1190,7 +1260,10 @@ background: see *Deleting a card is a status and a sweep*).
 backend, deliberately not the dev seed.
 
 Sign-in is real: OpenID Connect against Microsoft, with the roster as the
-allow-list (see *Sign-in* above). `POST /session {"role": ...}` still signs in
+allow-list (see *Sign-in* above), and passwords set through an emailed link where
+mail is configured (*Password sign-in*). The ACS sender has only run against a test
+server checking its signature, never ACS itself, and mail isn't set up in Azure
+yet: it waits on DNS records (DEPLOYMENT.md, *Email*). `POST /session {"role": ...}` still signs in
 as the first person with that role, but only in dev mode. Google is written and
 untested -- it needs a client id, a secret, and someone to try it.
 The Cosmos DB backend and the Blob Storage backend have both run in Azure

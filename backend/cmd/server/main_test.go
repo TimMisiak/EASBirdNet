@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
 )
 
@@ -85,6 +87,73 @@ func signInEnv(t *testing.T) {
 	t.Setenv("BIRDSENSE_OIDC_MICROSOFT_TENANT", "")
 	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_ID", "")
 	t.Setenv("BIRDSENSE_OIDC_GOOGLE_CLIENT_SECRET", "")
+}
+
+// Password sign-in's routes sit beside the providers' {provider} ones, and
+// together they only exist with both configured, which no package test does.
+func TestPasswordRoutesCoexistWithProviders(t *testing.T) {
+	store, err := db.OpenJSONFile(filepath.Join(t.TempDir(), "birdsense.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>birdsense</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Cancelled, so it keeps the provider without looking for it on the network.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	auth, err := api.NewAuthenticator(ctx, api.AuthConfig{
+		PublicURL: "https://owls.eastsideaudubon.org",
+		Providers: []api.ProviderConfig{{Name: api.ProviderMicrosoft, ClientID: "id", ClientSecret: "secret"}},
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{StaticDir: dir, SessionKey: api.RandomSessionKey(), Mail: email.Log{Logger: log}}
+	mux := newMux(cfg, store, testFiles(t), nil, nil, nil, auth, log)
+	for _, c := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/api/v1/auth/password/link", http.StatusGone},
+		{http.MethodPost, "/api/v1/auth/password", http.StatusBadRequest},
+		{http.MethodGet, "/api/v1/auth/password/start", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s = %d, want %d", c.method, c.path, rec.Code, c.want)
+		}
+	}
+}
+
+func TestConfigFromEnvMail(t *testing.T) {
+	const endpoint, key, sender = "https://x.communication.azure.com", "a2V5", "DoNotReply@mail.example.org"
+	for _, c := range []struct {
+		what                  string
+		endpoint, key, sender string
+		wantMail, wantErr     bool
+	}{
+		{"none of it", "", "", "", false, false},
+		{"all of it", endpoint, key, sender, true, false},
+		{"no key", endpoint, "", sender, false, true},
+		{"no sender", endpoint, key, "", false, true},
+		{"no endpoint", "", key, sender, false, true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			t.Setenv("BIRDSENSE_MAIL_ENDPOINT", c.endpoint)
+			t.Setenv("BIRDSENSE_MAIL_KEY", c.key)
+			t.Setenv("BIRDSENSE_MAIL_SENDER", c.sender)
+			var cfg config
+			err := readMail(&cfg)
+			if (err != nil) != c.wantErr || (cfg.Mail != nil) != c.wantMail {
+				t.Errorf("mail = %v, err = %v", cfg.Mail, err)
+			}
+		})
+	}
 }
 
 func TestConfigFromEnvDatabase(t *testing.T) {

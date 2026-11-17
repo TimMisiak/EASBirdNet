@@ -29,13 +29,15 @@ storage side needs.
                     │   └──Entra ID──▶ Storage    stbirdsenseprod/audio │
                     │ Container Apps env ──logs──▶ Log Analytics        │
                     │ Alerts + budget ──▶ ag-birdsense-prod ──▶ email   │
+                    │ Mail, if set up ──▶ acs-birdsense-prod ──▶ email  │
                     └───────────────────────────────────────────────────┘
 ```
 
 - **One container** serves the API and the frontend (see CLAUDE.md), so there
   is no front door, CDN or second app.
-- **No secrets.** Every data-plane call authenticates as the app's managed
-  identity. Cosmos key auth and storage shared keys are turned off.
+- **No secrets, with one exception.** Every data-plane call authenticates as the
+  app's managed identity, and Cosmos key auth and storage shared keys are turned
+  off. Mail is the exception, if it is set up: see [Email](#email).
 - **Local development doesn't use Azure at all** (`BIRDSENSE_DB=local`).
 
 ## Naming and region
@@ -92,9 +94,9 @@ can't pull its image. Its `client_id` goes into the app's `AZURE_CLIENT_ID`.
 | name | `birdsense` |
 | throughput | *unset* (serverless) |
 
-### 5. Cosmos DB containers — `azurerm_cosmosdb_sql_container` ×8
+### 5. Cosmos DB containers — `azurerm_cosmosdb_sql_container` ×9
 
-All eight share these settings: `partition_key_version = 2`, default indexing
+All nine share these settings: `partition_key_version = 2`, default indexing
 policy (consistent, all paths included), no unique keys, no default TTL, no
 throughput (serverless).
 
@@ -108,6 +110,7 @@ throughput (serverless).
 | `cardSummaries` | `["/id"]`        |
 | `settings`   | `["/id"]`           |
 | `bouts`      | `["/uploadId"]`     |
+| `credentials` | `["/id"]`          |
 
 **Names and partition keys can't be changed after creation** without copying
 the data to a new container. They must match
@@ -115,7 +118,7 @@ the data to a new container. They must match
 case-sensitive.
 
 The app never creates the database or containers. On startup it checks that
-all eight exist and exits if one is missing. A new container is applied in the
+all nine exist and exits if one is missing. A new container is applied in the
 same `terraform apply` as the image that first needs it: the app and the job
 both depend on the containers, so they are created first.
 
@@ -401,7 +404,8 @@ derivation doesn't re-plan every month.
 
 Volunteers sign in with OpenID Connect, and the roster is the allow-list: the
 provider proves which address someone owns, and a coordinator having added that
-address is what lets them in. Nothing in Azure holds passwords. The server
+address is what lets them in. Where [mail](#email) is set up they may use a
+password instead, with its hash in the `credentials` container. The server
 refuses to start outside dev mode without a provider configured, because the
 development sign-in isn't registered there and it would have no way in at all.
 
@@ -499,6 +503,89 @@ range -- a week of five recorders is ~140,000 detections -- and at most two
 run at once, a page of memory each. Neither has been timed against Cosmos
 yet; the log line each one writes (`MCP detection summary`, `MCP export
 served`) has the row count and how long it took.
+
+## Email
+
+Password sign-in needs mail, for the link that sets a password. It comes from
+Azure Communication Services (ACS) Email, and until it is set up the app offers no
+passwords and everything else works as it did.
+
+**ACS Email retires on September 30, 2028.** Microsoft announced it in September
+2026: it is in maintenance mode, new resources are allowed "subject to change", and
+the replacement it names is Exchange Online (a Microsoft 365 license), since High
+Volume Email is internal-only. So set this up soon, and move before then: only
+`backend/internal/email` and `infra/email.tf` know which sender it is. If Eastside
+Audubon's Microsoft 365 tenant can be used, Exchange Online is the first thing to
+look at, which needs someone with admin access there.
+
+What it allows, per subscription, from a custom domain: **30 emails a minute and
+100 an hour**, and the app holds itself to 60 an hour so that a flood of requests
+can't use up the rest. About $0.00025 an email. Azure's own managed domain is
+limited to 10 an hour and documented as for testing only, so this uses ours.
+
+The access key is the one data-plane secret here: ACS's REST reference documents
+only that, and Entra ID only through its SDKs. It reaches the app as a Container
+Apps secret, read from the resource by Terraform, so nobody handles it. To rotate
+it, regenerate the primary key in the portal and apply.
+
+### 1. Create the resources
+
+```
+email_domain = "mail.eastsideaudubon.org"
+```
+
+A subdomain, so that its SPF record is clear of the organization's own mail. Apply,
+then read what DNS needs:
+
+```sh
+terraform -chdir=infra output email_dns_records
+```
+
+### 2. Ask whoever runs our DNS for the records
+
+Our DNS is hosted outside Azure, so these are made by hand, as with the
+[custom domain](#custom-domain). Send the values from that output, which are:
+
+| Purpose | Type | Name (under `mail.eastsideaudubon.org`) |
+|---------|------|------|
+| Proves we own the domain | TXT | the domain itself |
+| SPF: who may send for it | TXT | the domain itself |
+| DKIM | CNAME | `selector1-azurecomm-prod-net._domainkey` |
+| DKIM2 | CNAME | `selector2-azurecomm-prod-net._domainkey` |
+
+Nothing here touches mail for `eastsideaudubon.org` itself. Worth asking at the
+same time what DMARC policy the parent domain has: a subdomain inherits it, and
+DKIM from this subdomain is what satisfies it. Microsoft also recommends an MX
+record for the sender domain's reputation, though it isn't required.
+
+### 3. Verify the domain
+
+DNS takes 15 to 30 minutes. In the portal, open the email service, then
+**Provision domains**, and **Configure** the domain: the TXT record has to pass
+first, then SPF and DKIM. Ownership can also be verified with:
+
+```sh
+az communication email domain initiate-verification --domain-name mail.eastsideaudubon.org \
+  --email-service-name email-birdsense-prod --resource-group rg-birdsense-prod --verification-type Domain
+```
+
+### 4. Turn it on
+
+```
+email_enabled = true
+```
+
+Apply. A domain can't be linked until it is verified, hence the second apply. That
+links it, gives the app `BIRDSENSE_MAIL_ENDPOINT`, `_KEY` and `_SENDER`
+(`DoNotReply@` the domain, since other names need a raised sending limit), and so
+adds the form to the sign-in page. Then try it: ask for a link to your own address,
+and check the mail arrives, with its link intact and not in spam. This is the first
+time the sender will have met ACS itself.
+
+Mail's failures don't reach anyone by themselves. A refused send is an error in the
+log (`password link not sent`), which the 5xx alert doesn't see, because the person
+already had their answer; a bounce shows only in ACS's own logs. Check both if
+someone says the mail never came.
 
 ## Custom domain
 
@@ -1075,6 +1162,7 @@ before relying on any of this.
 | Container Apps | low traffic, scale to zero | Usually within the monthly free grant, including the few hours of active replica each card upload takes. |
 | Container Registry Basic | one small image | A few dollars a month. |
 | Log Analytics | low volume | Within the free ingestion allowance at this scale. |
+| Communication Services Email | a few sign-in links a week | About $0.00025 an email: pennies at most. |
 | Azure Monitor alerts | 2 metric rules, 1 log query rule, 2 activity log rules | Pennies. Activity log rules and emailed notifications are free; metric rules are billed per monitored time series and the query rule per evaluation, at a 15-minute cadence. |
 
 *Alternative for Cosmos.* One Cosmos account per subscription can use the free
@@ -1105,7 +1193,8 @@ can't be changed in place.
   sweeps them. A job that cleans up after a card that has gone quiet would do
   it sooner, and would be the place to reclaim the card's reference too.
 - **Email**: the upload flow promises "card received" and "results" emails,
-  which needs Azure Communication Services or an external provider.
+  which can use `internal/email` once [mail](#email) is set up. That is on ACS
+  until it retires in 2028, and what replaces it is still to be chosen.
 
 ## Where each resource is
 
@@ -1118,7 +1207,7 @@ from this file to that one.
 | 2 | Managed identity | `azurerm_user_assigned_identity` | `main.tf` |
 | 3 | Cosmos account (serverless, key auth off, continuous 7-day backup) | `azurerm_cosmosdb_account` | `cosmos.tf` |
 | 4 | Cosmos database `birdsense` | `azurerm_cosmosdb_sql_database` | `cosmos.tf` |
-| 5 | Containers `users`, `recorders`, `uploads` (`/id`), `audioFiles`, `detections` (`/uploadId`) | `azurerm_cosmosdb_sql_container` (`for_each`) | `cosmos.tf` |
+| 5 | Containers `users`, `credentials`, `recorders`, `uploads` (`/id`), `audioFiles`, `detections` (`/uploadId`), and the rest of the nine | `azurerm_cosmosdb_sql_container` (`for_each`) | `cosmos.tf` |
 | 6 | Cosmos Built-in Data Contributor → identity, database scope | `azurerm_cosmosdb_sql_role_assignment` | `cosmos.tf` |
 | 7 | Storage account (shared keys off) + `audio` container + lifecycle policy (the backstop, not the retention policy) | `azurerm_storage_account`, `azurerm_storage_container`, `azurerm_storage_management_policy` | `storage.tf` |
 | 8 | Storage Blob Data Contributor → identity, and → whoever runs Terraform | `azurerm_role_assignment` ×2 | `storage.tf` |
@@ -1131,6 +1220,7 @@ from this file to that one.
 | 14 | Five alert rules: replica restarts, 5xx, BirdNET unavailable, service health, resource health | `azurerm_monitor_metric_alert` ×2, `azurerm_monitor_scheduled_query_rules_alert_v2`, `azurerm_monitor_activity_log_alert` ×2 | `monitor.tf` |
 | 15 | Monthly cost budget on the resource group | `azurerm_consumption_budget_resource_group` | `monitor.tf` |
 | 16 | Custom domain, if one is configured: the hostname bound to the app. Its DNS records are made at our DNS host, and its certificate is Azure's managed one, bound by hand -- see [Custom domain](#custom-domain) | `azurerm_container_app_custom_domain` | `domain.tf` |
+| 17 | Mail, if `email_domain` is set: the email service, its domain and the communication service; and with `email_enabled`, the link between them. Its DNS records are made at our DNS host -- see [Email](#email) | `azurerm_email_communication_service`, `azurerm_email_communication_service_domain`, `azurerm_communication_service`, `azurerm_communication_service_email_domain_association` | `email.tf` |
 
 **Variables** (`variables.tf`): six are required and have no default --
 `image_tag`, `bootstrap_admin`, `session_key`, `oidc_microsoft_client_id`,

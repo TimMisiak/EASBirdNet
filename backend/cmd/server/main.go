@@ -25,6 +25,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
@@ -281,10 +282,14 @@ func shutdownHTTP(srv *http.Server, grace time.Duration, log *slog.Logger) error
 // patterns do -- see web.Register.
 func newMux(cfg config, store db.Store, files storage.Store, queue api.Queue, deleter api.Deleter, preparer api.Preparer, auth *api.Authenticator, log *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
+	sender := cfg.Mail
+	if sender == nil && cfg.Dev {
+		sender = email.Log{Logger: log}
+	}
 	api.Register(mux, api.Options{
 		Store: store, Files: files, Queue: queue, Deleter: deleter, Preparer: preparer, Log: log,
 		Dev: cfg.Dev, Auth: auth, SessionKey: cfg.SessionKey, Retention: cfg.Retention,
-		PublicURL: cfg.Auth.PublicURL,
+		PublicURL: cfg.Auth.PublicURL, Mail: sender,
 	})
 	web.Register(mux, cfg.StaticDir, log)
 	return mux
@@ -305,9 +310,13 @@ type config struct {
 	// BootstrapAdmin, when set, is added as an admin if the roster is empty,
 	// so a fresh deployment has someone who can add everyone else.
 	BootstrapAdmin *mail.Address
-	// Auth is OIDC sign-in. Outside dev mode it is required: there is no other
-	// way in.
+	// Auth is OIDC sign-in. Outside dev mode it is required: a coordinator's
+	// way in mustn't hang on mail having been set up.
 	Auth api.AuthConfig
+	// Mail sends the links that set passwords, and offers password sign-in by
+	// being there. Dev mode logs them if it isn't set; a deployment without it
+	// offers no passwords.
+	Mail email.Sender
 	// SessionKey signs the session cookie. Outside dev mode it is required, so
 	// a restart or a new revision doesn't sign everyone out.
 	SessionKey string
@@ -613,6 +622,9 @@ func readConfig(worker bool) (config, error) {
 	if err := readAuth(&cfg); err != nil {
 		return cfg, err
 	}
+	if err := readMail(&cfg); err != nil {
+		return cfg, err
+	}
 
 	if v := strings.TrimSpace(os.Getenv("BIRDSENSE_BOOTSTRAP_ADMIN")); v != "" {
 		addr, err := mail.ParseAddress(v)
@@ -688,7 +700,7 @@ func readAuth(cfg *config) error {
 
 	switch {
 	case len(cfg.Auth.Providers) == 0:
-		return errors.New("BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID (or _GOOGLE_) is required: outside development mode, OpenID Connect is the only way to sign in")
+		return errors.New("BIRDSENSE_OIDC_MICROSOFT_CLIENT_ID (or _GOOGLE_) is required: outside development mode, OpenID Connect is the way in that doesn't depend on mail")
 	case cfg.Auth.PublicURL == "":
 		return errors.New("BIRDSENSE_PUBLIC_URL is required: it is where the identity provider sends people back to, e.g. https://owls.eastsideaudubon.org")
 	case cfg.SessionKey == "":
@@ -696,6 +708,24 @@ func readAuth(cfg *config) error {
 	case len(cfg.SessionKey) < api.MinSessionKeyLen:
 		return fmt.Errorf("BIRDSENSE_SESSION_KEY is %d bytes long, and at least %d are required: the cookie it signs is the identity, so a guessable key is a forged session -- generate one with `openssl rand -base64 32`", len(cfg.SessionKey), api.MinSessionKeyLen)
 	}
+	return nil
+}
+
+// readMail reads where mail goes. All three settings or none: any one of them
+// on its own is a half-finished setup, better found at startup than by the
+// first volunteer who asks for a link and hears nothing.
+func readMail(cfg *config) error {
+	endpoint := os.Getenv("BIRDSENSE_MAIL_ENDPOINT")
+	key := os.Getenv("BIRDSENSE_MAIL_KEY")
+	sender := os.Getenv("BIRDSENSE_MAIL_SENDER")
+	if endpoint == "" && key == "" && sender == "" {
+		return nil
+	}
+	acs, err := email.NewACS(endpoint, key, sender)
+	if err != nil {
+		return fmt.Errorf("BIRDSENSE_MAIL_ENDPOINT, _KEY and _SENDER: %w", err)
+	}
+	cfg.Mail = acs
 	return nil
 }
 

@@ -871,6 +871,8 @@ type ExportOut struct {
 type exportLink struct {
 	Email string   `json:"e"`
 	Range mcpRange `json:"r"`
+	// Issued is when the link was made, for mayReadDetections.
+	Issued int64 `json:"i"`
 }
 
 var exportColumns = []string{
@@ -911,7 +913,7 @@ func (h *handlers) toolDetectionsExport(ctx context.Context, req *mcp.CallToolRe
 		return nil, ExportOut{}, err
 	}
 	expires := h.now().Add(exportLinkLife)
-	token := signJSON(h.oauth.exports, exportLink{Email: mcpUser(req), Range: rng}, expires)
+	token := signJSON(h.oauth.exports, exportLink{Email: mcpUser(req), Range: rng, Issued: h.now().Unix()}, expires)
 	out := ExportOut{
 		URL:       h.oauth.issuer + exportPath + "?token=" + url.QueryEscape(token),
 		ExpiresAt: expires.UTC().Truncate(time.Second),
@@ -971,7 +973,7 @@ func (h *handlers) serveMCPExport(w http.ResponseWriter, r *http.Request) {
 		h.problem(w, http.StatusUnauthorized, "that export link is unknown or has expired; ask for a new one")
 		return
 	}
-	if ok, err := h.mayReadDetections(r, link.Email); err != nil {
+	if ok, err := h.mayReadDetections(r, link.Email, time.Unix(link.Issued, 0)); err != nil {
 		h.fail(w, r, err)
 		return
 	} else if !ok {

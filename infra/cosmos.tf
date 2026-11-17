@@ -58,7 +58,7 @@ resource "azurerm_cosmosdb_sql_database" "this" {
 # Names and partition keys cannot be changed after creation without copying the
 # data to a new container, and the names are case-sensitive. They must match
 # backend/internal/db/cosmos.go. The app never creates these: it checks at
-# startup that all eight exist and exits if one is missing.
+# startup that all nine exist and exits if one is missing.
 locals {
   cosmos_containers = {
     users         = "/id"
@@ -66,9 +66,10 @@ locals {
     uploads       = "/id"
     audioFiles    = "/uploadId"
     detections    = "/uploadId"
-    cardSummaries = "/id" # one per card, read by the landing page (internal/review)
-    settings      = "/id" # the review rules, one document (internal/review)
+    cardSummaries = "/id"       # one per card, read by the landing page (internal/review)
+    settings      = "/id"       # the review rules, one document (internal/review)
     bouts         = "/uploadId" # what reviewers hear, per card (internal/review)
+    credentials   = "/id"       # passwords, one per person who has set one
   }
 }
 

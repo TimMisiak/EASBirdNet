@@ -23,6 +23,11 @@ alert_emails = ["birdsense@eastsideaudubon.org"]
 # the bill climbs on its own (DEPLOYMENT.md, Cost).
 # budget_monthly_usd = 150
 
+# Mail, for password sign-in (DEPLOYMENT.md, Email). Two applies: email_domain
+# first, then the DNS records and verification, then email_enabled.
+# email_domain  = "mail.eastsideaudubon.org"
+# email_enabled = true
+
 # Defaults, listed so they are easy to find. Uncomment to change.
 # env         = "prod"
 # location    = "westus2"

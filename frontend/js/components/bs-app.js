@@ -22,6 +22,8 @@ const SITE = "Birdsense — Eastside Audubon";
 const ROUTES = [
   { path: "/", tag: "bs-home-page", chrome: "public", title: SITE },
   { path: "/signin", tag: "bs-signin-page", chrome: "bare", title: "Sign in" },
+  // Where an emailed link lands. No guard: the link is what lets them in.
+  { path: "/signin/password", tag: "bs-password-page", chrome: "bare", title: "Choose a password" },
   // Where an LLM tool sends someone to let it read Birdsense as them (MCP).
   // The server only lets a reviewer allow it, and the page says so.
   { path: "/connect", tag: "bs-connect-page", chrome: "bare", auth: true, title: "Connect an app" },

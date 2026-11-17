@@ -177,6 +177,50 @@ func TestJSONFileConflicts(t *testing.T) {
 	}
 }
 
+func TestJSONFileCredential(t *testing.T) {
+	ctx := context.Background()
+	s, path := openTemp(t)
+
+	if _, err := s.GetCredential(ctx, "usr_a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no password yet: err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.SetCredential(ctx, "usr_a", 3, "hash"); !errors.Is(err, ErrConflict) {
+		t.Errorf("over a version that isn't there: err = %v, want ErrConflict", err)
+	}
+	first, err := s.SetCredential(ctx, "usr_a", 0, "hash one")
+	if err != nil || first.Version != 1 || first.PasswordHash != "hash one" || first.ID != "usr_a" {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	if _, err := s.SetCredential(ctx, "usr_a", 0, "hash two"); !errors.Is(err, ErrConflict) {
+		t.Errorf("a second first password: err = %v, want ErrConflict", err)
+	}
+	second, err := s.SetCredential(ctx, "usr_a", 1, "hash two")
+	if err != nil || second.Version != 2 {
+		t.Fatalf("second = %+v, %v", second, err)
+	}
+	if _, err := s.SetCredential(ctx, "usr_a", 1, "hash three"); !errors.Is(err, ErrConflict) {
+		t.Errorf("over a spent version: err = %v, want ErrConflict", err)
+	}
+
+	reopened, err := OpenJSONFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reopened.GetCredential(ctx, "usr_a"); err != nil || got.PasswordHash != "hash two" {
+		t.Errorf("after reopening = %+v, %v", got, err)
+	}
+
+	if err := s.DeleteCredential(ctx, "usr_a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCredential(ctx, "usr_a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("after deleting: err = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteCredential(ctx, "usr_a"); err != nil {
+		t.Errorf("deleting what isn't there: %v", err)
+	}
+}
+
 func TestJSONFileFailedMutateChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	s, path := openTemp(t)

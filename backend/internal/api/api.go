@@ -2,8 +2,9 @@
 // /api/v1/ so the static frontend can own every other path.
 //
 // Handlers read and write through db.Store and answer in the shapes in
-// shapes.go. Sign-in is OpenID Connect against Google and Microsoft (auth.go);
-// the roster is the allow-list behind it.
+// shapes.go. Sign-in is OpenID Connect against Google and Microsoft (auth.go),
+// or a password set through an emailed link (password.go); the roster is the
+// allow-list behind both.
 package api
 
 import (
@@ -23,6 +24,7 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
+	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
 	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
@@ -64,6 +66,9 @@ type Options struct {
 	// It is the MCP authorization server's identity and the base of every
 	// link a tool hands out, so without it the MCP endpoint isn't offered.
 	PublicURL string
+	// Mail sends password links. Nil offers no password sign-in, since nobody
+	// could set one (password.go).
+	Mail email.Sender
 }
 
 // Register mounts the API routes on mux.
@@ -71,7 +76,7 @@ func Register(mux *http.ServeMux, o Options) {
 	h := &handlers{
 		store: o.Store, files: o.Files, queue: o.Queue, deleter: o.Deleter, preparer: o.Preparer, log: o.Log, dev: o.Dev,
 		auth: o.Auth, keys: newKeyset(o.SessionKey), secureCookies: !o.Dev,
-		retention: o.Retention, now: time.Now,
+		retention: o.Retention, now: time.Now, mail: o.Mail, publicURL: strings.TrimSuffix(o.PublicURL, "/"),
 	}
 	if o.PublicURL != "" {
 		h.oauth = newOAuthServer(o.PublicURL, h.keys)
@@ -102,6 +107,7 @@ type Preparer interface {
 func register(mux *http.ServeMux, h *handlers) {
 	h.overview = newOverviewCache()
 	h.scans = make(chan struct{}, mcpScans)
+	h.passwords = newPasswordGuard(h.keys)
 
 	mux.HandleFunc("GET /api/v1/health", h.health)
 	mux.HandleFunc("GET /api/v1/ready", h.ready)
@@ -119,6 +125,16 @@ func register(mux *http.ServeMux, h *handlers) {
 	if h.auth != nil {
 		mux.HandleFunc("GET /api/v1/auth/{provider}/start", h.authStart)
 		mux.HandleFunc("GET /api/v1/auth/{provider}/callback", h.authCallback)
+	}
+
+	// Password sign-in, where there is mail to set a password with (password.go).
+	if h.mail != nil {
+		noOneHash() // now, so the first sign-in takes no longer than the rest
+		sameOrigin := http.NewCrossOriginProtection()
+		mux.Handle("POST /api/v1/auth/password", sameOrigin.Handler(http.HandlerFunc(h.passwordSignIn)))
+		mux.Handle("POST /api/v1/auth/password/link", sameOrigin.Handler(http.HandlerFunc(h.requestPasswordLink)))
+		mux.HandleFunc("GET /api/v1/auth/password/link", h.readPasswordLink)
+		mux.Handle("PUT /api/v1/auth/password", sameOrigin.Handler(http.HandlerFunc(h.setPassword)))
 	}
 
 	// Signed in, whatever the role: the recorders, which uploading a card and
@@ -252,6 +268,12 @@ type handlers struct {
 	oauth *oauthServer
 	// scans holds a slot for each MCP range read in flight (mcpScans).
 	scans chan struct{}
+	// mail sends password links, or is nil when there is no password sign-in.
+	mail email.Sender
+	// publicURL is where a browser reaches Birdsense, which those links name.
+	publicURL string
+	// passwords is what limits password sign-in. Set by register.
+	passwords *passwordGuard
 }
 
 // health is unconditionally ok: it is the liveness and startup probe, and a
@@ -381,7 +403,7 @@ func (h *handlers) getSession(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		user = personOf(me)
 	}
-	h.json(w, http.StatusOK, map[string]any{"user": user, "dev": h.dev, "providers": h.auth.Names()})
+	h.json(w, http.StatusOK, map[string]any{"user": user, "dev": h.dev, "providers": h.auth.Names(), "password": h.mail != nil})
 }
 
 // createSession is the development sign-in: pick anyone on the roster, with no
@@ -482,11 +504,23 @@ func (h *handlers) signedIn(r *http.Request) (db.User, bool, error) {
 	}
 	// An edited or expired cookie is anonymous, not an error: the browser is
 	// told to sign in again.
-	email, err := h.keys.verify(c.Value, h.now())
+	address, expires, err := h.keys.verifyExpiring(c.Value, h.now())
 	if err != nil {
 		return db.User{}, false, nil
 	}
-	return h.onRoster(r, email)
+	u, ok, err := h.onRoster(r, address)
+	if err != nil || !ok || !stillValid(u, expires.Add(-sessionLife)) {
+		return db.User{}, false, err
+	}
+	return u, true, nil
+}
+
+// stillValid says whether a session or MCP connection that began at began has
+// survived what has happened to its person since. The cookie stays a signed
+// address with nothing stored: when it was signed is worked out from its
+// expiry, and only the person's cutoff is new.
+func stillValid(u db.User, began time.Time) bool {
+	return u.SessionsValidFrom == nil || !began.Before(*u.SessionsValidFrom)
 }
 
 // requireSession rejects anonymous callers. requireRole additionally checks the
@@ -1430,8 +1464,14 @@ func (h *handlers) removePerson(w http.ResponseWriter, r *http.Request, me db.Us
 			return db.ErrNotFound
 		}
 		u.RemovedAt = &now
+		// Adding them back later reuses this document, and shouldn't bring
+		// back the sessions they had or the password they set.
+		u.SessionsValidFrom = &now
 		return nil
 	})
+	if err == nil {
+		err = h.store.DeleteCredential(r.Context(), id)
+	}
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		h.problem(w, http.StatusNotFound, msgNoSuchPerson)

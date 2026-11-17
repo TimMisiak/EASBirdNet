@@ -230,6 +230,34 @@ variable "session_key" {
   }
 }
 
+variable "email_domain" {
+  description = "The domain mail is sent from, e.g. mail.eastsideaudubon.org: a subdomain, so its SPF record is clear of the organization's own mail. Empty (the default) creates no mail resources. Our DNS is hosted outside Azure, so its records are made by hand and the domain verified before email_enabled -- see DEPLOYMENT.md, Email."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.email_domain == "" || can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.email_domain))
+    error_message = "email_domain must be a bare lowercase domain, with no scheme or trailing dot: mail.eastsideaudubon.org."
+  }
+}
+
+variable "email_enabled" {
+  description = "Link the verified email_domain and give the app its settings, which turns password sign-in on. A domain can't be linked before it is verified, so this comes one apply after email_domain -- see DEPLOYMENT.md, Email."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.email_enabled || var.email_domain != ""
+    error_message = "email_enabled needs email_domain set."
+  }
+}
+
+variable "email_data_location" {
+  description = "Where Azure Communication Services keeps its data at rest. A domain can only be linked within one geography, so both services use this. Can't be changed once created."
+  type        = string
+  default     = "United States"
+}
+
 variable "alert_emails" {
   description = "Who hears from the alert rules in monitor.tf, as email addresses. Required and with no default on purpose: a stack nobody is watching is the state this exists to fix, and a fresh apply -- a staging copy, or a rebuild -- would otherwise quietly come up unwatched. A list of one is fine."
   type        = list(string)

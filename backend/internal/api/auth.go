@@ -20,7 +20,8 @@ import (
 	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
 )
 
-// Sign-in is OpenID Connect against Google and Microsoft. The browser is sent
+// Sign-in is OpenID Connect against Google and Microsoft, or a password
+// (password.go). The browser is sent
 // to the provider by /api/v1/auth/{provider}/start and comes back to
 // .../callback with a code, which the server swaps for an ID token over its
 // own connection to the provider.
@@ -34,6 +35,8 @@ import (
 const (
 	ProviderMicrosoft = "microsoft"
 	ProviderGoogle    = "google"
+	// ProviderPassword isn't an OIDC provider, so it is never in providers.
+	ProviderPassword = "password"
 )
 
 // microsoftConsumerTenant is the tenant every personal Microsoft account
@@ -484,8 +487,11 @@ func (h *handlers) identify(ctx context.Context, p *authProvider, code string, s
 		if u.Identity == nil {
 			u.Identity = &db.Identity{Provider: p.cfg.Name, Subject: claims.Subject}
 		} else if u.Identity.Provider != p.cfg.Name || u.Identity.Subject != claims.Subject {
-			h.log.Warn("rebinding a roster identity: the provider or subject changed",
-				"email", u.Email, "was_provider", u.Identity.Provider, "now_provider", p.cfg.Name)
+			// Going back and forth with a password is ordinary, not a surprise.
+			if u.Identity.Provider != ProviderPassword {
+				h.log.Warn("rebinding a roster identity: the provider or subject changed",
+					"email", u.Email, "was_provider", u.Identity.Provider, "now_provider", p.cfg.Name)
+			}
 			u.Identity = &db.Identity{Provider: p.cfg.Name, Subject: claims.Subject}
 		}
 		// The roster keeps the name a coordinator typed; fill it in only if

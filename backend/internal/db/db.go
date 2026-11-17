@@ -50,6 +50,14 @@ type Store interface {
 	CreateUser(ctx context.Context, u User) (User, error)
 	UpdateUser(ctx context.Context, id string, mutate func(*User) error) (User, error)
 
+	// GetCredential returns someone's password; ErrNotFound if they have none.
+	GetCredential(ctx context.Context, userID string) (Credential, error)
+	// SetCredential stores hash as someone's password if their credential is
+	// still at version expect, 0 meaning they have none; ErrConflict otherwise.
+	SetCredential(ctx context.Context, userID string, expect int, hash string) (Credential, error)
+	// DeleteCredential removes someone's password, if they have one.
+	DeleteCredential(ctx context.Context, userID string) error
+
 	GetRecorder(ctx context.Context, id string) (Recorder, error)
 	// ListRecorders returns every recorder, retired ones included, sorted by id.
 	ListRecorders(ctx context.Context) ([]Recorder, error)
@@ -418,6 +426,21 @@ func stamp(created, updated *time.Time, t time.Time) {
 func (u *User) keep(old User, t time.Time) {
 	u.ID, u.CreatedAt, u.UpdatedAt = old.ID, old.CreatedAt, t
 	u.Email = normalizeEmail(u.Email)
+}
+
+func newCredential(userID, hash string, t time.Time) Credential {
+	return Credential{ID: userID, PasswordHash: hash, Version: 1, CreatedAt: t, UpdatedAt: t}
+}
+
+// replace is the one rule for changing a password: only over the version the
+// caller read, which is what makes a password link good for one use.
+func (c *Credential) replace(expect int, hash string, t time.Time) error {
+	if c.Version != expect {
+		return ErrConflict
+	}
+	c.PasswordHash, c.UpdatedAt = hash, t
+	c.Version++
+	return nil
 }
 
 func (r *Recorder) keep(old Recorder, t time.Time) {

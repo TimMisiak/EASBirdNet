@@ -73,3 +73,8 @@ output "app_identity_principal_id" {
   description = "The web app's identity, which the job's starter role is assigned to."
   value       = azurerm_user_assigned_identity.this.principal_id
 }
+
+output "email_dns_records" {
+  description = "The records to make in DNS for email_domain, for whoever runs it (DEPLOYMENT.md, Email)."
+  value       = var.email_domain != "" ? azurerm_email_communication_service_domain.this[0].verification_records : null
+}
