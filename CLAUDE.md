@@ -83,6 +83,7 @@ that accept the common birds, bouts, two listeners, the Review tab -- is
 ├── infra/              Terraform (azurerm) for the Azure resources
 ├── scripts/deploy.ps1  Build the image in ACR, apply the new tag (pwsh:
 │                    deploying runs from Windows and Linux; dev is Linux)
+├── OVERVIEW.md         The architecture for human readers, with Mermaid diagrams
 ├── SCHEMA.md           Stored documents: containers, fields, queries
 ├── THIRD_PARTY_NOTICES.md  Credits and licences (BirdNET's models are CC BY-NC-SA
 │                    4.0: non-commercial); shipped in the image

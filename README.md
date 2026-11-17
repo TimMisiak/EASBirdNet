@@ -6,6 +6,9 @@ heard, where, and when.
 A single Go binary serves both the JSON API and the static frontend, so the
 whole app runs as one self-contained container.
 
+New here? [OVERVIEW.md](OVERVIEW.md) is a tour of how the pieces fit
+together, with diagrams.
+
 ## Quick start
 
 ```sh
