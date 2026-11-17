@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 func TestParseStat(t *testing.T) {

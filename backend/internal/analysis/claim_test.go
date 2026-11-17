@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // claim puts a file in BirdNET's hands as someone else's, on a lease until

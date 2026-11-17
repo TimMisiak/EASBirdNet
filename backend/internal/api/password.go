@@ -19,8 +19,8 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/email"
 )
 
 // Password sign-in, for someone who would rather not use Google or Microsoft.

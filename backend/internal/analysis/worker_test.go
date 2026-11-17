@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // A worker analyzes what there is, publishes where it stands, and exits

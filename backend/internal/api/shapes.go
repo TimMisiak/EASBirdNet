@@ -5,8 +5,8 @@ import (
 	"time"
 	_ "time/tzdata" // the runtime image has no zoneinfo; see pacific
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/retention"
 )
 
 // These are the API's JSON shapes -- what the frontend is built against. They

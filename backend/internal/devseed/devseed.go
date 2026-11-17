@@ -15,7 +15,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 type person struct {

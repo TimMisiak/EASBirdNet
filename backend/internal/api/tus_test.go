@@ -22,9 +22,9 @@ import (
 
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/deletion"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // registeredBody is what POST /api/v1/uploads answers.

@@ -11,7 +11,7 @@ import (
 	"time"
 	_ "time/tzdata" // the runtime image has no zoneinfo
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // pacific is where the recorders are: a summary counts by the date there.

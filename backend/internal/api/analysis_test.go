@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/analysis"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/retention"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // recordingQueue is an analysis queue that only notes what it was told, and

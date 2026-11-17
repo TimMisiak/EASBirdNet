@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 func verdict(user, v string, species ...string) db.BoutVerdict {

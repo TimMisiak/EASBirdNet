@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 const ref = "OWL-20260914-SR03"

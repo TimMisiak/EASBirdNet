@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // flacFile is the start of a FLAC holding total samples of 48 kHz 16-bit

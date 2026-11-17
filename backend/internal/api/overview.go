@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/review"
 )
 
 // overview reads what the public landing page shows: three program figures and

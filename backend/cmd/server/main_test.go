@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/api"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/devseed"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/api"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/devseed"
+	"github.com/EASBirdSense/BirdSense/backend/internal/email"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 const testBlobEndpoint = "https://stbirdsense.blob.core.windows.net"

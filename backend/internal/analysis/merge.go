@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"slices"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
 )
 
 // BirdNET scores a file in 3-second windows, so a bird calling for a minute is

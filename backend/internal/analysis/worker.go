@@ -9,8 +9,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // The queue run as a job (ANALYSIS.md, *The job*): a worker replica claims

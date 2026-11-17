@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // Launcher starts analysis workers somewhere else: executions of a Container

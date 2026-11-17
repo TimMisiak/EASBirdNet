@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // maxListeners is how many people hear a bout: three verdicts that settle

@@ -15,8 +15,8 @@ import (
 	tushandler "github.com/tus/tusd/v2/pkg/handler"
 	expslog "golang.org/x/exp/slog"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // tusPath is where browsers send card audio, one file per upload, over the

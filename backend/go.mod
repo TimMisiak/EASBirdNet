@@ -1,4 +1,4 @@
-module github.com/ngaitonde/EASBirdNet/backend
+module github.com/EASBirdSense/BirdSense/backend
 
 go 1.26.0
 

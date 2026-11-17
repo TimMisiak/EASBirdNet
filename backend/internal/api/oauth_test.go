@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // testPublicURL is where the test server says it is: the issuer, and the base

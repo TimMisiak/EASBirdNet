@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // testRules accept crows over 0.5, review owls over 0.25, and review anything

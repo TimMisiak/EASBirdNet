@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/deletion"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/email"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/retention"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/analysis"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/deletion"
+	"github.com/EASBirdSense/BirdSense/backend/internal/email"
+	"github.com/EASBirdSense/BirdSense/backend/internal/retention"
+	"github.com/EASBirdSense/BirdSense/backend/internal/review"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // sessionCookie carries the signed-in person's email, signed with the server's

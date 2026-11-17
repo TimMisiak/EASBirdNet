@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/review"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 var testNow = time.Date(2026, time.September, 14, 18, 0, 0, 0, time.UTC)

@@ -50,11 +50,11 @@ import (
 	"time"
 	_ "time/tzdata" // the runtime image has no zoneinfo
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/review"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/perf"
+	"github.com/EASBirdSense/BirdSense/backend/internal/review"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // Analyzer is what runs BirdNET and cuts clips: birdnet.Analyzer, or a fake in

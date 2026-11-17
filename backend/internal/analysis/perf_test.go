@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/perf"
 )
 
 // With a recorder set, each pass over a file is one task record, saying what

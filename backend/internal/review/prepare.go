@@ -7,7 +7,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // Preparation is the preparation Prepare gives a card

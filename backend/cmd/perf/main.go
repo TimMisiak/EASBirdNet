@@ -24,7 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
+	"github.com/EASBirdSense/BirdSense/backend/internal/perf"
 )
 
 func main() {

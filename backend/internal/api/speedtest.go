@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 // speedTestMaxBytes is the most one speed-test request may carry. The browser

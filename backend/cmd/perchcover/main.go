@@ -44,7 +44,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
 )
 
 // saved is what -out writes and -in reads: both runs, and each file's length.

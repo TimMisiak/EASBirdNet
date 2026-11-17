@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
 )
 
 func det(start, end float64, scientific, common string, confidence float64) birdnet.Detection {

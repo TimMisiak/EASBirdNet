@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // A Sink is where records go, one JSON object per line.

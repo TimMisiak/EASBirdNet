@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/analysis"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/storage"
+	"github.com/EASBirdSense/BirdSense/backend/internal/analysis"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/storage"
 )
 
 // defaultWorkerIdle is how long a worker waits with nothing to claim before

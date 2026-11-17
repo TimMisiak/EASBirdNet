@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/db"
+	"github.com/EASBirdSense/BirdSense/backend/internal/db"
 )
 
 var boutCard = db.Upload{ID: card, RecorderID: "SW-01"}

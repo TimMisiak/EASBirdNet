@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ngaitonde/EASBirdNet/backend/internal/birdnet"
-	"github.com/ngaitonde/EASBirdNet/backend/internal/perf"
+	"github.com/EASBirdSense/BirdSense/backend/internal/birdnet"
+	"github.com/EASBirdSense/BirdSense/backend/internal/perf"
 )
 
 // runBench runs the model over files once per combination of workers and
