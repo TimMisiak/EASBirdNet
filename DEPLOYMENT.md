@@ -534,7 +534,14 @@ it, regenerate the primary key in the portal and apply.
 email_domain = "mail.eastsideaudubon.org"
 ```
 
-A subdomain, so that its SPF record is clear of the organization's own mail. Apply,
+A subdomain, so that its SPF record is clear of the organization's own mail. The
+apply also registers the `Microsoft.Communication` resource provider on the
+subscription (`resource_providers_to_register` in `infra/versions.tf`): azurerm
+doesn't register it on its own, and without it the email service fails with a 409,
+`MissingSubscriptionRegistration`. Registering needs `*/register/action` on the
+subscription, which Contributor and Owner have. If whoever runs the apply has
+less, someone who has it runs
+`az provider register --namespace Microsoft.Communication` once. Apply,
 then read what DNS needs:
 
 ```sh

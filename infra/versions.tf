@@ -27,6 +27,14 @@ provider "azurerm" {
   # authenticate its data-plane calls (creating the `audio` container) as the
   # signed-in principal. See azurerm_role_assignment.operator_blob in storage.tf.
   storage_use_azuread = true
+
+  # azurerm v4 registers only its "core" set of resource providers, and that
+  # set leaves out Azure Communication Services (email.tf), so a subscription
+  # that has never used it refuses the email service with a 409,
+  # MissingSubscriptionRegistration. Registering a provider is per subscription,
+  # costs nothing, and the provider skips it once it's done, so it's named here
+  # whether or not email_domain is set.
+  resource_providers_to_register = ["Microsoft.Communication"]
 }
 
 data "azurerm_client_config" "current" {}
